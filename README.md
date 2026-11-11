@@ -6,7 +6,22 @@
 [![Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen?style=flat-square)](widget.css)
 [![Bilingual](https://img.shields.io/badge/Languages-English%20%7C%20Hindi%20(en--IN%20%2F%20hi--IN)-orange?style=flat-square)](voice.js)
 [![Privacy](https://img.shields.io/badge/Privacy-Zero%20Password%20Capture-red?style=flat-square)](explain.js)
+[![Demo Video](https://img.shields.io/badge/Demo%20Video-Google%20Drive-red?style=flat-square&logo=googledrive)](https://drive.google.com/drive/folders/1Q9A8rml4AuczycImQmk1X-EUSb0Usa1q?usp=sharing)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-vatsalpro%2Fsleep-181717?style=flat-square&logo=github)](https://github.com/vatsalpro/sleep)
+
+---
+
+## 📺 Demo Video
+
+Watch the complete prototype walkthrough and demonstration video:
+🎥 **[Watch Sleepwalker Video Demo on Google Drive](https://drive.google.com/drive/folders/1Q9A8rml4AuczycImQmk1X-EUSb0Usa1q?usp=sharing)**
+
+Highlights covered in the demo:
+- **Wispr-Flow Floating Pill:** Seamless drag-and-drop, real-time equalizer wave animations, companion bubble.
+- **Signature "Explain This Page":** Full-screen prism glow edge overlay with center readability mask.
+- **Sentence-by-Sentence Speech:** Dynamic active sentence highlighting in English and Hindi.
+- **Strict DOM Privacy:** Form inputs, textareas, and `<input type="password">` fields strictly excluded.
+- **Side Panel Settings:** Local-Only Mode, Ollama connection testing, and microphone setup diagnostics.
 
 ---
 
