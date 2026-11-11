@@ -1,5 +1,5 @@
-# 🌙 Sleepwalker - Wispr-Flow Voice Assistant for Accessible Web
-**CodeQuest National Tech Hackathon 2026 • Manifest V3 Chrome Extension (Plain JavaScript, HTML & CSS — Zero Build Step)**
+# 🌙 Sleepwalker - Voice Web Assistant
+**Wispr-Flow Style Voice Assistant for Accessible Web • Manifest V3 Chrome Extension (Plain JavaScript, HTML & CSS — Zero Build Step)**
 
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-success?style=flat-square&logo=googlechrome)](manifest.json)
 [![Zero Build Step](https://img.shields.io/badge/Build%20Step-Zero%20(Pure%20Vanilla%20JS)-blue?style=flat-square)](background.js)
@@ -10,25 +10,26 @@
 
 ---
 
-## 🎯 Executive Summary & Problem Statement
+## 🎯 What Sleepwalker Does
 
-Millions of low-vision, low-literacy, and elderly citizens struggle to navigate complex digital public services — from state scholarship portals and pension schemes to admissions forms. These pages are often walls of bureaucratic text with buried deadlines, complex fee structures, and required document checklists.
+Millions of low-vision, low-literacy, and elderly users struggle to navigate complex digital public services — such as state scholarship portals, welfare schemes, and university admissions. These pages are often walls of bureaucratic text with buried deadlines, complex fee structures, and required document checklists.
 
-**Sleepwalker** turns every webpage into an intuitive, voice-first experience:
-1. **Always-On Floating Pill:** A compact, non-intrusive floating pill (Wispr Flow style) rests at the bottom-right of every webpage.
-2. **Signature "Explain This Page":** In one click or voice command (*"Explain this page"* or *"पेज समझाओ"*), Sleepwalker extracts the essential purpose, fees, dates, and required documents into a clear, simple summary under 120 words.
-3. **Full-Screen Prism Glow:** While the assistant listens and processes, the entire screen borders illuminate in a soft, transparent prism glow (cyan, violet, pink, amber) that blooms bright when the answer is ready, leaving the central 72% of the page completely transparent and readable.
-4. **Sentence-by-Sentence Highlight:** Speech synthesis highlights each sentence as it speaks aloud in English (`en-IN`) or Hindi (`hi-IN`).
+**Sleepwalker** turns any website into an intuitive, voice-controlled assistive experience:
+1. **Always-On Floating Pill:** A compact, non-intrusive floating pill (Wispr Flow style) rests at the bottom-right of every webpage. Draggable anywhere, with position remembered across reloads.
+2. **Signature "Explain This Page":** In one click or voice command (*"Explain this page"* or *"पेज समझाओ"*), Sleepwalker extracts the essential purpose, fees, dates, and required documents into a clear summary under 120 words.
+3. **Full-Screen Prism Glow:** While listening or preparing, screen borders illuminate in a soft, transparent prism glow (cyan, violet, pink, amber) that blooms bright when the answer is ready, leaving the central 72% of the page completely transparent and readable.
+4. **Sentence-by-Sentence Speech & Highlighting:** Speech synthesis highlights each sentence as it speaks aloud in English (`en-IN`) or Hindi (`hi-IN`).
 5. **Strict DOM Privacy:** User passwords, text fields, and form inputs are **100% stripped and excluded**. Credentials are never read aloud or transmitted.
+6. **Hallucination Validator:** Numbers, amounts, and dates in the model's answer are strictly cross-referenced against the page text. Hallucinated sentences are automatically dropped.
 
 ---
 
-## 📁 Project Structure
+## 📁 Repository Structure
 
 ```text
-sleepwalker/ (D:\sleep)
-├── manifest.json       # Manifest V3 (activeTab, scripting, storage, offscreen)
-├── background.js       # Service worker: toggle, script injector, LLM cascade & offscreen manager
+sleepwalker/
+├── manifest.json       # Manifest V3 configuration (activeTab, scripting, storage, offscreen)
+├── background.js       # Service worker: toggle, script injection, LLM cascade & offscreen manager
 ├── content.js          # In-page bootstrap, Alt+S & Alt+Z Hold-to-Talk key listener
 ├── widget.js           # Shadow DOM UI controller, settings, and module orchestrator
 ├── widget.css          # Encapsulated styles: pill, glow animations, bubble, high contrast
@@ -54,63 +55,54 @@ sleepwalker/ (D:\sleep)
 
 ---
 
-## ⏱️ 2-Minute Judge Demo Script
+## 🚀 Step-by-Step Installation Guide
 
-> **Judge Hook:** *"Judges, navigating government portals is difficult for elderly or visually impaired citizens. Let me show you how Sleepwalker makes any confusing website accessible in under 10 seconds."*
+Sleepwalker is built entirely with plain vanilla JavaScript, HTML, and CSS. It requires **no build step, no bundler, no npm install, and no TypeScript compilation**. It installs directly in Chrome in under 30 seconds.
 
-### Step 1: Show the Always-Available Floating Pill (0:00 - 0:25)
-1. Open Chrome and navigate to the benchmark test portal:
-   `http://localhost:8000/test-sample.html`
-2. Point out the bottom-right corner:
-   *"Notice the floating pill. It sits on the page without shifting the layout or triggering CSP warnings because it's completely isolated in an open Shadow DOM. You can drag it anywhere and Chrome remembers its position across reloads."*
+### Step 1: Clone or Download the Repository
+Open a terminal and clone the repository:
+```bash
+git clone https://github.com/vatsalpro/sleep.git
+```
+*(Alternatively, download the ZIP archive from GitHub and extract it to a local folder, e.g. `D:\sleep`).*
 
-### Step 2: Signature "Explain This Page" & Prism Glow (0:25 - 1:00)
-1. Click the pill to expand the companion bubble, then click **"✨ Explain"** (or press <kbd>Alt+Z</kbd> and say *"Explain this page"*):
-   *"Watch the screen borders: 4 soft prism color blobs drift smoothly along the edges. Notice how the center of the screen stays 100% transparent and readable thanks to a radial gradient cutout mask."*
-2. After processing, the glow blooms bright for 600ms, transitions to calm breathing, and Sleepwalker reads the summary aloud sentence-by-sentence with visual highlighting:
-   *"Sleepwalker extracted the core purpose, the 1,200 INR fee, the January 15 deadline, and required documents. The source badge clearly marks whether this came from Cloud Gemini, Local Ollama, or our Offline Basic Summary."*
-
-### Step 3: Strict DOM Privacy Verification (1:00 - 1:25)
-1. Scroll down to the **Applicant Portal Sign-in Form**:
-   *"Notice there is a login form with an applicant name and a password field with a secret password. Sleepwalker's Safe Text Extractor explicitly skips all input, textarea, and password fields. Passwords and personal data are NEVER captured, read aloud, or sent to AI models."*
-
-### Step 4: Bilingual Hindi Support & Full Side Panel (1:25 - 1:45)
-1. Press <kbd>Alt+S</kbd> to slide open the full assistant side panel.
-2. Click **"🇮🇳 EN"** to switch to **"🇮🇳 HI"** (Hindi).
-3. Click **"📑 Outline"** or say *"आउटलाइन"*:
-   Sleepwalker lists all 6 headings in the sidebar with 1-click read buttons for low-vision users.
-
-### Step 5: Wrap-up & Architecture (1:45 - 2:00)
-*"Sleepwalker has zero build step, zero npm runtime dependencies, runs completely unpacked in Chrome Manifest V3, and supports both Cloud Gemini and 100% local Ollama with offline fallback."*
-
----
-
-## 🚀 Installation Guide
-
-1. Open **Google Chrome** (or Edge / Brave).
-2. Navigate to `chrome://extensions`.
-3. Toggle ON **Developer mode** in the top-right corner.
-4. Click **Load unpacked** in the top-left corner.
-5. Select the project directory:
+### Step 2: Open Extensions in Google Chrome
+1. Open **Google Chrome** (or Microsoft Edge, Brave, or any Chromium-based browser).
+2. In the address bar, type:
    ```text
-   D:\sleep
+   chrome://extensions
    ```
-6. The **Sleepwalker - Voice Web Assistant** card will appear immediately.
-7. Click the Chrome Extensions puzzle icon and **Pin** Sleepwalker to your toolbar.
+   and press Enter.
 
-> [!TIP]
-> If testing on local HTML files via `file:///`, click **Details** on the Sleepwalker extension card in `chrome://extensions` and turn ON **"Allow access to file URLs"**.
-> Testing on any HTTP/HTTPS site (like Wikipedia or our local test server at `http://localhost:8000/test-sample.html`) works out of the box with zero extra steps.
+### Step 3: Enable Developer Mode
+1. In the top-right corner of the Extensions page, locate the toggle labeled **"Developer mode"**.
+2. Turn this toggle **ON**. Additional toolbar buttons (*Load unpacked*, *Pack extension*, *Update*) will appear on the top-left.
+
+### Step 4: Load the Unpacked Extension
+1. Click the **"Load unpacked"** button in the top-left corner.
+2. In the folder picker dialog, select the cloned `sleep` folder (e.g. `D:\sleep`).
+3. Click **Select Folder**.
+4. The extension card **"Sleepwalker - Voice Web Assistant"** will appear immediately with its full feature set active.
+
+### Step 5: Pin the Extension to Chrome Toolbar
+1. Click the **puzzle piece icon** (Extensions menu) in Chrome's top toolbar.
+2. Find **Sleepwalker** in the list and click the **Pin** icon next to it so the moon icon (`🌙`) is always visible.
+
+### Step 6: (Optional) Allow Access to File URLs
+If you plan to test Sleepwalker on local HTML files (like `file:///D:/sleep/test-sample.html`):
+1. On the `chrome://extensions` page, click **Details** on the Sleepwalker card.
+2. Scroll down and toggle ON **"Allow access to file URLs"**.
+*(Note: On regular websites like Wikipedia or any live portal, Sleepwalker works immediately without this step).*
 
 ---
 
-## 🧠 Architecture & AI Cascade
+## 🤖 Detailed AI Model Setup Guide
 
-Sleepwalker implements an enterprise-grade 4-step cascade inside the background service worker:
+Sleepwalker supports **three flexible AI execution modes**. You can use 100% private local offline models, high-speed cloud models via a secure proxy, or the built-in offline extractive fallback with zero setup.
 
 ```mermaid
 flowchart TD
-    A["User triggers 'Explain This Page'"] --> B["Safe DOM Extraction (Stripping Inputs & Passwords)"]
+    A["User triggers 'Explain This Page'"] --> B["Safe DOM Extraction (Filters Out Form Inputs & Passwords)"]
     B --> C{"Check In-Memory Cache (URL + Section + Lang)"}
     C -- Hit --> D["Return Cached Answer (0ms)"]
     C -- Miss --> E{"Local-Only Mode Enabled?"}
@@ -125,67 +117,179 @@ flowchart TD
     I --> J
 ```
 
-### 1. Safe Text Extraction & Privacy Guard
-- Extracts visible content from `<main>`, `<article>`, `[role=main]`, or body.
-- Strictly ignores `nav`, `footer`, `header`, `script`, `style`, `noscript`, and `iframe`.
-- **Absolute Privacy Rule:** All `input`, `textarea`, `select`, `button`, and `password` nodes are stripped. Passwords or entered text cannot be leaked.
+---
 
-### 2. Hallucination Validator
-- Normalizes Devanagari numerals (`०-९`) to standard ASCII digits (`0-9`).
-- Scans model output for numbers, currency figures, and dates.
-- Cross-references every number against the source page text. If a model hallucinates a date or fee (e.g. inventing *"fee is 5,000 INR"* when the page states 1,200 INR), the invalid sentence is dropped or the system falls back to the deterministic offline summary.
+### Option A: Local Ollama (Recommended — 100% Private, Free & Offline)
 
-### 3. Serverless Proxy (`/proxy`)
-- Cloudflare Worker (`proxy/worker.js`) and Vercel function (`proxy/api/explain.js`).
-- Never exposes the `GEMINI_API_KEY` on the client.
-- Rate-limited per IP (30 requests/minute) with CORS restricted to Chrome extensions.
-- Zero-logging architecture: user page text is never written to server logs.
+Running Ollama on your computer allows Sleepwalker to generate explanations locally. **No data ever leaves your computer, zero internet connection is required for AI, and there are no API costs or quotas.**
+
+#### Step 1: Install Ollama
+Download and install Ollama for your operating system:
+- **Windows / macOS / Linux:** Download from **[https://ollama.com/download](https://ollama.com/download)**.
+- Follow the standard installer instructions.
+
+#### Step 2: Download the Recommended Model
+Open your terminal (PowerShell, Command Prompt, or Terminal) and run:
+```bash
+ollama run llama3.2:3b
+```
+> **Tip:** The `llama3.2:3b` model (~2 GB) is optimized for high-speed edge reasoning and fits easily into system RAM or laptop GPUs. You can also use other models such as `qwen2.5:3b`, `qwen2.5:1.5b`, or `phi3:mini`.
+
+#### Step 3: Verify Ollama is Running
+Ensure the Ollama background service is active by testing its HTTP endpoint in your terminal or browser:
+```bash
+curl http://localhost:11434/api/tags
+```
+If you see JSON containing `"models": [...]`, Ollama is running and ready.
+
+#### Step 4: Configure Sleepwalker
+1. Open any webpage and press <kbd>Alt+S</kbd> (or click the toolbar icon) to slide open the Sleepwalker side panel.
+2. Scroll to the **⚙️ AI & Prism Glow Settings** card.
+3. Check the box for **"Local-Only Mode (Skip Cloud Gemini; use Ollama/Offline)"**.
+4. Confirm the fields:
+   - **Local Ollama URL:** `http://localhost:11434`
+   - **Ollama Model Name:** `llama3.2:3b`
+5. Click **"🔌 Test Connection"**.
+   - Chrome will show a one-time runtime permission dialog requesting access to `http://localhost:11434/*`. Click **Allow**.
+   - You will see a green badge: `✅ Local Ollama online! Available models: llama3.2:3b`.
+6. Click **"💾 Save Settings"**.
 
 ---
 
-## 🎙️ Microphone Architecture & Honest Findings
+### Option B: Cloud Gemini via Serverless Proxy (Fastest & Highest Quality)
 
-### Chromium MV3 Offscreen Evaluation
-- **What We Tested:** We created an extension onboarding page (`mic-setup.html`) requesting `getUserMedia` to store permission for the extension origin, and built `offscreen.html` / `offscreen.js` with `chrome.offscreen` (reason: `USER_MEDIA`) to test extension-wide speech recognition.
-- **Honest Finding for Judges:** In current stable Chromium builds, `webkitSpeechRecognition` fails or is blocked inside headless offscreen documents (Chromium Issue 1423238: Web Speech API requires an active, focused render window with a direct user gesture). Additionally, extension origin permissions do not bypass cross-origin security on external websites.
-- **Our Dual Architecture Solution:**
-  1. Sleepwalker probes offscreen recognition, but seamlessly falls back to **per-site content-script recognition**.
-  2. When a user activates voice on a new website, Chrome displays the standard permission prompt once for that site. Chrome remembers the permission permanently for that origin.
-  3. **100% Typed Input Fallback:** A dedicated command input is built into both the floating pill companion bubble and the full side panel, ensuring full functionality even in noisy rooms or restricted environments.
-  4. **Microphone Setup & Diagnostics (`mic-setup.html`):** Users and judges can visit `mic-setup.html` anytime to test microphone hardware with a real-time Web Audio volume visualizer and device enumeration.
+For ultra-low latency and superior Hindi fluency, Sleepwalker can call Google's **Gemini 1.5 Flash** model. 
+
+> [!IMPORTANT]
+> **Why use a Serverless Proxy?**
+> Chrome extension packages are distributed as plain JavaScript. Hardcoding an API key inside client extension files exposes it to anyone who inspects DevTools or unzips the CRX. The proxy securely holds the `GEMINI_API_KEY` on your own serverless worker, rate-limits requests per IP, restricts CORS to Chrome extensions, and never logs user page text.
+
+#### Step 1: Get a Free Gemini API Key
+1. Visit **[Google AI Studio](https://aistudio.google.com/app/apikey)**.
+2. Sign in with your Google account.
+3. Click **"Create API Key"**.
+4. Copy your generated key (`AIzaSy...`).
+*(The Google AI Studio free tier provides 15 requests per minute with no credit card required).*
+
+#### Step 2: Deploy the Serverless Proxy
+
+##### Sub-option 1: Deploy to Cloudflare Workers (Recommended — Free 100k requests/day)
+1. Open a terminal and navigate to the `proxy` folder:
+   ```bash
+   cd proxy
+   ```
+2. Install the Cloudflare CLI tool (Wrangler):
+   ```bash
+   npm install -g wrangler
+   ```
+3. Log in to your Cloudflare account:
+   ```bash
+   wrangler login
+   ```
+4. Set your Gemini API key as a secure secret:
+   ```bash
+   wrangler secret put GEMINI_API_KEY
+   ```
+   *(Paste your API key when prompted).*
+5. Deploy the worker:
+   ```bash
+   wrangler deploy worker.js --name sleepwalker-proxy
+   ```
+6. Wrangler will output your live URL, for example:
+   ```text
+   https://sleepwalker-proxy.<your-subdomain>.workers.dev
+   ```
+
+##### Sub-option 2: Deploy to Vercel (Alternative)
+1. Navigate to the `proxy` folder:
+   ```bash
+   cd proxy
+   ```
+2. Deploy using Vercel CLI:
+   ```bash
+   npm install -g vercel
+   vercel
+   ```
+3. In the Vercel Project Settings dashboard, add Environment Variables:
+   - `GEMINI_API_KEY`: Your Gemini API key
+   - `GEMINI_MODEL`: `gemini-1.5-flash-latest`
+4. Your endpoint will be `https://<your-project>.vercel.app/api/explain`.
+
+#### Step 3: Connect the Proxy to Sleepwalker
+1. Open the Sleepwalker side panel with <kbd>Alt+S</kbd>.
+2. In **⚙️ AI & Prism Glow Settings**, paste your proxy URL into the **Cloud Serverless Proxy URL** field.
+3. Click **"🔌 Test Connection"** and allow the permission prompt.
+4. Click **"💾 Save Settings"**.
 
 ---
 
-## 🗣️ Bilingual Voice & Typed Commands
+### Option C: Built-in Offline Extractive Fallback (Zero Setup Required)
 
-| Action | English Voice Command | Hindi Voice Command |
+If neither Ollama nor a Cloud Proxy is configured, Sleepwalker **works immediately out of the box with zero external dependencies**:
+- Analyzes document semantic roots (`<main>`, `<article>`, `[role=main]`).
+- Extracts headings and identifies document structure.
+- Applies localized regex patterns to detect:
+  - **Fees & Amounts:** e.g. `1,200 INR`, `₹50`, `$50 USD`
+  - **Deadlines & Dates:** e.g. `January 15, 2027`, `31 October`
+  - **Required Documents:** e.g. `domicile certificate`, `marks sheets`, `income certificate`
+- Formulates a concise 3–5 sentence explanation in English or Hindi in **0 milliseconds with zero network requests**.
+- The output is clearly marked with: `[Source: basic summary]`.
+
+---
+
+## ⌨️ How to Use Every Feature
+
+### 1. The Floating Pill (Wispr-Flow Style)
+- **Always Visible:** The round 56px pill rests at the bottom-right of every webpage.
+- **Draggable:** Click and drag the pill to any position on the screen. Its coordinates are saved per-site.
+- **Equalizer Sound Bars:** Animated equalizer waves pulse green when speaking and amber when preparing.
+- **Companion Bubble:** Click the pill to open the bubble. From here, you can:
+  - Type a command and press Enter.
+  - Click **"✨ Explain"** to analyze the page.
+  - Click **"⏹️ Stop"** to cancel reading or processing.
+  - Click **"Expand"** to slide open the full side panel.
+
+### 2. Click-to-Talk & Hold-to-Talk
+- **Click-to-Talk:** Click the microphone icon on the pill or panel. Speak your command. If you pause for 2 seconds, Sleepwalker auto-commits and executes your command.
+- **Hold-to-Talk (<kbd>Alt+Z</kbd>):** Hold down <kbd>Alt+Z</kbd> on any webpage, speak your command, and release the keys to execute instantly.
+- **Emergency Stop (<kbd>Escape</kbd>):** Press <kbd>Escape</kbd> at any time to immediately abort speech synthesis, stop voice recognition, and turn off prism glow.
+
+### 3. Full Side Panel (<kbd>Alt+S</kbd>)
+Press <kbd>Alt+S</kbd> or click the toolbar icon to access:
+- **Language Switch:** Toggle between **🇮🇳 EN** (English - India) and **🇮🇳 HI** (Hindi - India).
+- **Text Size Controls:** Switch between 18px, 22px, and 26px for high-legibility viewing.
+- **Speech Speed Controls:** Adjust reading speed (0.8x slow, 1.0x normal, 1.2x fast).
+- **Outline View:** Click **"📑 Outline"** to extract all headings with 1-click read buttons.
+- **Microphone Setup (`🎙️ Setup`):** Launches `mic-setup.html` with real-time Web Audio input meters.
+
+---
+
+## 🗣️ Bilingual Voice & Typed Commands Reference
+
+| Action | English Spoken / Typed Command | Hindi Spoken / Typed Command |
 | :--- | :--- | :--- |
-| **Explain Page** | *"Explain this page"*, *"Explain"* | *"पेज समझाओ"*, *"सरल भाषा में बताओ"* |
-| **Explain Section** | *"Explain the fees section"* | *"फीस सेक्शन समझाओ"* |
-| **Read Entire Page** | *"Read this page"*, *"Start reading"* | *"यह पेज पढ़ो"*, *"सुनाओ"* |
-| **Read Section** | *"Read the eligibility section"* | *"योग्यता पढ़ो"* |
-| **Show Outline** | *"Outline"*, *"Show headings"* | *"आउटलाइन"*, *"रूपरेखा"* |
-| **Pause / Resume** | *"Pause"* / *"Resume"* | *"रोको"* / *"आगे पढ़ो"* |
-| **Stop** | *"Stop"*, *"Cancel"* | *"बंद करो"*, *"शांत"* |
-| **Repeat** | *"Read it again"*, *"Repeat"* | *"फिर से पढ़ो"*, *"दोहराओ"* |
-| **Help** | *"Help"*, *"What can you do"* | *"मदद"*, *"सहायता"* |
+| **Explain Page** | `"Explain this page"`, `"Explain"` | `"पेज समझाओ"`, `"सरल भाषा में बताओ"` |
+| **Explain Section** | `"Explain the fees section"` | `"फीस सेक्शन समझाओ"` |
+| **Read Entire Page** | `"Read this page"`, `"Start reading"` | `"यह पेज पढ़ो"`, `"सुनाओ"` |
+| **Read Specific Section** | `"Read the eligibility section"` | `"योग्यता पढ़ो"` |
+| **Show Headings** | `"Outline"`, `"Show headings"` | `"आउटलाइन"`, `"रूपरेखा"` |
+| **Pause Speech** | `"Pause"`, `"Wait"` | `"रोको"`, `"पॉज़"` |
+| **Resume Speech** | `"Resume"`, `"Continue"` | `"आगे पढ़ो"`, `"जारी रखो"` |
+| **Stop Speech** | `"Stop"`, `"Cancel"` | `"बंद करो"`, `"शांत"` |
+| **Repeat From Start** | `"Read it again"`, `"Repeat"` | `"फिर से पढ़ो"`, `"दोहराओ"` |
+| **Help & Instructions** | `"Help"`, `"Commands"` | `"मदद"`, `"सहायता"` |
 
 ---
 
-## ⚙️ Configuration & Side Panel Settings
+## 🔒 Privacy & Security Guarantees
 
-Open the assistant with <kbd>Alt+S</kbd> to configure:
-1. **Full-Screen Prism Glow:** Toggle on/off to enable or disable edge glow animations.
-2. **Local-Only Mode:** Check to skip Cloud Gemini entirely and force Sleepwalker to use Local Ollama (`http://localhost:11434`) or Offline Summaries.
-3. **Cloud Proxy URL:** Enter your deployed Cloudflare Worker or Vercel proxy URL.
-4. **Ollama URL & Model:** Configure custom endpoint (default: `http://localhost:11434`, model: `llama3.2:3b`).
-5. **Test Connection Button:** Verifies connectivity to Ollama or Proxy and dynamically requests `optional_host_permissions` at runtime.
+1. **Zero Form or Password Capture:** Sleepwalker's Safe Text Extractor explicitly drops all `input`, `textarea`, `select`, `button`, and `input[type="password"]` elements. Form values and credentials are never read aloud, highlighted, or transmitted.
+2. **Encapsulated Shadow DOM:** All extension UI elements, animations, and styles reside inside an isolated Shadow DOM (`#sleepwalker-host`), preventing CSS conflicts and ensuring no page layout shifts.
+3. **No External Scripts:** Does not load any remote JavaScript or analytics scripts. Strictly complies with Chrome Manifest V3 security boundaries.
+4. **Transient Zero-Log Proxy:** The `/proxy` serverless code acts solely as a stateless pass-through to the Gemini API and never writes user page text to disks or database logs.
 
 ---
 
-## ⚖️ Honest Disclosures & Credits
+## ⚖️ Open Source & License
 
-- **Hackathon:** Developed for CodeQuest National Tech Hackathon 2026.
-- **No Remote Code:** Strictly adheres to Chrome Web Store Manifest V3 policies. Zero `eval()`, zero remote JavaScript downloads, zero third-party analytics.
-- **AI Assistance Disclosure:** Architectural planning and code generation were assisted by Google DeepMind's Advanced Agentic Coding environment (Antigravity). All code has been rigorously debugged, verified, and syntax-checked.
-- **Hardware Limitations:** Microphone audio capture and SpeechSynthesis audio generation depend on host OS audio drivers and microphone permissions.
+Developed for the **CodeQuest National Tech Hackathon 2026**. Distributed under the open-source MIT License.
