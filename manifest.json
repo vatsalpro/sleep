@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Sleepwalker - Voice Web Assistant",
+  "version": "1.0.0",
+  "description": "Voice-controlled side widget for low-vision and elderly users to read web pages aloud and navigate by voice.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "offscreen"
+  ],
+  "optional_host_permissions": [
+    "http://localhost:11434/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Sleepwalker (Alt+S)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      }
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "reader.js",
+        "outline.js",
+        "voice.js",
+        "pill.js",
+        "glow.js",
+        "explain.js",
+        "widget.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "widget.css",
+        "mic-setup.html"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

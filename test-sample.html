@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sleepwalker Extension - Test Benchmark Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+      line-height: 1.7;
+      max-width: 860px;
+      margin: 30px auto;
+      padding: 0 20px;
+      color: #222222;
+      background-color: #FAFAFA;
+    }
+    .test-banner {
+      background: linear-gradient(135deg, #1A1A24, #2A2A38);
+      color: #FFFFFF;
+      border: 2px solid #FFD600;
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    }
+    .test-banner-text {
+      font-size: 17px;
+      line-height: 1.5;
+    }
+    .test-banner-text strong {
+      color: #FFD600;
+    }
+    .test-banner kbd {
+      background: #383848;
+      border: 1px solid #777;
+      border-radius: 4px;
+      padding: 3px 8px;
+      color: #00E5FF;
+      font-weight: bold;
+    }
+    header {
+      border-bottom: 2px solid #E0E0E0;
+      padding-bottom: 16px;
+      margin-bottom: 28px;
+    }
+    h1 { color: #0D47A1; font-size: 32px; margin-bottom: 8px; }
+    h2 { color: #1565C0; font-size: 24px; margin-top: 32px; border-bottom: 1px solid #E0E0E0; padding-bottom: 6px; }
+    h3 { color: #1976D2; font-size: 20px; margin-top: 24px; }
+    p { font-size: 18px; margin: 12px 0; }
+    ul { font-size: 18px; line-height: 1.8; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+      background: #FFFFFF;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    }
+    caption {
+      font-weight: bold;
+      font-size: 19px;
+      margin-bottom: 8px;
+      text-align: left;
+      color: #0D47A1;
+    }
+    th, td {
+      border: 1px solid #CCCCCC;
+      padding: 12px 14px;
+      text-align: left;
+      font-size: 17px;
+    }
+    th {
+      background-color: #E3F2FD;
+      color: #0D47A1;
+      font-weight: 700;
+    }
+    tr:nth-child(even) {
+      background-color: #F8F9FA;
+    }
+    .badge {
+      background: #E8F5E9;
+      color: #2E7D32;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Test Instructions Banner -->
+  <div class="test-banner" role="banner">
+    <div class="test-banner-text">
+      <strong>🌙 Sleepwalker Active Test Page:</strong><br>
+      Press <kbd>Alt+S</kbd> or click the <strong>Sleepwalker icon</strong> in the Chrome toolbar to slide open the voice assistant.
+    </div>
+  </div>
+
+  <!-- Navigation bar (Sleepwalker should ignore this when reading content) -->
+  <nav aria-label="Main Navigation" style="background:#ECEFF1; padding: 12px; margin-bottom: 24px; border-radius: 6px;">
+    <strong>Navigation Menu:</strong> Home | Courses | Admissions | Contact Us (Sleepwalker skips this nav element)
+  </nav>
+
+  <article>
+    <header>
+      <h1>National University Admissions 2026</h1>
+      <p><em>Published on November 11, 2026 • By Student Support Services</em></p>
+    </header>
+
+    <section>
+      <h2>Introduction and Overview</h2>
+      <p>
+        Welcome to the admissions portal of National University. Our institution offers premier undergraduate and postgraduate programs across computer science, engineering, and arts.
+      </p>
+      <p>
+        All students are encouraged to review the eligibility criteria thoroughly before submitting their candidate profiles. Classes for the upcoming academic year will commence on August 1st.
+      </p>
+    </section>
+
+    <section>
+      <h2>Eligibility Criteria</h2>
+      <p>Applicants must satisfy the following minimum qualifications:</p>
+      <ul>
+        <li>Completion of 12th standard or equivalent examination with mathematics and physics.</li>
+        <li>A minimum aggregate score of 60 percent marks or equivalent grade point.</li>
+        <li>Proficiency in basic computer literacy and quantitative aptitude.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Application Fee Structure</h2>
+      <p>
+        Candidates must pay the non-refundable registration fee according to their category. All payments must be processed through the online gateway.
+      </p>
+      <table>
+        <caption>University Application Fee Table</caption>
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Application Fee</th>
+            <th>Processing Window</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>General &amp; OBC</td>
+            <td>1,200 INR</td>
+            <td>3 to 5 business days</td>
+            <td><span class="badge">Open</span></td>
+          </tr>
+          <tr>
+            <td>SC, ST &amp; PwD</td>
+            <td>600 INR</td>
+            <td>1 to 2 business days</td>
+            <td><span class="badge">Open</span></td>
+          </tr>
+          <tr>
+            <td>International Candidates</td>
+            <td>50 USD</td>
+            <td>5 to 7 business days</td>
+            <td><span class="badge">Open</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Required Documents</h2>
+      <p>Candidates must ensure scanned copies of the following documents are ready before beginning the application:</p>
+      <ul>
+        <li>Valid Domicile Certificate issued by a competent state authority.</li>
+        <li>Income Certificate demonstrating annual family income below 8,00,000 INR.</li>
+        <li>High School and 12th standard marks sheet and passing certificate.</li>
+        <li>Government-issued photo identification proof (Aadhaar Card or Passport).</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Important Dates and Deadlines</h2>
+      <p>
+        Please mark your calendars for the following critical milestones. Applications submitted after the final deadline cannot be accepted under any circumstances.
+      </p>
+      <ul>
+        <li>Portal Opening Date: December 1, 2026</li>
+        <li>Last Date for Online Submission: January 15, 2027</li>
+        <li>Hall Ticket Availability: February 1, 2027</li>
+      </ul>
+    </section>
+
+    <!-- Privacy Verification Section: Forms and Passwords -->
+    <section style="background: #FFF8E1; border: 2px dashed #FFA000; border-radius: 8px; padding: 20px; margin: 30px 0;">
+      <h2 style="margin-top: 0; color: #E65100;">Applicant Portal Sign-in (Privacy Verification Test)</h2>
+      <p style="color: #5D4037; font-size: 16px;">
+        <strong>Privacy Test Notice:</strong> Sleepwalker's Safe Text Extractor strictly blocks and strips all <code>&lt;input&gt;</code>, <code>&lt;textarea&gt;</code>, <code>&lt;select&gt;</code>, and <code>&lt;password&gt;</code> fields. Neither user credentials nor typed inputs are ever read aloud or transmitted to AI models.
+      </p>
+      <form id="applicant-login-form" onsubmit="event.preventDefault();" style="display: grid; gap: 12px; max-width: 420px; margin-top: 14px;">
+        <label for="app-email" style="font-weight: 600;">Applicant Email or Registration ID:</label>
+        <input type="text" id="app-email" name="email" value="rohan.sharma@example.edu" style="padding: 10px; font-size: 16px; border: 1px solid #CCC; border-radius: 4px;" />
+
+        <label for="app-category" style="font-weight: 600;">Quota Category:</label>
+        <select id="app-category" name="category" style="padding: 10px; font-size: 16px; border: 1px solid #CCC; border-radius: 4px;">
+          <option value="gen">General Merit</option>
+          <option value="obc">Other Backward Classes (OBC)</option>
+        </select>
+
+        <label for="app-password" style="font-weight: 600;">Portal Password:</label>
+        <input type="password" id="app-password" name="password" value="SuperSecretPassword2026!" style="padding: 10px; font-size: 16px; border: 1px solid #CCC; border-radius: 4px;" />
+
+        <button type="submit" style="background: #1565C0; color: #FFF; border: none; padding: 12px; font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer;">
+          Sign In to Portal
+        </button>
+      </form>
+    </section>
+
+    <section>
+      <h2>छात्र सहायता एवं संपर्क विवरण</h2>
+      <p>
+        यदि आपको आवेदन प्रक्रिया में कोई समस्या आती है, तो हमारी हेल्पलाइन सुबह 9 बजे से शाम 5 बजे तक खुली रहती है। आप हमें ईमेल द्वारा भी संपर्क कर सकते हैं।
+      </p>
+    </section>
+  </article>
+
+  <!-- Footer (Sleepwalker should ignore this when reading content) -->
+  <footer style="margin-top: 40px; padding: 20px 0; border-top: 1px solid #CCC; color: #777;">
+    <p>© 2026 National University. All rights reserved. (Sleepwalker skips footer elements)</p>
+  </footer>
+
+</body>
+</html>
