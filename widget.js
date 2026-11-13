@@ -240,9 +240,16 @@
               <span>Local-Only Mode (Skip Cloud Gemini; use Ollama/Offline)</span>
             </label>
 
+            <!-- Gemini API Key -->
+            <div class="sw-ai-field">
+              <label for="sw-input-gemini-key" class="sw-ai-label">Direct Gemini API Key (Google AI Studio):</label>
+              <input type="password" id="sw-input-gemini-key" class="sw-ai-input" placeholder="Enter Gemini API Key" autocomplete="off" spellcheck="false">
+              <div style="font-size:12px;color:#889;margin-top:3px;">Pre-configured for instant zero-setup cloud AI.</div>
+            </div>
+
             <!-- Cloud Proxy URL -->
             <div class="sw-ai-field">
-              <label for="sw-input-proxy-url" class="sw-ai-label">Cloud Serverless Proxy URL:</label>
+              <label for="sw-input-proxy-url" class="sw-ai-label">Cloud Serverless Proxy URL (Optional):</label>
               <input type="text" id="sw-input-proxy-url" class="sw-ai-input" placeholder="e.g. https://sleepwalker-proxy.workers.dev" autocomplete="off" spellcheck="false">
             </div>
 
@@ -785,10 +792,26 @@
           this.explainPage(cmd.sectionQuery);
           break;
 
+        case 'EXPLAIN_SOME_PART':
+          this.explainSomePart();
+          break;
+
+        case 'NAVIGATE_SOME_PART':
+          this.navigateSomePart();
+          break;
+
+        case 'NAVIGATE_SECTION':
+          if (cmd.sectionQuery) {
+            this.readSection(cmd.sectionQuery, true);
+          } else {
+            this.navigateSomePart();
+          }
+          break;
+
         case 'READ_SECTION':
         case 'QUERY_OR_SEARCH':
           if (cmd.sectionQuery) {
-            this.readSection(cmd.sectionQuery);
+            this.readSection(cmd.sectionQuery, false);
           } else {
             this.setAssistantReply('Please specify a section name to read.');
           }
@@ -926,9 +949,9 @@
     }
 
     /**
-     * Action: Fuzzy match heading and read that section.
+     * Action: Fuzzy match heading and jump to/read that section.
      */
-    readSection(query) {
+    readSection(query, navigateOnly = false) {
       if (this.outline.items.length === 0) {
         this.outline.extractOutline();
       }
@@ -936,18 +959,66 @@
       const match = this.outline.fuzzyFindHeading(query);
       if (match) {
         this.outline.scrollToHeading(match);
-        this.setAssistantReply(`Found section: "${match.text}". Reading now...`);
+        const actionPrefix = navigateOnly ? 'Jumped to section' : 'Found section';
+        this.setAssistantReply(`${actionPrefix}: "${match.text}". Reading now...`);
         if (this.pill) {
-          this.pill.setSpeaking(`Reading: "${match.text}"`);
+          this.pill.setSpeaking(`"${match.text}"`);
         }
         this.reader.readElements(match.sectionElements, match.text);
       } else {
-        const msg = `Could not find a section matching "${query}". Say "Outline" to see all sections.`;
+        const topSections = this.outline.items.slice(0, 3).map(i => `"${i.text}"`).join(', ');
+        const msg = topSections
+          ? `Could not find section "${query}". Available sections include: ${topSections}. Say "Outline" to see all.`
+          : `Could not find section "${query}". Say "Outline" to view all sections.`;
         this.setAssistantReply(msg);
         this.recordError(msg);
         if (this.pill) {
           this.pill.setError(`Section "${query}" not found.`);
         }
+        this.showOutline();
+      }
+    }
+
+    /**
+     * Action: Navigate to some part of the page (general request).
+     */
+    navigateSomePart() {
+      if (this.outline.items.length === 0) {
+        this.outline.extractOutline();
+      }
+
+      if (this.outline.items.length > 0) {
+        const target = this.outline.items[0];
+        this.outline.scrollToHeading(target);
+        const topSections = this.outline.items.slice(0, 3).map(i => `"${i.text}"`).join(', ');
+        const msg = `Navigated to "${target.text}". This page has ${this.outline.items.length} sections including ${topSections}. Say "take me to [name]" or "explain [name]" to navigate.`;
+        this.setAssistantReply(msg);
+        if (this.pill) {
+          this.pill.setStatus(`Section: "${target.text}"`);
+          this.pill.openBubble();
+        }
+        this.showOutline();
+        this.reader.readElements(target.sectionElements, target.text);
+      } else {
+        this.setAssistantReply('This page does not have separate section headings. Reading from top of page...');
+        this.readPage();
+      }
+    }
+
+    /**
+     * Action: Explain some part of the page (general request).
+     */
+    explainSomePart() {
+      if (this.outline.items.length === 0) {
+        this.outline.extractOutline();
+      }
+
+      if (this.outline.items.length > 0) {
+        const target = this.outline.items[0];
+        this.setAssistantReply(`Explaining main section: "${target.text}"...`);
+        this.explainPage(target.text);
+      } else {
+        this.explainPage(null);
       }
     }
 
@@ -1179,6 +1250,7 @@
             'sleepwalker_rate',
             'sleepwalker_glow_enabled',
             'sleepwalker_local_only',
+            'sleepwalker_gemini_api_key',
             'sleepwalker_proxy_url',
             'sleepwalker_ollama_url',
             'sleepwalker_ollama_model',
@@ -1216,6 +1288,12 @@
               localOnlyToggle.checked = Boolean(data.sleepwalker_local_only);
             }
 
+            // Gemini API key
+            const geminiInput = root.getElementById('sw-input-gemini-key');
+            if (geminiInput && data.sleepwalker_gemini_api_key) {
+              geminiInput.value = data.sleepwalker_gemini_api_key;
+            }
+
             // Cloud proxy URL
             const proxyInput = root.getElementById('sw-input-proxy-url');
             if (proxyInput && data.sleepwalker_proxy_url) {
@@ -1247,6 +1325,7 @@
 
       const glowToggle = root.getElementById('sw-toggle-glow');
       const localOnlyToggle = root.getElementById('sw-toggle-local-only');
+      const geminiInput = root.getElementById('sw-input-gemini-key');
       const proxyInput = root.getElementById('sw-input-proxy-url');
       const ollamaUrlInput = root.getElementById('sw-input-ollama-url');
       const ollamaModelInput = root.getElementById('sw-input-ollama-model');
@@ -1254,6 +1333,7 @@
 
       const glowEnabled = glowToggle ? glowToggle.checked : true;
       const localOnly = localOnlyToggle ? localOnlyToggle.checked : false;
+      const geminiKey = geminiInput ? geminiInput.value.trim() : '';
       const proxyUrl = proxyInput ? proxyInput.value.trim() : '';
       const ollamaUrl = ollamaUrlInput ? (ollamaUrlInput.value.trim() || 'http://localhost:11434') : 'http://localhost:11434';
       const ollamaModel = ollamaModelInput ? (ollamaModelInput.value.trim() || 'llama3.2:3b') : 'llama3.2:3b';
@@ -1266,6 +1346,7 @@
         chrome.storage.local.set({
           sleepwalker_glow_enabled: glowEnabled,
           sleepwalker_local_only: localOnly,
+          sleepwalker_gemini_api_key: geminiKey,
           sleepwalker_proxy_url: proxyUrl,
           sleepwalker_ollama_url: ollamaUrl,
           sleepwalker_ollama_model: ollamaModel
@@ -1292,9 +1373,14 @@
       if (!root) return;
 
       const statusBox = root.getElementById('sw-ai-test-status');
+      const geminiInput = root.getElementById('sw-input-gemini-key');
       const proxyInput = root.getElementById('sw-input-proxy-url');
       const ollamaUrlInput = root.getElementById('sw-input-ollama-url');
 
+      let geminiKey = geminiInput ? geminiInput.value.trim() : '';
+      if (!geminiKey && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        geminiKey = await new Promise(r => chrome.storage.local.get(['sleepwalker_gemini_api_key'], d => r((d.sleepwalker_gemini_api_key || '').trim())));
+      }
       const proxyUrl = proxyInput ? proxyInput.value.trim() : '';
       const ollamaUrl = ollamaUrlInput ? (ollamaUrlInput.value.trim() || 'http://localhost:11434') : 'http://localhost:11434';
 
@@ -1321,7 +1407,33 @@
         }
       }
 
-      // 1. Test Proxy if configured
+      // 1. Test Direct Gemini API
+      if (geminiKey) {
+        try {
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 6000);
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=${geminiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: 'Ping' }] }]
+            }),
+            signal: controller.signal
+          });
+          clearTimeout(t);
+          if (res.ok) {
+            if (statusBox) {
+              statusBox.className = 'sw-ai-test-result sw-ai-test-success';
+              statusBox.textContent = '✅ Cloud Gemini API connected (Gemini Flash-Lite online)!';
+            }
+            return;
+          }
+        } catch (e) {
+          console.warn('[Sleepwalker Settings] Gemini ping note:', e);
+        }
+      }
+
+      // 2. Test Proxy if configured
       if (proxyUrl) {
         try {
           const controller = new AbortController();
@@ -1343,7 +1455,7 @@
         }
       }
 
-      // 2. Test Local Ollama
+      // 3. Test Local Ollama
       try {
         const controller = new AbortController();
         const t = setTimeout(() => controller.abort(), 3000);
@@ -1362,10 +1474,10 @@
         console.warn('[Sleepwalker Settings] Ollama ping error:', e);
       }
 
-      // 3. Fallback info
+      // 4. Fallback info
       if (statusBox) {
         statusBox.className = 'sw-ai-test-result sw-ai-test-info';
-        statusBox.textContent = 'ℹ️ Cloud Proxy and Ollama are offline. Explain will use the built-in Offline Basic Summary (0ms, 100% private).';
+        statusBox.textContent = 'ℹ️ Cloud AI and Ollama offline. Explain will use the built-in Offline Basic Summary (0ms, 100% private).';
       }
     }
   }

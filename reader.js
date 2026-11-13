@@ -108,9 +108,14 @@
         '[role="main"]',
         '#main-content',
         '#content',
+        '#bodyContent',
+        '#mw-content-text',
+        '.mw-parser-output',
         '.main-content',
         '.entry-content',
-        '.post-content'
+        '.article-body',
+        '.post-content',
+        '.content'
       ];
 
       for (const selector of candidates) {

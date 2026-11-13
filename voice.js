@@ -411,46 +411,96 @@
         return { type: 'OUTLINE', raw };
       }
 
-      // 8. EXPLAIN THIS PAGE (Feature B: signature feature)
-      // EN: explain this page, explain, summarise this page, summarize this page, what is this page about
-      // HI: इस पेज को समझाओ, समझाओ, यह पेज किस बारे में है, पेज का सारांश
+      // 8. EXPLAIN SOME PART OF PAGE (Generic request to explore a section)
+      // EN: "explain some part of page", "explain some part of the page", "explain a section", "explain part of page"
+      // HI: "पेज का कुछ भाग समझाओ", "कोई भाग समझाओ", "कोई सेक्शन समझाओ"
       if (
-        /^(explain this page|explain page|explain|summarise this page|summarize this page|summarise|summarize|what is this page about|इस पेज को समझाओ|समझाओ|यह पेज किस बारे में है|पेज समझाओ)/i.test(clean) ||
-        clean === 'explain' || clean === 'समझाओ'
+        /^(?:explain|summarise|summarize)\s+(?:some\s+part|a\s+part|part|some\s+section|a\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
+        /^(?:tell\s+me\s+about|what\s+is\s+in)\s+(?:some\s+part|a\s+part|some\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
+        /^(?:पेज का कुछ भाग समझाओ|कोई भाग समझाओ|कोई सेक्शन समझाओ)$/i.test(clean)
+      ) {
+        return { type: 'EXPLAIN_SOME_PART', raw };
+      }
+
+      // 9. EXPLAIN THIS PAGE (Whole page summary)
+      // EN: explain this page, explain the page, summarise this page, summarize this page, what is this page about, or lone "explain"
+      // HI: इस पेज को समझाओ, पेज समझाओ, यह पेज किस बारे में है, पेज का सारांश, समझाओ
+      if (
+        /^(?:explain\s+(?:this\s+|the\s+)?page|summarise\s+(?:this\s+|the\s+)?page|summarize\s+(?:this\s+|the\s+)?page|what\s+is\s+this\s+page\s+about|इस पेज को समझाओ|पेज समझाओ|यह पेज किस बारे में है|पेज का सारांश)$/i.test(clean) ||
+        clean === 'explain' || clean === 'summarise' || clean === 'summarize' || clean === 'समझाओ'
       ) {
         return { type: 'EXPLAIN', raw };
       }
 
-      // Explain section variants: "explain the <name> section", "<name> सेक्शन समझाओ"
-      let explainSecMatch = clean.match(/^explain\s+(?:the\s+)?(.+?)(?:\s+section)?$/i);
+      // 10. EXPLAIN A SPECIFIC SECTION
+      // EN: "explain the <name> section", "explain section <name>", "explain about <name>", "explain <name>", "tell me about <name>"
+      // HI: "<name> समझाओ", "<name> सेक्शन समझाओ", "<name> के बारे में बताओ", "<name> क्या है"
+      let explainSecMatch =
+        clean.match(/^(?:explain|summarise|summarize)\s+(?:about\s+)?(?:the\s+)?(?:section\s+)?(.+?)(?:\s+section)?$/i) ||
+        clean.match(/^(?:tell\s+me\s+about|what\s+is)\s+(?:the\s+)?(.+?)(?:\s+section)?$/i);
+
       if (explainSecMatch && explainSecMatch[1]) {
         const query = explainSecMatch[1].trim();
-        if (!['this page', 'page', 'in simple words', 'in hindi', 'in english', 'all'].includes(query)) {
+        if (!['this page', 'the page', 'page', 'in simple words', 'in hindi', 'in english', 'all', 'everything', 'it'].includes(query)) {
           return { type: 'EXPLAIN_SECTION', raw, sectionQuery: query };
         }
       }
 
-      // 8. READ THE <SECTION> SECTION
+      // Hindi explain section
+      const hiExplainMatch = clean.match(/^(.+?)\s+(?:सेक्शन\s+)?(?:समझाओ|के बारे में बताओ)$/i);
+      if (hiExplainMatch && !['यह पेज', 'पेज', 'पूरा', 'सब'].includes(hiExplainMatch[1].trim())) {
+        return { type: 'EXPLAIN_SECTION', raw, sectionQuery: hiExplainMatch[1].trim() };
+      }
+
+      // 11. NAVIGATE SOME PART OF PAGE (Generic request to take user to a part of page)
+      // EN: "take me some part of page", "take me to some part of the page", "take me to a section", "jump to some part"
+      // HI: "किसी भाग पर ले चलो", "पेज के किसी भाग पर ले चलो", "कोई सेक्शन दिखाओ"
+      if (
+        /^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+(?:to\s+)?|jump\s+(?:to\s+)?|go\s+(?:to\s+)?)(?:some\s+part|a\s+part|part|some\s+section|a\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
+        /^(?:किसी भाग पर ले चलो|पेज के किसी भाग पर ले चलो|कोई सेक्शन दिखाओ)$/i.test(clean)
+      ) {
+        return { type: 'NAVIGATE_SOME_PART', raw };
+      }
+
+      // 12. NAVIGATE TO SPECIFIC SECTION ("take me to...", "scroll to...", "jump to...", "show me...", "go to...")
+      let navMatch = clean.match(/^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+(?:to\s+)?|jump\s+(?:to\s+)?|go\s+to\s+|open\s+|show\s+(?:me\s+)?)(?:the\s+)?(.+?)(?:\s+section)?$/i);
+      if (navMatch && navMatch[1]) {
+        const navTarget = navMatch[1].trim();
+        if (!['this page', 'the page', 'page', 'home', 'top'].includes(navTarget)) {
+          return {
+            type: 'NAVIGATE_SECTION',
+            raw,
+            sectionQuery: navTarget
+          };
+        }
+      }
+
+      // Hindi navigate to section ("...पर ले चलो", "...पर जाओ", "...दिखाओ", "...खोलो")
+      const hiNavMatch = clean.match(/^(.+?)\s+(?:सेक्शन\s+)?(?:पर\s+ले\s+चलो|पर\s+जाओ|दिखाओ|खोलो)$/i);
+      if (hiNavMatch && !['यह पेज', 'पेज', 'पूरा'].includes(hiNavMatch[1].trim())) {
+        return {
+          type: 'NAVIGATE_SECTION',
+          raw,
+          sectionQuery: hiNavMatch[1].trim()
+        };
+      }
+
+      // 13. READ THE <SECTION> SECTION
       // Patterns:
       // "read the <x> section"
       // "read section <x>"
       // "read <x>"
-      // "go to <x>"
       // "<x> सेक्शन पढ़ो"
       // "<x> पढ़ो"
 
-      // English section patterns:
       let sectionMatch = clean.match(/^read\s+(?:the\s+)?(.+?)\s+section$/i);
       if (!sectionMatch) {
         sectionMatch = clean.match(/^read\s+section\s+(.+)$/i);
       }
-      if (!sectionMatch) {
-        sectionMatch = clean.match(/^(?:go\s+to|open)\s+(?:the\s+)?(.+?)(?:\s+section)?$/i);
-      }
       // If user says "read <topic>" (and it's not "read this page" or "read again")
       if (!sectionMatch && clean.startsWith('read ')) {
         const afterRead = clean.replace(/^read\s+/, '').trim();
-        if (afterRead && !['this page', 'page', 'again', 'it again', 'all'].includes(afterRead)) {
+        if (afterRead && !['this page', 'the page', 'page', 'again', 'it again', 'all', 'everything'].includes(afterRead)) {
           sectionMatch = [null, afterRead];
         }
       }

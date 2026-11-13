@@ -54,14 +54,15 @@
 
     /**
      * Collect all DOM elements belonging to this section until the next heading of equal or higher level.
+     * Supports both flat semantic sections and modern nested heading wrappers (e.g. Wikipedia div.mw-heading).
      */
     collectSectionElements(headingEl, level) {
       const elements = [headingEl];
       let sibling = headingEl.nextElementSibling;
       const parent = headingEl.parentElement;
 
+      // 1. Direct siblings under the same parent
       while (sibling) {
-        // If we hit another heading of equal or higher level (smaller number), stop
         if (/^H[1-6]$/i.test(sibling.tagName) || sibling.getAttribute('role') === 'heading') {
           const siblingLevel = this.getHeadingLevel(sibling);
           if (siblingLevel <= level) {
@@ -72,7 +73,22 @@
         sibling = sibling.nextElementSibling;
       }
 
-      // If heading is wrapped directly inside a section or article tag
+      // 2. If the heading was inside a container with no direct siblings (e.g. <div class="mw-heading"><h2>...</h2></div>)
+      if (elements.length === 1 && parent && parent !== document.body && parent.tagName !== 'MAIN' && parent.tagName !== 'ARTICLE') {
+        let parentSibling = parent.nextElementSibling;
+        while (parentSibling) {
+          const nextH = /^H[1-6]$/i.test(parentSibling.tagName)
+            ? parentSibling
+            : parentSibling.querySelector('h1, h2, h3, h4, [role="heading"]');
+          if (nextH && this.getHeadingLevel(nextH) <= level) {
+            break;
+          }
+          elements.push(parentSibling);
+          parentSibling = parentSibling.nextElementSibling;
+        }
+      }
+
+      // 3. If heading is wrapped directly inside a section or article tag
       if (elements.length === 1 && parent && (parent.tagName === 'SECTION' || parent.tagName === 'ARTICLE')) {
         return Array.from(parent.children);
       }
@@ -87,14 +103,41 @@
       this.items = [];
 
       // Primary container
-      const container = document.querySelector('main, article, [role="main"]') || document.body;
+      const candidates = [
+        'main',
+        'article',
+        '[role="main"]',
+        '#main-content',
+        '#content',
+        '#bodyContent',
+        '#mw-content-text',
+        '.mw-parser-output',
+        '.entry-content',
+        '.article-body',
+        '.post-content',
+        '.content'
+      ];
+      let container = null;
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (el && el.querySelector('h1, h2, h3, h4, [role="heading"]')) {
+          container = el;
+          break;
+        }
+      }
+      if (!container) {
+        container = document.body;
+      }
 
       const ignoreSelector = `
         nav, footer, aside, #sleepwalker-host, .sleepwalker-ignore,
         [role="navigation"], [role="banner"], [role="contentinfo"]
       `;
 
-      const headingElements = container.querySelectorAll('h1, h2, h3, h4, [role="heading"]');
+      let headingElements = container.querySelectorAll('h1, h2, h3, h4, [role="heading"]');
+      if (headingElements.length === 0 && container !== document.body) {
+        headingElements = document.body.querySelectorAll('h1, h2, h3, h4, [role="heading"]');
+      }
 
       headingElements.forEach((el, index) => {
         // Skip ignored / hidden containers
@@ -127,7 +170,7 @@
 
       item.element.scrollIntoView({
         behavior: 'smooth',
-        block: 'start'
+        block: 'center'
       });
 
       item.element.classList.remove('sleepwalker-target-flash');
@@ -155,8 +198,10 @@
       const stopWords = new Set([
         'the', 'section', 'heading', 'about', 'read', 'please', 'to', 'go', 'open',
         'tell', 'me', 'what', 'is', 'are', 'in', 'and', 'for', 'of', 'on',
+        'take', 'some', 'part', 'page', 'scroll', 'jump', 'navigate', 'show', 'explain',
         // Common Hindi stop words
-        'ka', 'ki', 'ke', 'wala', 'wali', 'wale', 'padho', 'batao', 'dikhaye'
+        'ka', 'ki', 'ke', 'ko', 'par', 'wala', 'wali', 'wale', 'padho', 'batao', 'dikhaye',
+        'le', 'chalo', 'jao', 'dikhao', 'samjhao'
       ]);
 
       const words = this.normalize(str).split(' ');
@@ -170,6 +215,9 @@
      * @returns {Object|null} Best matching outline item or null.
      */
     fuzzyFindHeading(query) {
+      if (!this.items || this.items.length === 0) {
+        this.extractOutline();
+      }
       if (!query || this.items.length === 0) return null;
 
       const cleanQuery = this.stripStopWords(query) || this.normalize(query);

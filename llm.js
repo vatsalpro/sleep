@@ -17,6 +17,9 @@
 
 const SYSTEM_PROMPT = `Explain this page in simple words for someone with low vision or low literacy. Use short sentences, no markdown, no lists, no symbols, at most 120 words. Say what the page is for, the key facts such as fees, dates and documents, and what the user can do next. Use ONLY the page text provided. If something is not in the text, do not mention it. Reply in the user's language (English or Hindi).`;
 
+// Pre-configured default key (loaded from config.local.js or chrome.storage.local)
+const DEFAULT_GEMINI_API_KEY = (typeof self !== 'undefined' && self.SLEEPWALKER_DEFAULT_KEY) || '';
+
 // 1. In-memory cache: Map<key, { answer: string, timestamp: number }>
 const EXPLAIN_CACHE = new Map();
 
@@ -50,11 +53,22 @@ async function handleExplainRequest(payload) {
 
   // If user enabled "Local Only" mode, skip Cloud Gemini completely
   if (!config.localOnly) {
-    // 2. Step b: Cloud Gemini via Serverless Proxy
-    const proxyResult = await callGeminiProxy(config.proxyUrl, pageText, lang);
-    if (proxyResult && proxyResult.answer) {
-      EXPLAIN_CACHE.set(cacheKey, { answer: proxyResult.answer, timestamp: Date.now() });
-      return { status: 'ok', answer: proxyResult.answer, source: 'cloud' };
+    // 2. Step b1: Direct Gemini API Call (Highest speed & reliability)
+    if (config.geminiApiKey) {
+      const directResult = await callDirectGemini(config.geminiApiKey, pageText, lang, section);
+      if (directResult && directResult.answer) {
+        EXPLAIN_CACHE.set(cacheKey, { answer: directResult.answer, timestamp: Date.now() });
+        return { status: 'ok', answer: directResult.answer, source: directResult.model || 'Gemini Flash' };
+      }
+    }
+
+    // 2. Step b2: Cloud Gemini via Serverless Proxy (if configured)
+    if (config.proxyUrl) {
+      const proxyResult = await callGeminiProxy(config.proxyUrl, pageText, lang);
+      if (proxyResult && proxyResult.answer) {
+        EXPLAIN_CACHE.set(cacheKey, { answer: proxyResult.answer, timestamp: Date.now() });
+        return { status: 'ok', answer: proxyResult.answer, source: 'cloud proxy' };
+      }
     }
   }
 
@@ -62,7 +76,7 @@ async function handleExplainRequest(payload) {
   const ollamaResult = await callLocalOllama(config.ollamaUrl, config.ollamaModel, pageText, lang);
   if (ollamaResult && ollamaResult.answer) {
     EXPLAIN_CACHE.set(cacheKey, { answer: ollamaResult.answer, timestamp: Date.now() });
-    return { status: 'ok', answer: ollamaResult.answer, source: 'local' };
+    return { status: 'ok', answer: ollamaResult.answer, source: 'local ollama' };
   }
 
   // 4. Step d: Offline Fallback
@@ -76,9 +90,16 @@ async function handleExplainRequest(payload) {
 function getLlmConfig() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ['sleepwalker_proxy_url', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model', 'sleepwalker_local_only'],
+      [
+        'sleepwalker_gemini_api_key',
+        'sleepwalker_proxy_url',
+        'sleepwalker_ollama_url',
+        'sleepwalker_ollama_model',
+        'sleepwalker_local_only'
+      ],
       (data) => {
         resolve({
+          geminiApiKey: (data.sleepwalker_gemini_api_key !== undefined ? data.sleepwalker_gemini_api_key : DEFAULT_GEMINI_API_KEY).trim(),
           proxyUrl: (data.sleepwalker_proxy_url || '').trim(),
           ollamaUrl: (data.sleepwalker_ollama_url || 'http://localhost:11434').trim(),
           ollamaModel: (data.sleepwalker_ollama_model || 'llama3.2:3b').trim(),
@@ -87,6 +108,98 @@ function getLlmConfig() {
       }
     );
   });
+}
+
+/**
+ * Call Google Gemini API directly from background service worker.
+ * Uses high-availability models with automatic fallback.
+ */
+async function callDirectGemini(apiKey, pageText, lang, section = 'all') {
+  if (!apiKey) return null;
+
+  const isHindi = lang === 'hi-IN';
+  const isSectionSpecific = section && section !== 'all';
+
+  const systemInstruction = isSectionSpecific
+    ? (isHindi
+        ? `इस पेज के "${section}" भाग को सरल और आसान शब्दों में समझाएं। छोटे वाक्यों का उपयोग करें, कोई मार्कडाउन (*, #) या सूची नहीं, अधिकतम 100 शब्द। केवल पेज में दिए गए तथ्यों को बताएं।`
+        : `Explain the "${section}" section of this page in simple words for someone with low vision. Use short clear sentences, no markdown, no bullet points, max 100 words. State key facts like fees, dates, or eligibility. Use ONLY the provided page text.`)
+    : (isHindi
+        ? `इस पेज को सरल और आसान शब्दों में समझाएं। छोटे वाक्यों का उपयोग करें, कोई मार्कडाउन या सूची नहीं, अधिकतम 120 शब्द। बताएं कि पेज किस बारे में है, मुख्य तारीखें, फीस और दस्तावेज। केवल दिए गए टेक्स्ट का उपयोग करें।`
+        : `Explain this page in simple words for someone with low vision or low literacy. Use short sentences, no markdown, no lists, no symbols, at most 120 words. Say what the page is for, key facts such as fees, dates and documents, and what the user can do next. Use ONLY the page text provided.`);
+
+  // Supported model tiers in order of speed and stability
+  const models = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-flash-latest'];
+
+  for (const model of models) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 9000);
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const payload = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: `${systemInstruction}\n\nPAGE TEXT:\n${pageText.substring(0, 9000)}` }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 250
+        }
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.warn(`[Sleepwalker LLM] Gemini ${model} HTTP status ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (answer && typeof answer === 'string' && answer.trim()) {
+        const cleanAnswer = stripMarkdown(answer.trim());
+        const modelName = model === 'gemini-flash-lite-latest'
+          ? 'Gemini Flash-Lite'
+          : (model === 'gemini-3.5-flash-lite' ? 'Gemini 3.5 Flash-Lite' : 'Gemini Flash');
+        console.log(`[Sleepwalker LLM] Direct Gemini succeeded with model: ${model}`);
+        return { answer: cleanAnswer, model: modelName };
+      }
+    } catch (err) {
+      console.warn(`[Sleepwalker LLM] Direct Gemini error on ${model}:`, err.message);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Clean markdown symbols from AI responses so TTS reads naturally without symbol noise.
+ */
+function stripMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/_(.*?)_/g, '$1')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^\s*[-*•+]\s+/gm, '')
+    .replace(/\n{2,}/g, ' ')
+    .replace(/\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 /**

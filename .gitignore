@@ -6,3 +6,7 @@ desktop.ini
 .vscode/
 .idea/
 *.tmp
+
+# Local credentials
+config.local.js
+*.local.js

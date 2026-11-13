@@ -8,8 +8,24 @@
  * 4. Manage LLM Cascade (cache -> Gemini proxy -> local Ollama -> offline fallback).
  */
 
+// Import local configuration if present (contains developer API key, ignored by git)
+try {
+  importScripts('config.local.js');
+} catch (e) {
+  // config.local.js not present in distribution builds
+}
+
 // Import LLM Cascade handler into the service worker
 importScripts('llm.js');
+
+// Auto-seed preconfigured key into storage if available
+if (typeof self.SLEEPWALKER_DEFAULT_KEY !== 'undefined' && self.SLEEPWALKER_DEFAULT_KEY) {
+  chrome.storage.local.get(['sleepwalker_gemini_api_key'], (data) => {
+    if (!data.sleepwalker_gemini_api_key) {
+      chrome.storage.local.set({ sleepwalker_gemini_api_key: self.SLEEPWALKER_DEFAULT_KEY });
+    }
+  });
+}
 
 // List of URL prefixes and domains where extensions are forbidden to run by Chrome
 const RESTRICTED_PATTERNS = [

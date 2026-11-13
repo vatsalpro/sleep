@@ -49,24 +49,44 @@
     extractPageText(sectionQuery = null) {
       // 1. If section query specified, look for section heading first
       if (sectionQuery && this.widget && this.widget.outline) {
+        if (!this.widget.outline.items || this.widget.outline.items.length === 0) {
+          this.widget.outline.extractOutline();
+        }
         const heading = this.widget.outline.fuzzyFindHeading(sectionQuery);
-        if (heading && heading.sectionElements && heading.sectionElements.length > 0) {
-          const sectionText = heading.sectionElements
-            .map(el => this._extractCleanTextFromNode(el))
-            .filter(Boolean)
-            .join(' ');
-          if (sectionText.trim().length > 60) {
-            return this._sanitizeAndTruncate(sectionText, 6000);
+        if (heading) {
+          // Orient user to the section visually
+          this.widget.outline.scrollToHeading(heading);
+          if (heading.sectionElements && heading.sectionElements.length > 0) {
+            const sectionText = heading.sectionElements
+              .map(el => this._extractCleanTextFromNode(el))
+              .filter(Boolean)
+              .join(' ');
+            if (sectionText.trim().length > 30) {
+              return this._sanitizeAndTruncate(sectionText, 7000);
+            }
           }
         }
       }
 
       // 2. Main content root selection
-      const candidates = ['main', 'article', '[role="main"]', '#main-content', '#content', '.post-content'];
+      const candidates = [
+        'main',
+        'article',
+        '[role="main"]',
+        '#main-content',
+        '#content',
+        '#bodyContent',
+        '#mw-content-text',
+        '.mw-parser-output',
+        '.entry-content',
+        '.article-body',
+        '.post-content',
+        '.content'
+      ];
       let root = null;
       for (const sel of candidates) {
         const el = document.querySelector(sel);
-        if (el && this._isVisible(el) && el.textContent.trim().length > 80) {
+        if (el && this._isVisible(el) && el.textContent.trim().length > 60) {
           root = el;
           break;
         }
@@ -76,7 +96,7 @@
       }
 
       const text = this._extractCleanTextFromNode(root);
-      return this._sanitizeAndTruncate(text, 6000);
+      return this._sanitizeAndTruncate(text, 7000);
     }
 
     /**
@@ -169,8 +189,18 @@
     validateAnswer(answer, sourceText) {
       if (!answer || !answer.trim()) return null;
 
+      // Clean markdown formatting if present
+      const cleanAnswer = answer
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/__(.*?)__/g, '$1')
+        .replace(/_(.*?)_/g, '$1')
+        .replace(/^#+\s*/gm, '')
+        .replace(/^\s*[-*•+]\s+/gm, '')
+        .trim();
+
       const sourceNumbers = new Set(this.extractNumbersAndDates(sourceText));
-      const sentences = answer.match(/[^.!?।\n]+[.!?।\n]+|[^.!?।\n]+$/g) || [answer];
+      const sentences = cleanAnswer.match(/[^.!?।\n]+[.!?।\n]+|[^.!?।\n]+$/g) || [cleanAnswer];
       const validSentences = [];
 
       for (const rawSentence of sentences) {
@@ -181,9 +211,14 @@
         let hasHallucination = false;
 
         for (const num of sentenceNumbers) {
-          // If a number in the answer is not in the source text, flag as hallucination
-          if (!sourceNumbers.has(num)) {
-            console.warn(`[Sleepwalker Validator] Dropped hallucinated sentence (number "${num}" not in page): "${sentence}"`);
+          const cleanNum = num.replace(/[,.]/g, '');
+          const val = parseInt(cleanNum, 10);
+          // Conversational enumeration / counts <= 10 (e.g. "3 steps", "2 requirements", "1st") are natural phrasing
+          if (!isNaN(val) && val <= 10) continue;
+
+          // If a large specific number in the answer is not anywhere in the source text, flag as hallucination
+          if (!sourceNumbers.has(cleanNum)) {
+            console.warn(`[Sleepwalker Validator] Dropped hallucinated sentence (number "${cleanNum}" not in page): "${sentence}"`);
             hasHallucination = true;
             break;
           }
@@ -194,8 +229,15 @@
         }
       }
 
+      // If all sentences with numbers were dropped, but the model gave valid conceptual text, keep text-only sentences
       if (validSentences.length === 0) {
-        console.warn('[Sleepwalker Validator] All sentences failed number validation; falling back to basic summary.');
+        const textOnlySentences = sentences
+          .map(s => s.trim())
+          .filter(s => s.length > 5 && this.extractNumbersAndDates(s).length === 0);
+        if (textOnlySentences.length > 0) {
+          return textOnlySentences.join(' ');
+        }
+        console.warn('[Sleepwalker Validator] Validation dropped hallucinated figures; falling back to basic summary.');
         return null;
       }
 
@@ -204,33 +246,44 @@
 
     /**
      * Step 6: Offline Fallback (No AI)
-     * Builds an extractive summary using title, headings, and regex patterns for fees, dates, and docs.
+     * Builds an authentic extractive summary using title, leading content sentences, headings, and regex patterns.
      */
     generateBasicSummary(pageText, sectionQuery = null, lang = 'en-IN') {
       const isHindi = lang === 'hi-IN';
       const title = document.title ? document.title.split(/[-|•]/)[0].trim() : 'This page';
 
-      // 1. Gather headings
-      const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+      // 1. Gather headings from the page
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
         .filter(h => this._isVisible(h) && h.textContent.trim().length > 2)
         .map(h => h.textContent.trim().replace(/\s+/g, ' '));
 
-      // 2. Detect fees
-      const feeMatch = pageText.match(/(?:fee|fees|amount|शुल्क|फीस)[:\s]+[₹$€£\d,]+(?:\s*(?:INR|USD|rupees|रुपये))?/i) ||
-                       pageText.match(/(?:₹|Rs\.?|\$)\s*\d+[\d,]*/i);
+      // 2. Extract genuine lead content sentences from the page (never fake boilerplate)
+      const leadSentences = pageText
+        .split(/(?<=[.!?।])\s+/)
+        .map(s => s.trim())
+        .filter(s => s.length > 20 && !/cookie|javascript|privacy policy|terms of service|all rights reserved/i.test(s));
+      const leadIntro = leadSentences.slice(0, 2).join(' ');
+
+      // 3. Detect fees
+      const feeMatch = pageText.match(/(?:fee|fees|amount|cost|शुल्क|फीस)(?:\s+(?:is|of))?\s*[:=-]?\s*[₹$€£]?\s*[\d,]+(?:\s*(?:INR|USD|rupees|रुपये))?/i) ||
+                       pageText.match(/(?:₹|Rs\.?|\$)\s*\d+[\d,]*/i) ||
+                       pageText.match(/\b\d+[\d,]*\s*(?:INR|USD|rupees|रुपये)\b/i);
       const feeStr = feeMatch ? feeMatch[0].trim() : null;
 
-      // 3. Detect key dates
+      // 4. Detect key dates
       const dateMatch = pageText.match(/(?:deadline|last date|opening date|milestone|अंतिम तिथि|तारीख)[:\s]+[A-Za-z0-9,\s\/-]{5,30}/i) ||
                         pageText.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?\b/i);
       const dateStr = dateMatch ? dateMatch[0].trim() : null;
 
-      // 4. Detect documents
-      const hasDocs = /domicile|certificate|marks|passport|identity|दस्तावेज|प्रमाण पत्र/i.test(pageText);
+      // 5. Detect genuine document requirements if present
+      const docsMatch = pageText.match(/(?:required\s+documents|documents\s+needed|दस्तावेज)[:\s]+([^.!?\n]{10,80})/i);
+      const docsStr = docsMatch ? docsMatch[1].trim() : null;
 
-      // Construct concise summary (< 120 words)
       if (isHindi) {
         let summary = `यह पेज "${title}" है।`;
+        if (leadIntro) {
+          summary += ` मुख्य जानकारी: ${leadIntro}।`;
+        }
         if (headings.length > 0) {
           summary += ` इसमें मुख्य भाग शामिल हैं: ${headings.slice(0, 3).join(', ')}।`;
         }
@@ -240,13 +293,16 @@
         if (dateStr) {
           summary += ` मुख्य तारीख: ${dateStr}।`;
         }
-        if (hasDocs) {
-          summary += ` आवश्यक दस्तावेजों में निवास एवं अंक पत्र शामिल हैं।`;
+        if (docsStr) {
+          summary += ` दस्तावेज: ${docsStr}।`;
         }
         summary += ` आप आगे की जानकारी के लिए "पेज पढ़ो" या आउटलाइन का उपयोग कर सकते हैं।`;
         return summary;
       } else {
         let summary = `This page is "${title}".`;
+        if (leadIntro) {
+          summary += ` ${leadIntro}`;
+        }
         if (headings.length > 0) {
           summary += ` Key sections include: ${headings.slice(0, 3).join(', ')}.`;
         }
@@ -256,8 +312,8 @@
         if (dateStr) {
           summary += ` Key deadline: ${dateStr}.`;
         }
-        if (hasDocs) {
-          summary += ` Required documents include certificates and ID proofs.`;
+        if (docsStr) {
+          summary += ` Required documents: ${docsStr}.`;
         }
         summary += ` You can navigate sections using Outline or say "Read this page" to hear everything.`;
         return summary;

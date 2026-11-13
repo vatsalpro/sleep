@@ -9,6 +9,9 @@
     "storage",
     "offscreen"
   ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*"
+  ],
   "optional_host_permissions": [
     "http://localhost:11434/*",
     "https://*/*"
