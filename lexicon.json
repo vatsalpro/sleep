@@ -1,0 +1,301 @@
+{
+  "version": "1.0.0",
+  "supportedLanguages": [
+    { "code": "auto", "shortCode": "AUTO", "name": "Auto (Hinglish: HI -> EN retry)", "nativeName": "Auto", "speechLang": "hi-IN", "ruleSupported": true },
+    { "code": "en-IN", "shortCode": "EN", "name": "English (India)", "nativeName": "English", "speechLang": "en-IN", "ruleSupported": true },
+    { "code": "hi-IN", "shortCode": "HI", "name": "Hindi", "nativeName": "हिन्दी", "speechLang": "hi-IN", "ruleSupported": true },
+    { "code": "ta-IN", "shortCode": "TA", "name": "Tamil", "nativeName": "தமிழ்", "speechLang": "ta-IN", "ruleSupported": false },
+    { "code": "te-IN", "shortCode": "TE", "name": "Telugu", "nativeName": "తెలుగు", "speechLang": "te-IN", "ruleSupported": false },
+    { "code": "bn-IN", "shortCode": "BN", "name": "Bengali", "nativeName": "বাংলা", "speechLang": "bn-IN", "ruleSupported": false },
+    { "code": "mr-IN", "shortCode": "MR", "name": "Marathi", "nativeName": "मराठी", "speechLang": "mr-IN", "ruleSupported": false },
+    { "code": "gu-IN", "shortCode": "GU", "name": "Gujarati", "nativeName": "ગુજરાતી", "speechLang": "gu-IN", "ruleSupported": false },
+    { "code": "kn-IN", "shortCode": "KN", "name": "Kannada", "nativeName": "ಕನ್ನಡ", "speechLang": "kn-IN", "ruleSupported": false },
+    { "code": "ml-IN", "shortCode": "ML", "name": "Malayalam", "nativeName": "മലയാളം", "speechLang": "ml-IN", "ruleSupported": false },
+    { "code": "pa-IN", "shortCode": "PA", "name": "Punjabi", "nativeName": "ਪੰਜਾਬੀ", "speechLang": "pa-IN", "ruleSupported": false }
+  ],
+  "devanagariDigits": {
+    "०": "0",
+    "१": "1",
+    "२": "2",
+    "३": "3",
+    "४": "4",
+    "५": "5",
+    "६": "6",
+    "७": "7",
+    "८": "8",
+    "९": "9"
+  },
+  "hinglishVariants": {
+    "samjhaao": "samjhao",
+    "samjhana": "samjhao",
+    "smjhao": "samjhao",
+    "smjho": "samjhao",
+    "samjho": "samjhao",
+    "samjha": "samjhao",
+    "padho": "padho",
+    "parho": "padho",
+    "pdho": "padho",
+    "padhoo": "padho",
+    "padhao": "padho",
+    "kholo": "kholo",
+    "khulo": "kholo",
+    "kholna": "kholo",
+    "khol": "kholo",
+    "bharo": "bharo",
+    "bhro": "bharo",
+    "bharna": "bharo",
+    "likho": "likho",
+    "likhna": "likho",
+    "likh": "likho",
+    "dheere": "dheere",
+    "dhire": "dheere",
+    "dhere": "dheere",
+    "aahista": "dheere",
+    "ahista": "dheere",
+    "tez": "tez",
+    "tej": "tez",
+    "jaldi": "tez",
+    "wapas": "wapas",
+    "vaapas": "wapas",
+    "vapas": "wapas",
+    "waapas": "wapas",
+    "peeche": "peeche",
+    "piche": "peeche",
+    "pichhe": "peeche",
+    "aage": "aage",
+    "agla": "aage",
+    "neeche": "neeche",
+    "niche": "neeche",
+    "neche": "neeche",
+    "upar": "upar",
+    "oopar": "upar",
+    "haan": "haan",
+    "han": "haan",
+    "haa": "haan",
+    "hanji": "haan",
+    "haanji": "haan",
+    "nahi": "nahi",
+    "nhi": "nahi",
+    "nahin": "nahi",
+    "theek": "theek",
+    "thik": "theek",
+    "thk": "theek",
+    "kardo": "kar do",
+    "krdo": "kar do",
+    "kro": "karo",
+    "krna": "karna",
+    "btao": "batao",
+    "btaiye": "batao",
+    "bataiye": "batao",
+    "kitna": "kitni",
+    "kitne": "kitni",
+    "ismein": "isme",
+    "issmein": "isme",
+    "is mein": "isme",
+    "wala": "wala",
+    "waala": "wala",
+    "wali": "wali",
+    "dobara": "dobara",
+    "dubara": "dobara",
+    "phir se": "phir se",
+    "fir se": "phir se",
+    "chalu": "jaari",
+    "jari": "jaari",
+    "jaari": "jaari",
+    "shuru": "shuru",
+    "uplod": "upload",
+    "sabmit": "submit",
+    "submitt": "submit",
+    "summarize": "summarize",
+    "summarise": "summarize",
+    "explain me": "explain",
+    "make me understand": "explain",
+    "whats": "what is",
+    "what's": "what is",
+    "i'm": "i am",
+    "where's": "where is",
+    "when's": "when is",
+    "who's": "who is",
+    "how's": "how is",
+    "why's": "why is",
+    "likhdo": "likho",
+    "daalna": "daalo"
+  },
+  "fillers": [
+    "um",
+    "umm",
+    "uh",
+    "uhh",
+    "hmm",
+    "err",
+    "ah",
+    "actually",
+    "basically",
+    "please",
+    "kindly",
+    "hey",
+    "hi",
+    "hello",
+    "sleepwalker",
+    "assistant",
+    "listen",
+    "suno",
+    "ji",
+    "zara",
+    "jara",
+    "bhai",
+    "yaar",
+    "thoda",
+    "sir",
+    "madam",
+    "arey",
+    "अरे",
+    "सुनो",
+    "कृपया",
+    "प्लीज",
+    "ज़रा",
+    "जरा",
+    "जी",
+    "थोड़ा",
+    "भाई",
+    "यार"
+  ],
+  "protectedConfirmWords": [
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "haan",
+    "nahi",
+    "theek",
+    "theek hai",
+    "ruko",
+    "cancel",
+    "confirm",
+    "हां",
+    "हाँ",
+    "नहीं"
+  ],
+  "intents": {
+    "CONFIRM_YES": {
+      "exact": [
+        "yes", "yeah", "yep", "yup", "ok", "okay", "confirm", "approved",
+        "go ahead", "proceed", "do it", "sure", "haan", "haa", "hanji", "haanji",
+        "theek hai", "theek hai kar do", "kar do", "haan kar do", "ji haan", "bilkul", "sahi hai",
+        "हां", "हाँ", "हाँ जी", "ठीक है", "कर दो", "जी हां", "जी हाँ", "हाँ कर दो", "हां कर दो", "ठीक बात है", "बिल्कुल", "आगे बढ़ो"
+      ],
+      "keywords": ["confirm", "proceed", "go ahead", "haan", "theek hai", "kar do", "हां", "हाँ", "ठीक है"]
+    },
+    "CONFIRM_NO": {
+      "exact": [
+        "no", "nope", "nah", "cancel", "abort", "decline", "reject", "deny",
+        "do not", "don't", "never mind", "nahi", "mat karo", "mat kar", "rehne do",
+        "ruko mat karo", "band rakh", "nahi chahiye",
+        "नहीं", "मत करो", "रहने दो", "नहीं रहने दो", "नहीं मत करो", "कैंसल", "रद्द करो"
+      ],
+      "keywords": ["cancel", "abort", "mat karo", "rehne do", "nahi", "नहीं", "मत करो", "रद्द"]
+    },
+    "UNDO": {
+      "exact": [
+        "undo", "undo that", "revert", "revert last", "undo last",
+        "clear last", "remove last", "pichla hatao", "galti se likha",
+        "अनडू", "पिछला हटाओ", "वापस लो"
+      ],
+      "keywords": ["undo", "revert", "अनडू", "पिछला हटाओ"]
+    },
+    "CONTROL": {
+      "stop": ["stop", "stop reading", "quiet", "shut up", "be quiet", "band karo", "chup", "बंद करो", "रोक दो", "चुप"],
+      "pause": ["pause", "pause reading", "hold on", "wait", "ruko", "thehro", "रोको", "रुकिए", "ठहरो"],
+      "resume": ["resume", "continue", "continue task", "resume task", "continue reading", "keep reading", "play", "jaari rakho", "aage padho", "जारी रखो", "आगे पढ़ो"],
+      "repeat": ["repeat", "read again", "read it again", "start over", "from the beginning", "dobara padho", "phir se padho", "दोहराओ", "फिर से पढ़ो", "दोबारा पढ़ो"],
+      "slower": ["slower", "slow down", "speak slowly", "read slowly", "dheere", "dheere padho", "dheere bolo", "धीरे", "धीरे पढ़ो", "धीरे बोलो"],
+      "faster": ["faster", "speed up", "read faster", "speak faster", "tez padho", "tez bolo", "तेज पढ़ो", "तेज़ पढ़ो", "जल्दी पढ़ो"],
+      "language": {
+        "auto": ["auto language", "auto mode", "hinglish mode", "auto bhasha"],
+        "hi-IN": ["switch to hindi", "speak hindi", "hindi mode", "hindi mein", "hindi me", "hindi me bolo", "हिंदी में", "हिंदी में बोलो", "हिन्दी"],
+        "en-IN": ["switch to english", "speak english", "english mode", "english mein", "english me", "अंग्रेजी में", "इंग्लिश में"],
+        "ta-IN": ["switch to tamil", "tamil mode", "tamil mein", "தமிழ்"],
+        "te-IN": ["switch to telugu", "telugu mode", "telugu mein", "తెలుగు"],
+        "bn-IN": ["switch to bengali", "bengali mode", "bangla mode", "বাংলা"],
+        "mr-IN": ["switch to marathi", "marathi mode", "मराठी"],
+        "gu-IN": ["switch to gujarati", "gujarati mode", "ગુજરાતી"],
+        "kn-IN": ["switch to kannada", "kannada mode", "ಕನ್ನಡ"],
+        "ml-IN": ["switch to malayalam", "malayalam mode", "മലയാളം"],
+        "pa-IN": ["switch to punjabi", "punjabi mode", "ਪੰਜਾਬੀ"]
+      }
+    },
+    "HELP": {
+      "exact": [
+        "help", "commands", "what can you do", "how to use", "guide me",
+        "madad", "sahayata", "help karo", "madad karo", "kya kar sakte ho",
+        "मदद", "सहायता", "क्या कर सकते हो", "हेल्प"
+      ],
+      "keywords": ["help", "commands", "what can you do", "madad", "मदद", "सहायता", "हेल्प"]
+    },
+    "UPLOAD": {
+      "verbs": ["upload", "attach", "choose file", "select file", "lagao", "daalo", "अपलोड", "अटैच", "लगाओ", "डालो"],
+      "docNouns": ["photo", "pic", "image", "picture", "tasveer", "tasvir", "selfie", "camera", "signature", "sign", "marksheet", "result", "certificate", "income certificate", "caste certificate", "id", "aadhaar", "pan", "document", "resume", "cv", "pdf", "file", "फोटो", "तस्वीर", "सेल्फी", "कैमरा", "मार्कशीट", "सर्टिफिकेट", "दस्तावेज", "दस्तावेज़", "फ़ाइल", "फाइल"]
+    },
+    "FILL_PROFILE": {
+      "phrases": [
+        "fill my details", "fill profile", "fill saved profile", "autofill my details",
+        "use my profile", "use saved profile", "meri details bharo", "mera profile bharo",
+        "meri jankari bharo", "मेरी जानकारी भरो", "मेरा प्रोफाइल भरो"
+      ]
+    },
+    "FILL_GUIDED": {
+      "phrases": [
+        "fill this form", "fill form", "fill out the form", "help me fill",
+        "guided fill", "start form", "help me apply", "apply for this",
+        "form bharo", "form bharne me madad", "form bharne mein madad", "aavedan bharo",
+        "फॉर्म भरो", "आवेदन भरो", "अप्लाई करने में मदद करो", "फॉर्म भरने में मदद करो"
+      ]
+    },
+    "DICTATE": {
+      "ops": ["new line", "next line", "delete that", "erase last", "clear field", "naya line", "mitao", "saaf karo"],
+      "prefixes": ["write", "type", "enter", "dictate", "input", "fill"],
+      "suffixes": ["likho", "daalo", "लिखो", "डालो"]
+    },
+    "NAVIGATE": {
+      "submit": ["submit", "submit form", "submit the form", "submit kar do", "form submit karo", "jama karo", "सबमिट करो", "फॉर्म सबमिट करो", "जमा करो"],
+      "outline": ["outline", "show outline", "headings", "show headings", "table of contents", "sections", "आउटलाइन", "हेडिंग", "शीर्षक", "रूपरेखा"],
+      "scrollDown": ["scroll down", "page down", "go down", "neeche scroll karo", "neeche jao", "नीचे स्क्रॉल करो", "नीचे जाओ"],
+      "scrollUp": ["scroll up", "page up", "go up", "upar scroll karo", "upar jao", "ऊपर स्क्रॉल करो", "ऊपर जाओ"],
+      "scrollTop": ["scroll to top", "go to top", "top of page", "sabse upar", "सबसे ऊपर"],
+      "scrollBottom": ["scroll to bottom", "go to bottom", "bottom of page", "sabse neeche", "सबसे नीचे"],
+      "back": ["go back", "back", "previous", "wapas jao", "peeche jao", "वापस जाओ", "पीछे जाओ"],
+      "forward": ["go forward", "forward", "aage jao", "आगे जाओ"],
+      "refresh": ["refresh", "reload", "reload page", "refresh page", "पेज रीलोड करो"],
+      "nextPage": ["next page", "agla page", "अगला पेज"],
+      "prevPage": ["previous page", "prev page", "pichla page", "पिछला पेज"],
+      "clickVerbs": ["open", "click", "press", "tap", "select", "kholo", "dabao", "खोलो", "दबाओ", "क्लिक करो"],
+      "sectionVerbs": ["go to", "take me to", "jump to", "navigate to", "scroll to", "show me", "par le chalo", "par jao", "पेज पर जाओ", "पर ले चलो"],
+      "searchVerbs": ["search for", "search", "look up", "lookup", "find information about", "search karo", "सर्च करो"]
+    },
+    "EXPLAIN": {
+      "phrases": [
+        "explain", "explain this page", "explain the page", "summarize", "summarize this page",
+        "what is this page", "what is this page about", "what do i need to do",
+        "what should i do", "explain in simple words", "like im 10", "like i am 10",
+        "like i'm 10", "explain like i'm 10", "explain like i am 10",
+        "samjhao", "mujhe samjhao", "ye page kya hai", "kya karna hai", "asan bhasha mein",
+        "समझाओ", "यह पेज क्या है", "क्या करना है", "सरल शब्दों में बताओ", "सरल शब्दों में समझाओ",
+        "आसान भाषा में समझाओ", "आसान भाषा में बताओ", "बच्चे की तरह समझाओ"
+      ]
+    },
+    "READ": {
+      "phrases": [
+        "read this page", "read page", "read all", "start reading", "read content", "read",
+        "page padho", "ye padho", "padho", "sunao", "पेज पढ़ो", "यह पेज पढ़ो", "पढ़ो", "सुनाओ"
+      ]
+    },
+    "ANSWER": {
+      "questionWords": [
+        "what", "when", "where", "who", "whom", "whose", "which", "how", "why",
+        "is there", "are there", "can i", "do i need",
+        "kya", "kitni", "kitne", "kab", "kahan", "kaun", "kaise", "kyun", "kiske", "kiska", "isme",
+        "क्या", "कितनी", "कितना", "कितने", "कब", "कहां", "कहाँ", "कौन", "कैसे", "क्यों", "इसमें"
+      ]
+    }
+  }
+}

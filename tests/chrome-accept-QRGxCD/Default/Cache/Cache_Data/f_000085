@@ -1,0 +1,1336 @@
+/**
+ * Sleepwalker - content.js (Persistent & Context-Aware Runtime Controller)
+ * Lightweight top-frame coordinator connecting Sleepwalker modules directly to window.SW_UI,
+ * SleepwalkerMemory (persistent sessions, 10+ structured activities, hybrid embeddings),
+ * and the Central 12-Category Intent Router.
+ */
+(function () {
+  'use strict';
+  if (window !== window.top) return;
+
+  const SPEECH_LANGS = { auto: 'hi-IN', 'en-IN': 'en-IN', 'hi-IN': 'hi-IN', 'ta-IN': 'ta-IN', 'te-IN': 'te-IN', 'bn-IN': 'bn-IN', 'mr-IN': 'mr-IN', 'gu-IN': 'gu-IN', 'kn-IN': 'kn-IN', 'ml-IN': 'ml-IN', 'pa-IN': 'pa-IN' };
+
+  class SleepwalkerController {
+    constructor() {
+      this.lang = 'en-IN';
+      this.rate = 1.0;
+      this.fontSize = 18;
+      this.bargeIn = false;
+      this.lastUndoableType = 'forms';
+      this.errors = [];
+      this._lastToggleTime = 0;
+      this.isOpen = false;
+      this.shadowRoot = null;
+      this.pill = null;
+      this.glow = null;
+      this._bootPromise = null;
+      this._commandQueue = Promise.resolve();
+
+      this.initModules();
+      this.bindEvents();
+      this.loadPreferences();
+      this._installSpaNavigationWatcher();
+      this._installVisibilityAndTabListeners();
+      this._bootPromise = this.restorePersistentSessionOnBoot();
+
+      window.__SW_SAY__ = (text, opts = {}) => this.simulateVoiceInput(text, opts);
+    }
+
+    initModules() {
+      this.diagnostics = window.SleepwalkerDiagnostics || null;
+      this.reader = new window.SleepwalkerReader();
+      this.outline = new window.SleepwalkerOutline();
+      this.voice = new window.SleepwalkerVoice();
+      this.memory = window.SleepwalkerMemory ? new window.SleepwalkerMemory(this) : null;
+      this.confirm = window.SleepwalkerConfirm ? new window.SleepwalkerConfirm({ onChange: (st) => this.handleConfirmStateChange(st) }) : null;
+      this.intentEngine = window.SleepwalkerIntentEngine ? new window.SleepwalkerIntentEngine() : null;
+      this.linkIntent = window.SleepwalkerLinkIntent ? new window.SleepwalkerLinkIntent() : null;
+      this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
+      this.forms = window.SleepwalkerForms ? new window.SleepwalkerForms(this) : null;
+      this.upload = window.SleepwalkerUpload ? new window.SleepwalkerUpload(this) : null;
+      this.camera = window.SleepwalkerCamera ? new window.SleepwalkerCamera(this, { onCardChange: (s) => this.handleCameraCardChange(s) }) : null;
+      this.dialogue = window.SleepwalkerDialogue ? new window.SleepwalkerDialogue(this) : null;
+      this.explainer = window.SleepwalkerExplainer ? new window.SleepwalkerExplainer(this) : null;
+    }
+
+    bindEvents() {
+      const ui = window.SW_UI;
+      if (ui && typeof ui.setHandlers === 'function') {
+        ui.setHandlers({
+          onOrbClick: () => this.toggle({ startDialogue: true, source: 'orb' }),
+          onSubmitText: (text) => this.handleUserInput(text, 'typed'),
+          onDismiss: (reason) => this.dismissUi(reason || 'escape'),
+          onQuickControl: (pref, val) => {
+            if (pref === 'lang') this.setLanguage(val);
+            else if (pref === 'rate') this.setRate(Number(val));
+            else if (pref === 'fontSize') { this.fontSize = Number(val) || 18; this.savePreferences(); }
+            else if (pref === 'options' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+              chrome.runtime.sendMessage({ type: 'SLEEPWALKER_OPEN_OPTIONS' });
+            }
+          }
+        });
+      }
+
+      this.voice.onTranscript = ({ text }) => {
+        if (window.SW_UI && (!this.dialogue || this.dialogue.isActive() || window.SW_UI.getState() === 'listening')) {
+          window.SW_UI.setTranscript(text || '');
+        }
+      };
+
+      this.voice.onCommand = (cmd, meta = {}) => {
+        if (cmd && cmd.raw) {
+          this._setStatusChip(`Command received: "${cmd.raw}"`);
+          this.handleUserInput(cmd.raw, 'voice', {
+            asrConfidence: meta.confidence ?? cmd.confidence ?? null,
+            activeLang: meta.activeLang || this.voice.activeLang,
+            mode: meta.mode || this.voice.mode
+          });
+        }
+      };
+
+      this.voice.onLifecycleChange = (lifecycleState, detail) => {
+        if (!window.SW_UI) return;
+        if (lifecycleState === 'starting') {
+          window.SW_UI.setState('listening');
+          this._setStatusChip(detail || 'Listening...');
+        } else if (lifecycleState === 'listening') {
+          if (!this.dialogue || !this.dialogue.isPausedForSpeech()) {
+            window.SW_UI.setState('listening');
+            if (!window.SW_UI.transcript) this._setStatusChip(detail || 'Listening...');
+          }
+        } else if (lifecycleState === 'committing') {
+          window.SW_UI.setState('thinking');
+          this._setStatusChip(detail || 'Processing...');
+        } else if (lifecycleState === 'recovering') {
+          this._setStatusChip(detail || 'Temporarily unavailable — reconnecting...');
+        } else if (lifecycleState === 'error') {
+          window.SW_UI.setState('error');
+          this._setStatusChip(detail || 'Temporarily unavailable');
+        }
+      };
+
+      this.voice.onActivity = () => { if (this.dialogue) this.dialogue.noteSpeechActivity({ fromVoice: true }); };
+      this.voice.onLevel = (lvl) => { if (window.SW_UI && (!this.reader || !this.reader.isPlaying || this.reader.isPaused)) window.SW_UI.setLevel(lvl); };
+
+      this.voice.onStateChange = (on) => {
+        if (window.SW_UI) {
+          if (on && (!this.dialogue || !this.dialogue.isPausedForSpeech())) {
+            window.SW_UI.setState('listening');
+          } else if (!on && this.dialogue && this.dialogue.isActive() && !this.dialogue.isPausedForSpeech() && window.SW_UI.getState() === 'listening') {
+            window.SW_UI.setState('silent');
+          }
+        }
+        if (this.memory) {
+          if (on && this.dialogue && this.dialogue.isActive()) {
+            this.memory.setSessionMode('active_listening');
+          } else if (!on && this.dialogue && this.dialogue.isActive() && !this.dialogue.isPausedForSpeech()) {
+            this.memory.setSessionMode('active_not_listening');
+          }
+        }
+      };
+
+      this.voice.onError = ({ message }) => {
+        this.recordError(message);
+        if (window.SW_UI) {
+          window.SW_UI.setState('error');
+          window.SW_UI.showCard({ type: 'error', title: 'Microphone', text: message });
+        }
+      };
+
+      this.reader.onLevel = (lvl) => { if (window.SW_UI && this.reader.isPlaying && !this.reader.isPaused) window.SW_UI.setLevel(lvl); };
+      this.reader.onSentenceChange = ({ index }) => {
+        if (!window.SW_UI) return;
+        const i = Math.max(0, (index || 1) - 1);
+        window.SW_UI.highlightSentence(i);
+        if (this.explainer && this.explainer._topicSentenceOffsets) window.SW_UI.highlightTopic(i);
+      };
+
+      this.reader.onStatusChange = ({ isPlaying, isPaused }) => {
+        if (window.SW_UI) {
+          if (isPlaying && !isPaused) {
+            window.SW_UI.setState('speaking');
+            this._setStatusChip('Speaking...');
+          } else if (this.confirm && this.confirm.isAwaiting()) {
+            window.SW_UI.setState('confirm');
+          } else if (this.voice && this.voice.isListening && !this.voice.isPaused) {
+            window.SW_UI.setState('listening');
+          } else if (window.SW_UI.getState() !== 'idle') {
+            window.SW_UI.setState('silent');
+          }
+        }
+        if (this.memory) {
+          this.memory.state.isSpeaking = Boolean(isPlaying && !isPaused);
+        }
+        if (this.dialogue) this.dialogue.onSpeechStatusChange({ isPlaying, isPaused });
+      };
+
+      this.reader.onError = (err) => {
+        this.recordError(err);
+        if (this.dialogue && this.dialogue.isActive()) {
+          // Preserve the visible assistant response card and resume listening if TTS is blocked or unavailable
+          if (window.SW_UI) {
+            window.SW_UI.notifySpeechEnd();
+            window.SW_UI.setState(this.voice && this.voice.isListening ? 'listening' : 'silent');
+            this._setStatusChip('Reply shown (audio unavailable) — waiting for command...');
+          }
+          this.dialogue.onSpeechStatusChange({ isPlaying: false, isPaused: false });
+          return;
+        }
+        if (window.SW_UI) {
+          window.SW_UI.setState('error');
+          window.SW_UI.showCard({ type: 'error', title: 'Speech Error', text: err });
+        }
+        if (this.dialogue) this.dialogue.onSpeechStatusChange({ isPlaying: false, isPaused: false });
+      };
+
+      this.reader.onFinished = () => {
+        if (window.SW_UI) {
+          window.SW_UI.notifySpeechEnd();
+          if (this.confirm && this.confirm.isAwaiting()) {
+            window.SW_UI.setState('confirm');
+          } else if (this.dialogue && this.dialogue.isActive()) {
+            window.SW_UI.setState(this.voice.isListening ? 'listening' : 'silent');
+            this._setStatusChip('Waiting for the next command...');
+          } else if (window.SW_UI.getState() !== 'idle') {
+            window.SW_UI.setState('silent');
+          }
+        }
+        if (this.dialogue) this.dialogue.onSpeechStatusChange({ isPlaying: false, isPaused: false });
+      };
+    }
+
+    _setStatusChip(text) {
+      if (window.SW_UI && window.SW_UI.getState() !== 'idle') {
+        window.SW_UI.setTranscript(String(text || ''));
+      }
+    }
+
+    getDiagnostics() {
+      return this.diagnostics ? this.diagnostics.getReport() : { counters: {}, perf: {}, recentEvents: [], recentTraces: [] };
+    }
+
+    _installVisibilityAndTabListeners() {
+      if (this._visInstalled || typeof document === 'undefined') return;
+      this._visInstalled = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          if (this.voice && this.voice.isListening) {
+            this.voice.pauseForTabSwitch();
+          }
+        } else {
+          this.syncSessionFromTabActivation({ isForegroundTab: true });
+        }
+      });
+    }
+
+    async syncSessionFromTabActivation({ isForegroundTab = true } = {}) {
+      if (!this.memory || !isForegroundTab || (typeof document !== 'undefined' && document.hidden)) return;
+      const t0 = Date.now();
+      const state = await this.memory.loadState();
+      const mode = state && state.sessionMode;
+      if (mode === 'active_listening' || mode === 'active_not_listening' || mode === 'paused') {
+        this.isOpen = true;
+        const listenNow = mode === 'active_listening';
+        if (this.dialogue) {
+          this.dialogue.active = true;
+          this.dialogue.resting = false;
+          this.dialogue.pausedForSpeech = false;
+          this.dialogue._syncSessionIndicators();
+        }
+        if (this.voice) {
+          this.voice.continuousSession = listenNow;
+          if (listenNow && this.voice.isSupported) {
+            if (this.voice._pausedForTab) this.voice.resumeForTabSwitch();
+            else if (!this.voice.isListening) this.voice.startListening();
+          }
+        }
+        if (window.SW_UI && window.SW_UI.getState() === 'idle') {
+          window.SW_UI.setState(listenNow ? 'listening' : 'silent');
+          this._setStatusChip(listenNow ? 'Listening... Waiting for the next command' : 'Ready');
+        }
+        if (this.diagnostics) {
+          this.diagnostics.log('orb', 'restored', { durationMs: Date.now() - t0, mode, trigger: 'tab_sync' });
+        }
+      }
+    }
+
+    /**
+     * Restore active assistant session & page context automatically after full page reload,
+     * redirect, cross-website navigation, or SPA route transition.
+     */
+    async restorePersistentSessionOnBoot() {
+      if (!this.memory) return null;
+      const t0 = Date.now();
+      const state = await this.memory.loadState();
+
+      // Gather visible headings to enrich page visit context
+      const headings = this.outline && typeof this.outline.extractOutline === 'function'
+        ? (this.outline.extractOutline() || []).map((h) => h.text)
+        : [];
+      await this.memory.recordPageVisit({
+        url: window.location.href,
+        title: document.title,
+        headings
+      });
+
+      const mode = state && state.sessionMode;
+      if (mode === 'active_listening' || mode === 'active_not_listening' || mode === 'paused') {
+        this.isOpen = true;
+        const isForeground = typeof document === 'undefined' || !document.hidden;
+        const listenNow = mode === 'active_listening' && isForeground;
+        if (this.dialogue) {
+          this.dialogue.active = true;
+          this.dialogue.resting = false;
+          this.dialogue.pausedForSpeech = false;
+          this.dialogue._syncSessionIndicators();
+        }
+        if (this.voice) {
+          this.voice.continuousSession = mode === 'active_listening';
+          if (listenNow && this.voice.isSupported && !this.voice.isListening) {
+            this.voice.startListening();
+          }
+        }
+        if (isForeground && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          try {
+            chrome.runtime.sendMessage({ type: 'SLEEPWALKER_SET_ACTIVE_TAB' }, () => { void chrome.runtime.lastError; });
+          } catch (_e) {}
+        }
+        if (window.SW_UI) {
+          window.SW_UI.setState(listenNow ? 'listening' : 'silent');
+          this._setStatusChip(listenNow ? 'Listening... Waiting for the next command' : 'Ready');
+        }
+        if (this.diagnostics) {
+          this.diagnostics.log('orb', 'restored', { durationMs: Date.now() - t0, mode, isForeground });
+        }
+
+        // If we just navigated as part of an ongoing topic/task, show a helpful continuation card
+        const pendingNav = Array.isArray(state.pendingActions)
+          ? state.pendingActions.find((p) => p && p.type === 'post_navigation_announce')
+          : null;
+        if (pendingNav) {
+          this.memory.state.pendingActions = state.pendingActions.filter((p) => p !== pendingNav);
+          await this.memory.saveState();
+          const topic = state.currentTopic || (state.activeTask && state.activeTask.topic) || '';
+          const msg = `Opened ${document.title || 'the website'}${topic ? ` for ${topic}` : ''}. I am still listening — ask any follow-up question.`;
+          this.setAssistantReply(msg);
+          if (window.SW_UI) {
+            window.SW_UI.showCard({
+              type: 'answer',
+              title: document.title ? `On ${document.title.split(/[-|]/)[0].trim()}` : 'Page Loaded',
+              text: msg
+            });
+          }
+        }
+      } else if (mode === 'resting') {
+        if (this.dialogue) {
+          this.dialogue.active = false;
+          this.dialogue.resting = true;
+        }
+      }
+
+      return state;
+    }
+
+    /**
+     * Watch SPA history mutations (pushState, replaceState, popstate, hashchange) so Sleepwalker stays synced.
+     */
+    _installSpaNavigationWatcher() {
+      if (this._spaWatcherInstalled || typeof window === 'undefined') return;
+      this._spaWatcherInstalled = true;
+      let lastHref = window.location.href;
+
+      const onRouteChange = async () => {
+        const nextHref = window.location.href;
+        if (!nextHref || nextHref === lastHref) return;
+        lastHref = nextHref;
+        if (!this.memory) return;
+        const headings = this.outline && typeof this.outline.extractOutline === 'function'
+          ? (this.outline.extractOutline() || []).map((h) => h.text)
+          : [];
+        await this.memory.recordPageVisit({
+          url: nextHref,
+          title: document.title,
+          headings
+        });
+        if (this.dialogue && this.dialogue.isActive() && window.SW_UI && window.SW_UI.getState() === 'idle') {
+          window.SW_UI.setState(this.voice && this.voice.isListening ? 'listening' : 'silent');
+        }
+      };
+
+      window.addEventListener('popstate', onRouteChange);
+      window.addEventListener('hashchange', onRouteChange);
+
+      try {
+        const origPush = history.pushState;
+        const origReplace = history.replaceState;
+        history.pushState = function (...args) {
+          const ret = origPush.apply(this, args);
+          setTimeout(onRouteChange, 50);
+          return ret;
+        };
+        history.replaceState = function (...args) {
+          const ret = origReplace.apply(this, args);
+          setTimeout(onRouteChange, 50);
+          return ret;
+        };
+      } catch (_e) {}
+    }
+
+    /**
+     * Resume the most recent saved multi-step task or browsing topic cleanly (used on wake or "Continue where we left off").
+     */
+    async resumeSavedTask() {
+      if (!this.memory) {
+        return { status: 'no_memory' };
+      }
+      await this._bootPromise;
+      const task = this.memory.state.activeTask;
+      const topic = this.memory.state.currentTopic || (task && task.topic) || '';
+      const lastAct = this.memory.state.activities.length > 0
+        ? this.memory.state.activities[this.memory.state.activities.length - 1]
+        : null;
+
+      let msg = '';
+      if (task && task.objective) {
+        const nextHint = task.nextRecommendedAction || (task.pendingSteps && task.pendingSteps[0]) || 'ask your next question';
+        msg = `Continuing ${task.objective}. Last step: ${task.currentStep.replace(/_/g, ' ')}. Next you can say: ${nextHint}.`;
+        task.status = 'in_progress';
+        await this.memory.saveState();
+      } else if (topic) {
+        msg = `Resuming our conversation about ${topic}${lastAct ? ` (last command: "${lastAct.user_command}")` : ''}. What would you like to do next?`;
+      } else {
+        msg = 'I am ready. Tell me what you would like to explore or search on this page.';
+      }
+
+      this.setAssistantReply(msg);
+      if (window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({
+          type: 'answer',
+          title: topic ? `Continuing: ${topic}` : 'Resuming Session',
+          text: msg
+        });
+      }
+      if (this.reader) this.reader.readText(msg);
+
+      await this.memory.recordActivity({
+        user_command: 'Continue where we left off',
+        intent: 'CONVERSATION_CONTROL',
+        topic: topic || 'session_resume',
+        action: 'resumed_task',
+        result: msg
+      });
+      return { status: 'resumed', topic, message: msg };
+    }
+
+    getEffectiveSpeechLang(lang) { return SPEECH_LANGS[lang] || lang || 'hi-IN'; }
+    resolveReplyLang(c) { return (this.lang && this.lang !== 'auto') ? this.lang : ((c && c.lang && c.lang !== 'auto') ? c.lang : 'en-IN'); }
+    setLanguage(code) { this.lang = code || 'auto'; this.voice.setLang(this.lang); this.reader.setLang(this.getEffectiveSpeechLang(this.lang)); this.savePreferences(); }
+    setRate(r) { this.rate = Math.max(0.6, Math.min(1.8, Number(r) || 1.0)); this.reader.setRate(this.rate); this.savePreferences(); }
+    setAssistantReply(text) { if (this.dialogue && text && !/^(?:Listening\.\.\.|Idle|Ready\b|Reading sentence \d+)/i.test(String(text))) this.dialogue.lastSpokenText = String(text); }
+    syncStopButton() {}
+    recordError(msg) { if (msg) { this.errors.unshift({ time: new Date().toLocaleTimeString(), message: String(msg) }); this.errors.length = Math.min(10, this.errors.length); } }
+    open() { this.isOpen = true; }
+    close() { this.dismissUi('close'); }
+
+    dismissUi(reason = 'escape') {
+      this.isOpen = false;
+      if (this.camera && this.camera.isActive()) this.camera.cancelCapture();
+      if (this.confirm && this.confirm.isAwaiting()) this.confirm.cancel('user_escape');
+      if (this.confirm && this.confirm.isPlanActive()) this.confirm.cancelPlan('user_escape');
+      if (this.forms && this.forms.isGuidedActive()) this.forms.stopGuidedFill('cancelled');
+      if (this.reader && this.reader.isPlaying) this.stopReading();
+      if (this.explainer) this.explainer.abort();
+
+      if (reason === 'escape' || reason === 'close' || reason === 'hide_ui') {
+        if (this.dialogue && this.dialogue.isActive()) {
+          this.dialogue.endSession({ reason: 'escape', quiet: true, force: true });
+        } else if (this.voice) {
+          this.voice.stopListening();
+        }
+        if (this.memory) this.memory.setSessionMode('hidden');
+      } else {
+        if (this.dialogue && this.dialogue.isActive()) this.dialogue.endSession({ reason, quiet: true, force: true });
+        else if (this.voice) this.voice.stopListening();
+        if (this.memory) this.memory.setSessionMode(reason === 'toggle' ? 'ended' : 'hidden');
+      }
+      if (window.SW_UI) window.SW_UI.hide({ dissolve: reason !== 'instant' });
+    }
+
+    async toggle(options = {}) {
+      if (this._bootPromise) await this._bootPromise;
+
+      if (this.reader && this.reader.isPlaying && !this.reader.isPaused && this.dialogue) {
+        this.dialogue.interruptSpeech({ source: options.source || 'alt_s', resumeSession: true });
+        if (window.SW_UI) window.SW_UI.setState('listening');
+        return;
+      }
+
+      const now = Date.now();
+      if (this._lastToggleTime && now - this._lastToggleTime < 350) return;
+      this._lastToggleTime = now;
+
+      if (window.SW_UI && window.SW_UI.getState() !== 'idle') {
+        this.dismissUi('toggle');
+        return;
+      }
+
+      const wasRestingOrHidden = this.memory && (this.memory.isResting() || this.memory.getSessionMode() === 'hidden');
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_SET_ACTIVE_TAB' }, () => { void chrome.runtime.lastError; });
+        } catch (_e) {}
+      }
+      if (window.SW_UI) {
+        window.SW_UI.setState('listening');
+        window.SW_UI.setTranscript('Listening...');
+      }
+      this.isOpen = true;
+      if (this.dialogue) {
+        this.dialogue.startSession({
+          source: wasRestingOrHidden ? 'wake_resume' : (options.source || 'alt_s')
+        });
+      } else if (this.voice) {
+        this.voice.startListening();
+      }
+    }
+
+    startHoldToTalk() {
+      if (this.reader && this.reader.isPlaying) this.reader.stop();
+      this.voice.startListening();
+      if (window.SW_UI) { window.SW_UI.setState('listening'); window.SW_UI.setTranscript('Listening (Hold Alt+Z)...'); }
+    }
+
+    stopHoldToTalk() {
+      const committed = this.voice.stopListeningAndCommit();
+      if (window.SW_UI) window.SW_UI[committed ? 'setState' : 'hide'](committed ? 'thinking' : { dissolve: true });
+    }
+
+    simulateVoiceInput(text, opts = {}) {
+      const clean = String(text || '').trim();
+      if (!clean) return Promise.resolve(null);
+      if (this.dialogue) this.dialogue.noteSpeechActivity({ fromVoice: true });
+      if (window.SW_UI) window.SW_UI.setTranscript(clean);
+      return this.handleUserInput(clean, opts.source || 'voice', { simulated: true, asrConfidence: opts.confidence ?? 0.98 });
+    }
+
+    handleUserInput(text, inputSource = 'voice', meta = {}) {
+      const queued = this._commandQueue.then(
+        () => this._processUserInputInner(text, inputSource, meta),
+        () => this._processUserInputInner(text, inputSource, meta)
+      );
+      this._commandQueue = queued.catch(() => null);
+      return queued;
+    }
+
+    async _processUserInputInner(text, inputSource = 'voice', meta = {}) {
+      const turnStart = performance.now();
+      const rawInput = String(text || '').trim();
+      if (!rawInput) return null;
+      const raw = (this.voice && typeof this.voice.stripWakePrefix === 'function')
+        ? this.voice.stripWakePrefix(rawInput)
+        : rawInput;
+      if (!raw) return null;
+      if (this._bootPromise) await this._bootPromise;
+
+      const cmdId = (meta && meta.cmdId) || `sw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      this._setStatusChip(`Understanding: "${raw}"`);
+
+      // 1. Hide UI / UI visibility command without ending conversation
+      if (/^(?:hide\s+(?:the\s+)?(?:ui|orb|assistant)|minimize)$/i.test(raw)) {
+        this.dismissUi('hide_ui');
+        return { status: 'ui_hidden' };
+      }
+
+      // 2. Dialogue-level commands (rest, end, meta-commands, yes/no/choice pending prompts)
+      if (this.dialogue) {
+        const d = await this.dialogue.handleUtterance(raw, inputSource, meta);
+        if (d && d.handled) {
+          if (this.memory && !(meta && meta.sensitive)) {
+            await this.memory.recordActivity({
+              user_command: raw,
+              intent: 'CONVERSATION_CONTROL',
+              action: (d.result && d.result.status) || 'dialogue_handled',
+              result: this.dialogue.lastSpokenText || ''
+            });
+          }
+          if (this.diagnostics) {
+            this.diagnostics.recordTurnTrace({
+              cmdId,
+              intent: 'CONVERSATION_CONTROL',
+              centralCategory: 'CONVERSATION_CONTROL',
+              totalMs: Math.round(performance.now() - turnStart),
+              usedLlm: false,
+              status: (d.result && d.result.status) || 'handled'
+            });
+          }
+          return d.result;
+        }
+      }
+
+      if (this.camera && this.camera.isActive() && this.camera.handleVoiceCommand(raw)) return { status: 'camera_handled' };
+      if (this.confirm && this.confirm.isAwaiting()) {
+        const res = this.confirm.handleResponse({ raw });
+        if (res.handled) return res.result;
+      }
+      if (this.forms && this.forms.isDictatingLongText && this.forms.isDictatingLongText()) { this.forms.handleLongDictationInput(raw); return { status: 'long_dictation' }; }
+      if (this.forms && this.forms.isGuidedActive() && this.forms.guidedState.awaitingValue) { this.forms.handleGuidedInput(raw); return { status: 'guided_field' }; }
+
+      // 3. Resolve contextual references ("there", "that trip", "the second one", "its official website", "Continue where we left off")
+      const tCoref0 = performance.now();
+      const resolvedContext = this.memory
+        ? this.memory.resolveContextualReferences(raw, { title: document.title, url: window.location.href })
+        : { originalText: raw, resolvedText: raw, resolvedTopic: '', resolvedEntity: '', isFollowUp: false, isResumeCommand: false };
+      const corefMs = Math.round((performance.now() - tCoref0) * 100) / 100;
+
+      // Ambiguity gate: ask ONE short clarifying question instead of guessing when context is genuinely ambiguous
+      if (resolvedContext && resolvedContext.isAmbiguous && Array.isArray(resolvedContext.clarificationOptions) && resolvedContext.clarificationOptions.length >= 2) {
+        const q = resolvedContext.clarificationQuestion || 'Which option did you mean?';
+        const numbered = resolvedContext.clarificationOptions.map((opt, idx) => `${idx + 1}. ${opt}`).join(' ');
+        const msg = `${q} ${numbered}`;
+        const items = (this.memory && this.memory.state.currentEntities && this.memory.state.currentEntities.listItems) || [];
+        if (this.dialogue) {
+          this.dialogue.setPendingPrompt({
+            kind: 'choice',
+            label: 'ambiguous_entity_clarification',
+            askedText: msg,
+            options: resolvedContext.clarificationOptions,
+            onAnswer: async (_pickedOpt, info) => {
+              const pickedIdx = info && typeof info.index === 'number' ? info.index : 0;
+              const pickedItem = items[pickedIdx];
+              if (pickedItem && this.memory) {
+                this.memory.state.currentEntities.lastPickedIndex = pickedIdx;
+                this.memory.state.currentEntities.focusedEntity = pickedItem.title;
+                await this.memory.saveState();
+                if (pickedItem.officialUrl || pickedItem.url) {
+                  return this._navigateToExternalUrl(pickedItem.officialUrl || pickedItem.url, pickedItem.title, pickedItem.title);
+                }
+              }
+              return { status: 'clarified', option: _pickedOpt };
+            }
+          });
+        }
+        this.setAssistantReply(msg);
+        if (window.SW_UI) {
+          window.SW_UI.setState('confirm');
+          window.SW_UI.showCard({
+            type: 'choices',
+            title: 'Clarify Reference',
+            text: q,
+            choices: resolvedContext.clarificationOptions,
+            onAction: async (_id, d) => {
+              const idx = d && typeof d.index === 'number' ? d.index : 0;
+              if (this.dialogue) this.dialogue.pendingPrompt = null;
+              const pickedItem = items[idx];
+              if (pickedItem && this.memory) {
+                this.memory.state.currentEntities.lastPickedIndex = idx;
+                this.memory.state.currentEntities.focusedEntity = pickedItem.title;
+                await this.memory.saveState();
+                if (pickedItem.officialUrl || pickedItem.url) {
+                  this._navigateToExternalUrl(pickedItem.officialUrl || pickedItem.url, pickedItem.title, pickedItem.title);
+                }
+              }
+            }
+          });
+        }
+        if (this.reader) this.reader.readText(msg);
+        return { status: 'needs_clarification', resolvedContext, clarificationOptions: resolvedContext.clarificationOptions };
+      }
+
+      const queryForClassification = resolvedContext.resolvedText || raw;
+      const activeEl = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+      const sensitiveFocused = Boolean(this.forms && ((activeEl && this.forms.isSensitiveField(activeEl)) || (this.forms.lastFocusedField && this.forms.isSensitiveField(this.forms.lastFocusedField))));
+      const navChoiceCount = (this.navigator && Array.isArray(this.navigator.pendingChoices) && this.navigator.pendingChoices.length) || 0;
+
+      const pageDigest = this.explainer && typeof this.explainer.getPageDigest === 'function'
+        ? this.explainer.getPageDigest()
+        : null;
+      const intentOpts = {
+        cmdId,
+        logSearchTrace: true,
+        lang: this.lang,
+        sensitiveActive: sensitiveFocused,
+        hasPendingNavChoice: navChoiceCount > 0,
+        hasNumberedChoices: navChoiceCount > 0,
+        maxChoices: navChoiceCount || 5,
+        candidates: (navChoiceCount === 0 && this.navigator && this.navigator.getClickableCatalog()) || []
+      };
+
+      const tIntent0 = performance.now();
+      const syncRule = (this.intentEngine && typeof this.intentEngine.matchRules === 'function')
+        ? this.intentEngine.matchRules(queryForClassification, intentOpts)
+        : null;
+      const preCentral = (this.memory && typeof this.memory.classifyCentralIntent === 'function')
+        ? this.memory.classifyCentralIntent(raw, resolvedContext, syncRule, pageDigest)
+        : null;
+      const skipLlmFallback = Boolean(
+        (preCentral && this.memory && preCentral.category !== this.memory.CENTRAL_INTENTS.GENERAL_QUESTION) ||
+        (resolvedContext && resolvedContext.resolvedListItem && resolvedContext.resolvedListItem.entityType)
+      );
+
+      const classified = this.intentEngine
+        ? await this.intentEngine.classify(queryForClassification, { ...intentOpts, skipLlmFallback })
+        : { intent: 'HELP', args: {}, confidence: 0.5, cmdId };
+      const intentMs = Math.round((performance.now() - tIntent0) * 100) / 100;
+
+      // 4. Central 12-Category Intent Router
+      const centralIntent = this.memory
+        ? (skipLlmFallback && preCentral ? preCentral : this.memory.classifyCentralIntent(raw, resolvedContext, classified, pageDigest))
+        : null;
+
+      if (this.diagnostics) {
+        this.diagnostics.log('intent', 'classified', {
+          intent: classified && classified.intent,
+          centralCategory: centralIntent && centralIntent.category,
+          subAction: centralIntent && centralIntent.subAction,
+          source: (classified && classified.source) || 'rules',
+          durationMs: intentMs
+        });
+      }
+
+      this._setStatusChip('Processing...');
+
+      const tExec0 = performance.now();
+      let dispatchRes = null;
+      if (centralIntent) {
+        dispatchRes = await this._handleCentralRoute(centralIntent, classified, raw, resolvedContext, pageDigest);
+      }
+      if (!dispatchRes) {
+        dispatchRes = await this.dispatchIntent(classified, raw, resolvedContext);
+      }
+      const execMs = Math.round((performance.now() - tExec0) * 100) / 100;
+
+      const resultText = (dispatchRes && (dispatchRes.answer || dispatchRes.message || dispatchRes.section)) ||
+        (this.dialogue && this.dialogue.lastSpokenText) ||
+        '';
+
+      if (this.dialogue) {
+        this.dialogue.recordTurn({
+          user: raw,
+          action: (centralIntent && centralIntent.category) || classified.intent || 'command',
+          assistant: resultText
+        });
+      }
+
+      const tMem0 = performance.now();
+      if (this.memory && !sensitiveFocused && !this.memory.isSensitiveText(raw)) {
+        await this.memory.recordActivity({
+          user_command: raw,
+          intent: (centralIntent && centralIntent.category) || classified.intent || 'GENERAL_QUESTION',
+          topic: resolvedContext.resolvedTopic || (centralIntent && centralIntent.targetTopic) || this.memory.state.currentTopic,
+          entities: resolvedContext.resolvedEntity ? [resolvedContext.resolvedEntity] : undefined,
+          action: (dispatchRes && dispatchRes.status) || ((centralIntent && centralIntent.subAction) || 'executed'),
+          result: resultText
+        });
+      }
+      const memoryMs = Math.round((performance.now() - tMem0) * 100) / 100;
+      const totalMs = Math.round((performance.now() - turnStart) * 100) / 100;
+
+      if (this.diagnostics) {
+        const isNav = centralIntent && ['PAGE_NAVIGATION', 'EXTERNAL_NAVIGATION', 'PAGE_SEARCH'].includes(centralIntent.category);
+        const usedLlm = Boolean((classified && classified.source === 'llm') || (dispatchRes && dispatchRes.source && !/basic|extractive|rules/i.test(String(dispatchRes.source))));
+        this.diagnostics.recordTurnTrace({
+          cmdId,
+          intent: classified && classified.intent,
+          centralCategory: centralIntent && centralIntent.category,
+          corefMs,
+          intentMs,
+          memoryMs,
+          llmMs: usedLlm ? execMs : 0,
+          navigationMs: isNav ? execMs : 0,
+          totalMs,
+          usedLlm,
+          status: (dispatchRes && dispatchRes.status) || 'dispatched'
+        });
+      }
+
+      return {
+        status: (dispatchRes && dispatchRes.status) || 'dispatched',
+        centralIntent: centralIntent ? centralIntent.category : null,
+        classified,
+        resolvedContext,
+        timingMs: { corefMs, intentMs, execMs, memoryMs, totalMs },
+        ...(dispatchRes && typeof dispatchRes === 'object' ? dispatchRes : {})
+      };
+    }
+
+    /**
+     * Execute high-level central router intents (Off-Page Research, External Navigation, Multi-Step Task, Within-Page Search, Contextual Jumps).
+     */
+    async _handleCentralRoute(central, classified, raw, resolvedContext, pageDigest) {
+      const cat = central && central.category;
+      const C = this.memory ? this.memory.CENTRAL_INTENTS : {};
+
+      if (cat === C.CONVERSATION_CONTROL) {
+        if (central.subAction === 'resume_session_task' || central.subAction === 'return_earlier_task') {
+          return this.resumeSavedTask();
+        }
+        if (central.subAction === 'rest_session' && this.dialogue) {
+          this.dialogue.restSession({ reason: 'voice_rest' });
+          return { status: 'session_resting', message: 'Resting now.' };
+        }
+      }
+
+      if (cat === C.PAGE_SEARCH && central.subAction === 'search_within_page') {
+        return this._executeSearchWithinPage((classified && classified.args && classified.args.query) || central.resolvedQuery || raw, pageDigest);
+      }
+
+      if (cat === C.PAGE_NAVIGATION && central.subAction === 'navigate_section' && central.sectionTarget && this.navigator) {
+        this._setStatusChip(`Executing: finding "${central.sectionTarget}" section...`);
+        return this.navigator.goToSection(central.sectionTarget, { readAfter: true });
+      }
+
+      if (cat === C.OFF_PAGE_RESEARCH) {
+        return this._executeOffPageResearch(raw, resolvedContext, central, pageDigest);
+      }
+
+      if (cat === C.EXTERNAL_NAVIGATION) {
+        return this._executeExternalNavigation(central, raw, resolvedContext);
+      }
+
+      if (cat === C.MULTI_STEP_TASK) {
+        return this._executeMultiStepTask(central, raw, resolvedContext);
+      }
+
+      // Focused external discovery entity follow-up ("What about the second one?" after Germany universities / laptops)
+      const focusedExt = resolvedContext && resolvedContext.resolvedListItem;
+      if (focusedExt && focusedExt.entityType && focusedExt.summary) {
+        const ansText = `${focusedExt.title}: ${focusedExt.summary} Say "Open its official website" if you would like me to open its official site.`;
+        this.setAssistantReply(ansText);
+        if (window.SW_UI) {
+          window.SW_UI.setState('speaking');
+          const actions = focusedExt.officialUrl
+            ? [{ id: 'open_focused_ext', label: `Open ${focusedExt.title.split('(')[0].trim().slice(0, 26)}`, primary: true }]
+            : [];
+          window.SW_UI.showCard({
+            type: 'answer',
+            title: focusedExt.title,
+            text: ansText,
+            actions,
+            onAction: (id) => {
+              if (id === 'open_focused_ext' && focusedExt.officialUrl) {
+                this._navigateToExternalUrl(focusedExt.officialUrl, focusedExt.title, focusedExt.title);
+              }
+            }
+          });
+        }
+        if (this.reader) this.reader.readText(ansText);
+        return {
+          status: 'answered_entity_focus',
+          topic: focusedExt.title,
+          answer: ansText,
+          officialUrl: focusedExt.officialUrl || ''
+        };
+      }
+
+      // For FOLLOW_UP_QUESTION / CONTEXTUAL_QUESTION / GENERAL_QUESTION, enrich query with resolved coreference
+      if (resolvedContext && resolvedContext.isFollowUp && resolvedContext.resolvedText && resolvedContext.resolvedText !== raw) {
+        return this.explainPage({
+          mode: 'qa',
+          query: resolvedContext.resolvedText,
+          level: 'standard',
+          lang: this.resolveReplyLang(classified),
+          isFollowUp: true
+        });
+      }
+
+      return null;
+    }
+
+    /**
+     * Fast deterministic within-page search (<10ms) that locates matching chunks/headings in DOM without website navigation.
+     */
+    async _executeSearchWithinPage(query, pageDigest = null) {
+      const cleanQ = String(query || '').trim();
+      const digestApi = window.SleepwalkerDigest || null;
+      const digest = pageDigest || (this.explainer && this.explainer.getPageDigest && this.explainer.getPageDigest()) || null;
+
+      let matchedHeading = this.outline && this.outline.fuzzyFindHeading ? this.outline.fuzzyFindHeading(cleanQ) : null;
+      if (matchedHeading && this.outline && this.outline.scrollToHeading) {
+        this.outline.scrollToHeading(matchedHeading);
+      }
+
+      let snippet = '';
+      if (digest && digestApi && typeof digestApi.selectTopChunks === 'function') {
+        const chunks = digestApi.selectTopChunks(digest, cleanQ, { maxChunks: 2, maxTokens: 400 });
+        const top = chunks.find((c) => c.score > 0);
+        if (top) {
+          snippet = `Found in "${top.section}": ${top.text.slice(0, 260)}`;
+        }
+      }
+
+      const msg = snippet || (matchedHeading
+        ? `Moved to section matching "${cleanQ}": ${matchedHeading.text}.`
+        : `No clear match for "${cleanQ}" was found within this page.`);
+      this.setAssistantReply(msg);
+      if (window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({ type: 'answer', title: `On This Page: "${cleanQ}"`, text: msg });
+      }
+      if (this.reader) this.reader.readText(msg);
+      return { status: snippet || matchedHeading ? 'found_in_page' : 'not_found_in_page', scope: 'page', answer: msg };
+    }
+
+    /**
+     * Handle OFF_PAGE_RESEARCH: Research related topic off-page (e.g., travel/visa to China),
+     * synthesize practical guidance + official portal links, update activeTask, and offer to open links.
+     */
+    async _executeOffPageResearch(raw, resolvedContext, central, pageDigest) {
+      this._setStatusChip('Researching related travel & guide info...');
+      const plan = this.memory.buildOffPageResearchPlan(raw, resolvedContext, pageDigest);
+      let finalSummary = plan.summaryEn;
+
+      // Optionally enhance via LLM cascade ONLY when no structured listItems were already assembled, with a short 2500ms budget
+      if ((!plan.listItems || plan.listItems.length === 0) &&
+          typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          const llmRes = await new Promise((resolve) => {
+            let done = false;
+            const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 2500);
+            chrome.runtime.sendMessage(
+              {
+                type: 'SLEEPWALKER_OFF_PAGE_RESEARCH_REQUEST',
+                payload: { query: plan.resolvedQuery, topic: plan.targetTopic, lang: this.resolveReplyLang() }
+              },
+              (reply) => {
+                if (done) return;
+                done = true;
+                clearTimeout(t);
+                resolve(reply || null);
+              }
+            );
+          });
+          if (llmRes && llmRes.status === 'ok' && llmRes.answer) {
+            const recTitle = plan.recommendedUrls && plan.recommendedUrls[0] ? plan.recommendedUrls[0].title : '';
+            finalSummary = recTitle
+              ? `${llmRes.answer}\nRecommended: ${recTitle}. Would you like me to open it?`
+              : llmRes.answer;
+          }
+        } catch (_e) {}
+      }
+
+      await this.memory.upsertTask(plan.taskPatch);
+
+      const primaryUrl = plan.recommendedUrls[0];
+      if (this.dialogue && primaryUrl) {
+        this.dialogue.setPendingPrompt({
+          kind: 'yesno',
+          label: 'open_recommended_website',
+          askedText: finalSummary,
+          onAnswer: async (yes) => {
+            if (yes) {
+              return this._navigateToExternalUrl(primaryUrl.url, primaryUrl.title, plan.targetTopic);
+            }
+            const stayMsg = `Okay, keeping you on this page. Ask any other question about ${plan.targetTopic} anytime.`;
+            this.setAssistantReply(stayMsg);
+            if (window.SW_UI) window.SW_UI.showCard({ type: 'answer', title: 'Staying Here', text: stayMsg });
+            if (this.reader) this.reader.readText(stayMsg);
+            return { status: 'declined_navigation' };
+          }
+        });
+      }
+
+      this.setAssistantReply(finalSummary);
+      if (window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({
+          type: 'answer',
+          title: `${plan.targetTopic}: Research & Resources`,
+          text: finalSummary,
+          actions: plan.recommendedUrls.slice(0, 2).map((u, idx) => ({
+            id: `open_url_${idx}`,
+            label: idx === 0 ? `Open ${u.title.split('(')[0].trim().slice(0, 28)}` : 'Alternate Site',
+            primary: idx === 0
+          })),
+          onAction: (id) => {
+            const m = String(id).match(/^open_url_(\d+)$/);
+            const urlObj = m ? plan.recommendedUrls[Number(m[1])] : null;
+            if (urlObj) {
+              if (this.dialogue) this.dialogue.pendingPrompt = null;
+              this._navigateToExternalUrl(urlObj.url, urlObj.title, plan.targetTopic);
+            }
+          }
+        });
+      }
+      if (this.reader) this.reader.readText(finalSummary);
+
+      return {
+        status: 'off_page_research',
+        topic: plan.targetTopic,
+        resolvedQuery: plan.resolvedQuery,
+        recommendedUrls: plan.recommendedUrls,
+        answer: finalSummary
+      };
+    }
+
+    /**
+     * Handle EXTERNAL_NAVIGATION ("Open the relevant website", "Open its official website", "Open the travel website").
+     */
+    async _executeExternalNavigation(central, raw, resolvedContext) {
+      if (resolvedContext && resolvedContext.resolvedUrlTarget && resolvedContext.resolvedUrlTarget.url) {
+        return this._navigateToExternalUrl(
+          resolvedContext.resolvedUrlTarget.url,
+          resolvedContext.resolvedUrlTarget.title,
+          resolvedContext.resolvedEntity || resolvedContext.resolvedTopic || ''
+        );
+      }
+
+      const task = this.memory && this.memory.state.activeTask;
+      let urls = (task && Array.isArray(task.relevantUrls)) ? task.relevantUrls : [];
+
+      if (urls.length === 0) {
+        const plan = this.memory.buildOffPageResearchPlan(raw, resolvedContext, {});
+        urls = plan.recommendedUrls;
+        await this.memory.upsertTask(plan.taskPatch);
+      }
+
+      let picked = urls[0] || null;
+      if (central.ordinalWord && urls.length > 0) {
+        const idxMap = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2 };
+        const idx = idxMap[central.ordinalWord];
+        if (typeof idx === 'number' && urls[idx]) picked = urls[idx];
+      } else if (central.siteKind && urls.length > 1) {
+        const matchKind = urls.find((u) =>
+          (u.kind && u.kind.includes(central.siteKind)) ||
+          (u.title && u.title.toLowerCase().includes(central.siteKind))
+        );
+        if (matchKind) picked = matchKind;
+      }
+
+      if (!picked || !picked.url) {
+        const msg = 'I do not have a recommended website link yet. Ask me a research question first, like "How can I travel to China?".';
+        this.setAssistantReply(msg);
+        if (window.SW_UI) window.SW_UI.showCard({ type: 'answer', title: 'No Website Selected', text: msg });
+        if (this.reader) this.reader.readText(msg);
+        return { status: 'no_external_url', message: msg };
+      }
+
+      return this._navigateToExternalUrl(
+        picked.url,
+        picked.title,
+        (resolvedContext && resolvedContext.resolvedTopic) || (task && task.topic) || ''
+      );
+    }
+
+    async _navigateToExternalUrl(targetUrl, title = '', topic = '') {
+      this._setStatusChip(`Executing: Opening ${title || targetUrl}...`);
+      if (this.memory) {
+        await this.memory.setSessionMode('active_listening', { skipSave: true });
+        this.memory.state.pendingActions = [
+          ...(this.memory.state.pendingActions || []).filter((p) => p && p.type !== 'post_navigation_announce'),
+          { type: 'post_navigation_announce', url: targetUrl, title, topic }
+        ];
+        await this.memory.upsertTask({
+          currentStep: 'navigated_to_external_website',
+          completedStep: `Opened ${title || targetUrl}`,
+          nextRecommendedAction: `Review information or ask follow-up questions on ${title || 'this page'}`
+        });
+      }
+
+      const msg = `Opening ${title || targetUrl}...`;
+      this.setAssistantReply(msg);
+      if (window.SW_UI) {
+        window.SW_UI.showCard({ type: 'answer', title: 'Opening Website', text: msg });
+      }
+
+      setTimeout(() => {
+        try {
+          window.location.assign(targetUrl);
+        } catch (_e) {
+          window.location.href = targetUrl;
+        }
+      }, 150);
+
+      return { status: 'navigating_external', url: targetUrl, title, message: msg };
+    }
+
+    /**
+     * Handle MULTI_STEP_TASK ("Compare the second one with this", "Help me book flights...").
+     */
+    async _executeMultiStepTask(central, raw, resolvedContext) {
+      const lower = String(raw || '').toLowerCase();
+      const requiresSafetyConfirm = /\b(?:book|pay|payment|checkout|purchase|buy\s+now|submit\s+application|confirm\s+booking)\b/i.test(lower);
+
+      if (requiresSafetyConfirm && this.confirm) {
+        return new Promise((resolve) => {
+          this.confirm.request({
+            id: `task_safety_${Date.now()}`,
+            risk: 'critical',
+            confidence: 0.9,
+            title: 'Confirm Consequential Action',
+            message: `This involves a booking, payment, or submission ("${raw}"). Should I help prepare the steps first without completing any payment or submission?`,
+            summary: [`Request: ${raw}`],
+            onConfirm: async () => {
+              await this.memory.upsertTask({
+                objective: raw,
+                currentStep: 'preparing_safe_steps',
+                userDecision: 'Approved preparation only (no auto-payment/submission)'
+              });
+              const msg = 'Confirmed. I will prepare the details safely and ask for your explicit approval before any booking or submission.';
+              this.setAssistantReply(msg);
+              if (window.SW_UI) window.SW_UI.showCard({ type: 'answer', title: 'Safe Step Plan', text: msg });
+              if (this.reader) this.reader.readText(msg);
+              resolve({ status: 'task_prepared', message: msg });
+            },
+            onCancel: () => {
+              resolve({ status: 'task_cancelled', message: 'Cancelled booking/payment action.' });
+            }
+          });
+        });
+      }
+
+      // Item comparison ("Compare the second one with the first one", "Compare the second one with this", "Compare their admission requirements")
+      const items = (this.memory && this.memory.state.currentEntities && this.memory.state.currentEntities.listItems) || [];
+      const resolvedPair = (resolvedContext && Array.isArray(resolvedContext.resolvedListItems))
+        ? resolvedContext.resolvedListItems
+        : [];
+      const pickedItem = resolvedContext && resolvedContext.resolvedListItem;
+      const currentTitle = document.title.split(/[-|]/)[0].trim();
+
+      let msg = '';
+      if (resolvedPair.length >= 2) {
+        const a = resolvedPair[0].item;
+        const b = resolvedPair[1].item;
+        msg = `Comparing "${a.title}" and "${b.title}": ` +
+          `${a.summary ? `${a.title}: ${a.summary}` : `${a.title} (item ${a.index})`} ` +
+          `versus ${b.summary ? `${b.title}: ${b.summary}` : `${b.title} (item ${b.index})`}`;
+      } else if (/\badmission\s+requirements\b/i.test(lower) && items.length >= 2) {
+        msg = `Comparing admission requirements across ${items.slice(0, 3).map((i) => i.title).join(', ')}: ` +
+          items.slice(0, 3).map((i) => `${i.title}: ${i.summary || 'check official admission requirements directly.'}`).join(' | ');
+      } else if (pickedItem) {
+        msg = `Comparing "${pickedItem.title}" with current item "${currentTitle}": "${pickedItem.title}" was selected from your list${pickedItem.summary ? ` (${pickedItem.summary})` : ''}, while "${currentTitle}" is open right now.`;
+      } else if (items.length >= 2) {
+        msg = `Comparing "${items[1].title}" with "${items[0].title}": ` +
+          `${items[1].summary || items[1].title} versus ${items[0].summary || items[0].title}.`;
+      } else {
+        msg = `I resolved your comparison request ("${resolvedContext.resolvedText || raw}"). Tell me which two items or criteria you want compared.`;
+      }
+
+      await this.memory.upsertTask({
+        objective: `Compare ${resolvedPair.length >= 2 ? `${resolvedPair[0].item.title} vs ${resolvedPair[1].item.title}` : (pickedItem ? pickedItem.title : (resolvedContext.resolvedTopic || 'items'))}`,
+        currentStep: 'comparison_in_progress'
+      });
+
+      this.setAssistantReply(msg);
+      if (window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({ type: 'answer', title: 'Comparison', text: msg });
+      }
+      if (this.reader) this.reader.readText(msg);
+      return { status: 'compared', answer: msg };
+    }
+
+    async dispatchIntent(c, rawText = '', resolvedContext = null) {
+      const intent = (c && c.intent) || 'HELP';
+      const args = (c && c.args) || {};
+      const conf = typeof c.confidence === 'number' ? c.confidence : 0.8;
+      const cmdId = (c && c.cmdId) || `sw-${Date.now().toString(36)}`;
+      this._setStatusChip(`Executing: ${intent.toLowerCase().replace(/_/g, ' ')}...`);
+
+      if ((intent === 'SEARCH' || (intent === 'NAVIGATE' && args.action === 'search')) && this.navigator) {
+        const query = args.query || args.target || rawText;
+        return this.navigator.executeSearch(query, {
+          siteHint: args.siteHint || '',
+          scopeHint: args.scopeHint || '',
+          rawQuery: args.rawQuery || query,
+          rawCommand: args.rawCommand || rawText,
+          confidence: conf,
+          cmdId,
+          rawTranscript: rawText,
+          normalizedTranscript: (c && c.normalized) || ''
+        });
+      }
+      if (intent === 'READ') return args.scope === 'section' && args.target ? this.readSection(args.target) : this.readPage();
+      if (intent === 'EXPLAIN') return this.explainPage({ mode: args.mode || (args.target ? 'section' : 'summary'), level: args.level || 'standard', target: args.target || '', lang: this.resolveReplyLang(c) });
+      if (intent === 'ANSWER') {
+        const effectiveQuery = (resolvedContext && resolvedContext.resolvedText) || args.query || rawText;
+        const isExplicitQuestion = /[?？]/.test(rawText) || /^(?:what|when|where|who|whom|whose|which|how|why|can|could|do|does|is|are|should|will|would|tell\s+me|kya|kab|kahan|kaise|kyun|kitna|kitni|kitne|kaun|क्या|कब|कहाँ|कैसे|क्यों|कितना|कितनी|कौन)\b/i.test((c && c.normalized) || rawText);
+        if (c && c.ruleId === 'low_confidence_unmatched' && c.source === 'fallback' && !isExplicitQuestion) {
+          const repMsg = 'I did not catch that command clearly. Please repeat, or say "Search for...", "Explain this page", or "Read this page".';
+          this.setAssistantReply(repMsg);
+          if (window.SW_UI) { window.SW_UI.setState('speaking'); window.SW_UI.showCard({ type: 'answer', title: 'Please Repeat', text: repMsg }); }
+          if (this.reader) this.reader.readText(repMsg);
+          return { status: 'unrecognized_repeat', message: repMsg };
+        }
+        return this.explainPage({ mode: 'qa', query: effectiveQuery, level: 'standard', lang: this.resolveReplyLang(c), isFollowUp: Boolean(resolvedContext && resolvedContext.isFollowUp) });
+      }
+      if (intent === 'NAVIGATE' && this.navigator) return this.navigator.handleNavigationIntent(args, conf, rawText);
+      if (intent === 'FILL_GUIDED' && this.forms) return this.forms.startGuidedFill();
+      if (intent === 'DICTATE' && this.forms) { this.lastUndoableType = 'forms'; return this.forms.handleDictateIntent(args, rawText); }
+      if (intent === 'FILL_PROFILE' && this.forms) { this.lastUndoableType = 'forms'; return this.forms.fillFromProfile(); }
+      if (intent === 'UPLOAD') return (args.mode === 'camera' && this.camera) ? this.camera.requestCapture(args.target || rawText) : (this.upload && this.upload.requestUpload(args.target || rawText));
+      if (intent === 'UNDO') return (this.lastUndoableType === 'upload' && this.upload && this.upload.uploadUndoStack.length) ? this.upload.undoLastUpload() : (this.forms && this.forms.undoLast());
+      if (intent === 'CONTROL') {
+        if (args.action === 'pause') this.reader.pause();
+        else if (args.action === 'resume') this.reader.resume();
+        else if (args.action === 'stop') this.stopReading();
+        else if (args.action === 'repeat') this.reader.readAgain();
+        else if (args.action === 'language') this.setLanguage(args.lang || 'en-IN');
+        return { status: 'control_applied', action: args.action };
+      }
+      const msg = 'Commands: "Explain this page", "Read this page", "Fill this form", "Upload photo", or "Take a photo".';
+      this.setAssistantReply(msg);
+      if (window.SW_UI) { window.SW_UI.setState('speaking'); window.SW_UI.showCard({ type: 'answer', title: 'Help', text: msg }); }
+      return { status: 'help', message: msg };
+    }
+
+    readPage() { this.reader.setLang(this.getEffectiveSpeechLang(this.lang)); this.reader.readPage(); return { status: 'reading_page' }; }
+    readSection(q) {
+      if (this.outline && (!this.outline.items || this.outline.items.length === 0) && typeof this.outline.extractOutline === 'function') {
+        this.outline.extractOutline();
+      }
+      const h = this.outline ? this.outline.fuzzyFindHeading(q) : null;
+      if (h) {
+        if (typeof this.outline.scrollToHeading === 'function') this.outline.scrollToHeading(h);
+        const els = Array.isArray(h.sectionElements) && h.sectionElements.length > 0 ? h.sectionElements : (h.element ? [h.element] : []);
+        this.reader.readHeadingSection(h);
+        if (window.SW_UI) {
+          const preview = els.map((e) => (e && (e.innerText || e.textContent)) || '').join(' ').replace(/\s+/g, ' ').trim().slice(0, 260);
+          window.SW_UI.setState('speaking');
+          window.SW_UI.showCard({
+            type: 'summary',
+            title: `Section: ${h.text || q}`,
+            text: preview || `Moved to ${h.text || q}.`
+          });
+        }
+        return { status: 'reading_section', section: h.text };
+      }
+      if (window.SW_UI) window.SW_UI.showCard({ type: 'error', title: 'Section Not Found', text: `No section matching "${q}".` });
+      return { status: 'not_found' };
+    }
+    stopReading() { this.reader.stop(); }
+    explainPage(opts) { if (this.explainer) return Promise.resolve(this.explainer.runExplainPipeline(opts)).catch(() => null); return Promise.resolve(null); }
+
+    handleConfirmStateChange({ pending, plan } = {}) {
+      if (!window.SW_UI) return;
+      if (pending) {
+        const isCh = Array.isArray(pending.options) && pending.options.length > 0;
+        window.SW_UI.setState('confirm');
+        window.SW_UI.showCard({
+          type: isCh ? 'choices' : 'confirm', title: pending.title || 'Confirm', text: pending.message || '',
+          stepLabel: !isCh && pending.requiredSteps > 1 ? `Step ${pending.step || 1} of ${pending.requiredSteps}` : '',
+          summaryLines: pending.summary || [], choices: isCh ? pending.options.slice(0, 5) : undefined,
+          actions: isCh ? [{ id: 'cancel', label: 'Cancel' }] : [{ id: 'yes', label: 'Yes', primary: true }, { id: 'no', label: 'No' }],
+          onAction: (id, d) => ((id === 'yes' || (id === 'choose' && d)) ? this.confirm.confirm(d ? d.index : undefined) : this.confirm.cancel('user_denied'))
+        });
+      } else if (plan && plan.status !== 'done' && plan.status !== 'cancelled') {
+        window.SW_UI.setState('confirm');
+        window.SW_UI.showCard({ type: 'plan', title: plan.title, steps: plan.steps, actions: [{ id: 'cancel', label: 'Cancel Plan' }], onAction: () => this.confirm.cancelPlan('user_cancelled') });
+      } else if (['confirm', 'choices', 'plan'].includes(window.SW_UI.getCardType())) {
+        window.SW_UI.hideCard();
+      }
+    }
+
+    handleUploadCardChange(cs) {
+      if (!window.SW_UI || !this.upload) return;
+      if (!cs || !cs.target) { if (window.SW_UI.getCardType() === 'file') window.SW_UI.hideCard(); return; }
+      const { target, stage, selectedFile, error, canCompress, shelfMatch, shelfNote, shelfNeedsReauth } = cs;
+      const acts = [];
+      if (stage === 'choose' || stage === 'validation_error') {
+        acts.push({ id: 'choose_file', label: 'Choose File', primary: true });
+        if (canCompress && selectedFile) acts.push({ id: 'compress', label: 'Compress Photo' });
+        if (shelfMatch) acts.push({ id: 'use_shelf', label: `Shelf: ${shelfMatch.name}` });
+        if (!target.accept || /image|\.(?:jpe?g|png|webp)/i.test(target.accept)) acts.push({ id: 'use_camera', label: 'Use Camera' });
+        if (shelfNeedsReauth) acts.push({ id: 'shelf_setup', label: 'Re-allow Shelf' });
+      } else if (stage === 'attached') { this.lastUndoableType = 'upload'; acts.push({ id: 'undo', label: 'Undo' }); }
+      acts.push({ id: 'cancel', label: stage === 'attached' ? 'Done' : 'Cancel' });
+      window.SW_UI.setState(stage === 'validation_error' ? 'error' : 'confirm');
+      window.SW_UI.showCard({
+        type: 'file', title: stage === 'attached' ? 'File Attached' : 'Upload Document', fieldLabel: target.label || 'File upload',
+        fileInfo: error || (selectedFile ? selectedFile.name : (shelfNote || 'Tap Choose File to select a file.')),
+        targetEl: target.element || target.dropZone || null, useCardPicker: stage === 'choose' || stage === 'validation_error',
+        onFilePick: (f) => this.upload.handleSelectedFile(f, target), actions: acts,
+        onAction: async (id) => {
+          if (id === 'compress' && selectedFile) { const c = await this.upload.compressImageToTargetLimit(selectedFile, target.maxBytes); if (c) this.upload.handleSelectedFile(c, target); }
+          else if (id === 'use_shelf' && shelfMatch) this.upload[shelfMatch.fileHandle ? 'pickFromShelfEntry' : 'pickFromExtensionShelf'](shelfMatch, target);
+          else if (id === 'use_camera' && this.camera) { this.upload.clearFileCard(); this.camera.requestCapture(target.label || 'photo', target); }
+          else if (id === 'shelf_setup') this.upload.openShelfSetup();
+          else if (id === 'undo') this.upload.undoLastUpload();
+          else this.upload.clearFileCard();
+        }
+      });
+    }
+
+    handleCameraCardChange(cs) {
+      if (!window.SW_UI || !this.camera) return;
+      if (!cs || !cs.target) { if (window.SW_UI.getCardType() === 'file') window.SW_UI.hideCard(); return; }
+      const acts = [];
+      if (cs.stage === 'live' || cs.stage === 'countdown') acts.push({ id: 'shoot', label: 'Take Photo (3-2-1)', primary: true });
+      else if (cs.stage === 'preview') acts.push({ id: 'attach', label: 'Use This Photo', primary: true }, { id: 'retake', label: 'Retake' });
+      else if (cs.stage === 'permission_help') acts.push({ id: 'retry', label: 'Retry Camera', primary: true }, { id: 'fallback', label: 'Choose File' });
+      acts.push({ id: 'cancel', label: 'Cancel' });
+      window.SW_UI.setState(cs.stage === 'permission_help' ? 'error' : 'confirm');
+      window.SW_UI.showCard({
+        type: 'file', title: (cs.stage === 'live' || cs.stage === 'countdown') ? `● Camera on${cs.countdown ? ` (${cs.countdown}...)` : ''}` : 'Camera Capture',
+        fieldLabel: cs.target.label || 'Photo', text: cs.error || (Array.isArray(cs.helpSteps) ? cs.helpSteps.join(' ') : ''),
+        mediaStream: (cs.stage === 'live' || cs.stage === 'countdown') ? cs.stream : null, previewUrl: cs.stage === 'preview' ? cs.previewUrl : '',
+        targetEl: cs.target.element || null, actions: acts,
+        onAction: (id) => {
+          if (id === 'shoot') this.camera.captureWithCountdown(3);
+          else if (id === 'attach') this.camera.confirmAttach();
+          else if (id === 'retake') this.camera.retake();
+          else if (id === 'retry') this.camera.startCamera(cs.target);
+          else if (id === 'fallback' && this.upload) { const t = cs.target; this.camera.cancelCapture(); this.upload._openChooseFileCard(t); }
+          else this.camera.cancelCapture();
+        }
+      });
+    }
+
+    loadPreferences() {
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
+      chrome.storage.local.get(['sleepwalker_lang', 'sleepwalker_font_size', 'sleepwalker_rate', 'sleepwalker_barge_in', 'sleepwalker_ai_search_enabled', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model'], (d) => {
+        if (d.sleepwalker_lang) this.setLanguage(d.sleepwalker_lang);
+        if (d.sleepwalker_rate) this.setRate(d.sleepwalker_rate);
+        if (d.sleepwalker_font_size) this.fontSize = Number(d.sleepwalker_font_size) || 18;
+        this.bargeIn = Boolean(d.sleepwalker_barge_in);
+        this.aiSearchEnabled = d.sleepwalker_ai_search_enabled !== false;
+        this.ollamaUrl = d.sleepwalker_ollama_url || 'http://localhost:11434';
+        this.ollamaModel = d.sleepwalker_ollama_model || 'llama3.2:3b';
+        if (this.navigator) {
+          this.navigator.aiSearchEnabled = this.aiSearchEnabled;
+          this.navigator.ollamaUrl = this.ollamaUrl;
+          this.navigator.ollamaModel = this.ollamaModel;
+        }
+        if (this.dialogue) this.dialogue.setBargeIn(this.bargeIn);
+      });
+    }
+
+    savePreferences() {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ sleepwalker_lang: this.lang, sleepwalker_font_size: this.fontSize, sleepwalker_rate: this.rate });
+      }
+    }
+  }
+
+  window.SleepwalkerController = SleepwalkerController;
+  if (!window.__SLEEPWALKER_INITIALIZED__) {
+    window.__SLEEPWALKER_INITIALIZED__ = true;
+    const ctrl = new SleepwalkerController();
+    window.__SLEEPWALKER_INSTANCE__ = ctrl;
+    window.__SW_WIDGET__ = ctrl;
+    let holdZ = false;
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((req, _s, send) => {
+        if (req && req.action === 'SLEEPWALKER_TOGGLE') {
+          ctrl.toggle({ startDialogue: true, source: 'alt_s' });
+          send({ status: 'ok' });
+        } else if (req && req.action === 'SLEEPWALKER_SYNC_SESSION') {
+          ctrl.syncSessionFromTabActivation({ isForegroundTab: req.isForegroundTab !== false });
+          send({ status: 'ok' });
+        } else if (req && req.action === 'SLEEPWALKER_TAB_BACKGROUNDED') {
+          if (ctrl.voice && ctrl.voice.isListening) {
+            ctrl.voice.pauseForTabSwitch();
+          }
+          send({ status: 'ok' });
+        }
+        return true;
+      });
+    }
+    window.addEventListener('keydown', (e) => {
+      if (e.altKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); ctrl.toggle({ startDialogue: true, source: 'alt_s' }); }
+      else if (e.altKey && (e.key === 'z' || e.key === 'Z') && !e.repeat) { e.preventDefault(); holdZ = true; ctrl.startHoldToTalk(); }
+      else if (e.key === 'Escape' && window.SW_UI && window.SW_UI.getState() !== 'idle') { e.preventDefault(); ctrl.dismissUi('escape'); }
+    }, true);
+    window.addEventListener('keyup', (e) => { if ((e.key === 'z' || e.key === 'Z') && holdZ) { e.preventDefault(); holdZ = false; ctrl.stopHoldToTalk(); } }, true);
+  }
+})();

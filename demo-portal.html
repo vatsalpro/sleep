@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>National Scholarship Demo Portal 2026 - Sleepwalker Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --ink: #162033;
+      --muted: #4b5563;
+      --accent: #1d4ed8;
+      --accent-soft: #eff6ff;
+      --border: #d1d5db;
+      --warn-bg: #fffbeb;
+      --warn-border: #d97706;
+      --danger: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Nirmala UI", "Noto Sans Devanagari", sans-serif;
+      font-size: 18px;
+      line-height: 1.65;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    .container { max-width: 920px; margin: 0 auto; padding: 24px 20px 64px; }
+    header.portal-header {
+      background: linear-gradient(135deg, #172554, #1e40af);
+      color: #ffffff;
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    header.portal-header h1 { margin: 0 0 8px; font-size: 28px; }
+    header.portal-header p { margin: 0; color: #dbeafe; font-size: 17px; }
+    nav.portal-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      margin-bottom: 24px;
+    }
+    nav.portal-nav a, nav.portal-nav button {
+      min-height: 44px;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #f9fafb;
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 16px;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+    }
+    nav.portal-nav a:hover, nav.portal-nav button:hover { background: var(--accent-soft); }
+    nav.portal-nav .btn-danger-outline { color: var(--danger); border-color: #fca5a5; background: #fef2f2; }
+    section.card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+      margin-bottom: 20px;
+    }
+    h2 { margin-top: 0; font-size: 23px; color: #1e3a8a; border-bottom: 1px solid #e5e7eb; padding-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid var(--border); padding: 11px 12px; text-align: left; }
+    th { background: var(--accent-soft); color: #1e3a8a; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .field-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-weight: 600; font-size: 17px; }
+    input[type="text"], input[type="email"], input[type="tel"], input[type="date"], input[type="password"], select {
+      min-height: 48px;
+      padding: 10px 12px;
+      font-size: 17px;
+      border: 1px solid #9ca3af;
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+    }
+    .radio-row, .checkbox-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; min-height: 44px; }
+    .sensitive-panel {
+      background: var(--warn-bg);
+      border: 2px dashed var(--warn-border);
+      border-radius: 12px;
+      padding: 16px;
+      margin: 20px 0;
+    }
+    .dropzone {
+      position: relative;
+      border: 2px dashed var(--accent);
+      border-radius: 12px;
+      padding: 18px;
+      background: var(--accent-soft);
+      text-align: center;
+      cursor: pointer;
+    }
+    .dropzone input[type="file"].sr-file {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .btn-primary {
+      min-height: 50px;
+      padding: 12px 24px;
+      font-size: 18px;
+      font-weight: 700;
+      border-radius: 10px;
+      border: none;
+      background: var(--accent);
+      color: #ffffff;
+      cursor: pointer;
+    }
+    .btn-secondary {
+      min-height: 48px;
+      padding: 10px 18px;
+      font-size: 17px;
+      font-weight: 600;
+      border-radius: 10px;
+      border: 1px solid var(--accent);
+      background: #ffffff;
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .status-banner {
+      margin-top: 14px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: #ecfdf5;
+      border: 1px solid #6ee7b7;
+      color: #065f46;
+      font-weight: 600;
+      display: none;
+    }
+    .pagination-bar {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="portal-header" role="banner">
+      <h1>National Scholarship Portal 2026 (Demo)</h1>
+      <p>Press <kbd>Alt+S</kbd> or tap the Sleepwalker floating pill to explain sections, navigate, dictate fields, or attach documents.</p>
+    </header>
+
+    <nav class="portal-nav" aria-label="Portal Navigation">
+      <a href="#overview">Overview</a>
+      <a href="#fees">Fee Structure</a>
+      <a href="#documents">Documents</a>
+      <a href="#dates">Important Dates</a>
+      <a href="#apply-form">Apply Now</a>
+      <a href="#scheme-post-matric">Post-Matric Scholarship</a>
+      <a href="#scheme-merit">Merit Scholarship</a>
+      <a href="sample-brochure.pdf" download="scholarship-brochure-2026.pdf">Download Brochure</a>
+      <a href="https://scholarships.gov.in/" target="_blank" rel="noopener noreferrer">Official NSP Site</a>
+      <button type="button" id="btn-pay-fee" class="btn-secondary">Pay Fee 1,200 INR</button>
+      <button type="button" id="btn-logout" class="btn-danger-outline">Logout</button>
+    </nav>
+
+    <main id="main-content">
+      <section id="overview" class="card">
+        <h2>Scheme Overview</h2>
+        <p>
+          The National Scholarship Demo Scheme supports undergraduate and postgraduate students across India with tuition waivers and an annual stipend.
+        </p>
+        <p id="scheme-post-matric">
+          <strong>Post-Matric Scholarship:</strong> Covers students with verified annual family income below 8,00,000 INR.
+        </p>
+        <p id="scheme-merit">
+          <strong>Merit-cum-Means Scholarship:</strong> Awarded to top 60% scorers in 12th or degree examinations.
+        </p>
+        <div class="radio-row">
+          <button type="button" id="btn-glow-underlay-check" class="btn-secondary">Test Underlay Click (Glow Safe)</button>
+          <span id="underlay-count" aria-live="polite">Clicks: 0</span>
+        </div>
+      </section>
+
+      <section id="fees" class="card">
+        <h2>Application Fee Structure</h2>
+        <p>Registration fee is payable once per academic cycle before submitting the final application.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Applicant Category</th>
+              <th>Registration Fee</th>
+              <th>Processing Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>General &amp; OBC</td>
+              <td>1,200 INR</td>
+              <td>3 to 5 business days</td>
+            </tr>
+            <tr>
+              <td>SC, ST &amp; PwD</td>
+              <td>600 INR</td>
+              <td>1 to 2 business days</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="documents" class="card">
+        <h2>Required Documents</h2>
+        <ul>
+          <li>Recent Passport Photo (JPG or PNG, maximum size 500 KB).</li>
+          <li>10th and 12th Marksheet (PDF or JPG, maximum size 2 MB).</li>
+          <li>Valid Income Certificate showing family income below 8,00,000 INR (PDF or Image, Max 2 MB).</li>
+        </ul>
+      </section>
+
+      <section id="dates" class="card">
+        <h2>Important Dates and Deadlines</h2>
+        <ul>
+          <li>Portal Opening Date: December 1, 2026</li>
+          <li>Last Date for Online Submission: January 15, 2027</li>
+          <li>Verification &amp; Hall Ticket Date: February 1, 2027</li>
+        </ul>
+      </section>
+
+      <section id="apply-form" class="card">
+        <h2>Scholarship Application Form</h2>
+        <form id="scholarship-apply-form">
+          <div class="form-grid">
+            <div class="field-group">
+              <label for="f-name">Full Name</label>
+              <input type="text" id="f-name" name="full_name" placeholder="e.g. Vatsal Kumar" required />
+            </div>
+            <div class="field-group">
+              <label for="f-email">Email Address</label>
+              <input type="email" id="f-email" name="email" placeholder="name@example.com" required />
+            </div>
+            <div class="field-group">
+              <label for="f-phone">Phone Number</label>
+              <input type="tel" id="f-phone" name="phone" minlength="10" placeholder="10-digit mobile number" />
+            </div>
+            <div class="field-group">
+              <label for="f-dob">Date of Birth</label>
+              <input type="date" id="f-dob" name="dob" />
+            </div>
+            <div class="field-group">
+              <label for="f-state">Home State</label>
+              <select id="f-state" name="state">
+                <option value="">-- Select State --</option>
+                <option value="DL">Delhi</option>
+                <option value="MH">Maharashtra</option>
+                <option value="KA">Karnataka</option>
+                <option value="TN">Tamil Nadu</option>
+                <option value="UP">Uttar Pradesh</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label>Course Level</label>
+              <div class="radio-row">
+                <label><input type="radio" id="r-ug" name="course_level" value="ug" aria-label="Course Level" /> Undergraduate</label>
+                <label><input type="radio" id="r-pg" name="course_level" value="pg" aria-label="Course Level" /> Postgraduate</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="sensitive-panel">
+            <h3>Verification &amp; Security Fields (Never Read or Sent to AI)</h3>
+            <p>Sleepwalker refuses to dictate, store, or transmit passwords, OTPs, Aadhaar, PAN, CVV, UPI PINs, or CAPTCHAs.</p>
+            <div class="form-grid">
+              <div class="field-group">
+                <label for="f-password">Portal Password</label>
+                <input type="password" id="f-password" name="password" value="SecretDemoPass#987" />
+              </div>
+              <div class="field-group">
+                <label for="f-otp">One-Time Password (OTP)</label>
+                <input type="text" id="f-otp" name="otp" placeholder="Enter OTP" value="482910" />
+              </div>
+              <div class="field-group">
+                <label for="f-aadhaar">Aadhaar Number</label>
+                <input type="text" id="f-aadhaar" name="aadhaar" aria-label="Aadhaar Number" placeholder="12-digit Aadhaar" />
+              </div>
+              <div class="field-group">
+                <label for="f-pan">PAN Card</label>
+                <input type="text" id="f-pan" name="pan" placeholder="PAN Card Number" />
+              </div>
+              <div class="field-group">
+                <label for="f-cvv">Card CVV</label>
+                <input type="text" id="f-cvv" name="cvv" autocomplete="cc-csc" placeholder="CVV" />
+              </div>
+              <div class="field-group">
+                <label for="f-captcha">CAPTCHA Code</label>
+                <input type="text" id="f-captcha" name="captcha" placeholder="Enter CAPTCHA" />
+              </div>
+            </div>
+          </div>
+
+          <h3>Document Uploads</h3>
+          <div class="form-grid" style="margin-bottom:18px;">
+            <div class="field-group">
+              <label for="up-photo">Passport Photo (JPG/PNG, Max 500 KB)</label>
+              <input type="file" id="up-photo" name="photo" accept="image/jpeg,image/png" data-max-kb="500" />
+            </div>
+            <div class="field-group">
+              <label for="up-marksheet">10th / 12th Marksheet (Max 2 MB)</label>
+              <input type="file" id="up-marksheet" name="marksheet" accept=".pdf,.jpg,.jpeg" />
+            </div>
+          </div>
+
+          <div id="dz-income" class="dropzone" data-dropzone="true" aria-label="Income Certificate">
+            <input type="file" id="up-income" class="sr-file" name="income_certificate" accept="application/pdf,.pdf,image/*" />
+            <strong>Drop Income Certificate here</strong> (PDF or Image, Max 2 MB)
+            <div id="dz-income-status" style="margin-top:6px;font-size:16px;color:#374151;">No file attached yet.</div>
+          </div>
+
+          <div class="checkbox-row" style="margin:16px 0;">
+            <label><input type="checkbox" id="f-agree" name="agree" /> I confirm all details and documents above are true.</label>
+          </div>
+
+          <button type="submit" id="btn-submit-app" class="btn-primary">Submit Application</button>
+          <div id="demo-status-banner" class="status-banner" role="status" aria-live="polite"></div>
+        </form>
+
+        <div class="pagination-bar">
+          <a href="#overview" aria-label="Previous page">Previous Page</a>
+          <a href="#apply-form" rel="next" aria-label="Next page">Next Page</a>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      const state = window.__demoPortalState = {
+        submittedCount: 0,
+        payClicked: 0,
+        logoutClicked: 0,
+        underlayClicks: 0,
+        droppedFiles: []
+      };
+
+      const banner = document.getElementById('demo-status-banner');
+      function showBanner(msg) {
+        banner.textContent = msg;
+        banner.style.display = 'block';
+      }
+
+      document.getElementById('btn-glow-underlay-check').addEventListener('click', () => {
+        state.underlayClicks += 1;
+        document.getElementById('underlay-count').textContent = `Clicks: ${state.underlayClicks}`;
+      });
+
+      document.getElementById('btn-pay-fee').addEventListener('click', () => {
+        state.payClicked += 1;
+        showBanner('Payment flow triggered for 1,200 INR.');
+      });
+
+      document.getElementById('btn-logout').addEventListener('click', () => {
+        state.logoutClicked += 1;
+        showBanner('Logout action triggered.');
+      });
+
+      const dz = document.getElementById('dz-income');
+      const dzStatus = document.getElementById('dz-income-status');
+      const upIncome = document.getElementById('up-income');
+
+      function updateIncomeStatus(files) {
+        const list = files && files.length ? Array.from(files).map((f) => f.name) : [];
+        dzStatus.textContent = list.length ? `Attached: ${list.join(', ')}` : 'No file attached yet.';
+      }
+      upIncome.addEventListener('change', () => updateIncomeStatus(upIncome.files));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const files = e.dataTransfer && e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+        if (files.length) {
+          state.droppedFiles.push(...files.map((f) => f.name));
+          updateIncomeStatus(files);
+        }
+      });
+
+      document.getElementById('scholarship-apply-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        state.submittedCount += 1;
+        showBanner(`Application submitted (count: ${state.submittedCount}).`);
+      });
+    })();
+  </script>
+</body>
+</html>

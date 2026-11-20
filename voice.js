@@ -21,29 +21,168 @@
 
   if (window.SleepwalkerVoice) return;
 
+  const SUPPORTED_LANGS = new Set([
+    'auto',
+    'en-IN',
+    'hi-IN',
+    'ta-IN',
+    'te-IN',
+    'bn-IN',
+    'mr-IN',
+    'gu-IN',
+    'kn-IN',
+    'ml-IN',
+    'pa-IN'
+  ]);
+
+  const LANG_ALIASES = {};
+  SUPPORTED_LANGS.forEach((code) => {
+    LANG_ALIASES[code.toLowerCase()] = code;
+  });
+
+  const AUTO_DEFAULT_LANG = 'hi-IN';
+  const AUTO_RETRY_LANG = 'en-IN';
+  const AUTO_CONFIDENCE_THRESHOLD = 0.6;
+
   class SleepwalkerVoice {
     constructor() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       this.isSupported = Boolean(SpeechRecognition);
 
       this.recognition = null;
+      this.lifecycleState = 'idle'; // 'idle' | 'starting' | 'listening' | 'committing' | 'paused' | 'restarting' | 'recovering' | 'error'
+      this._recognitionRunning = false;
+      this._pendingStartAfterStop = false;
+      this._maxRestartAttempts = 6;
+      this._lastRecoverableError = '';
+      this._pausedForTab = false;
+      this._lastCommandFingerprint = null;
       this.isListening = false;
-      this.lang = 'en-IN'; // 'en-IN' or 'hi-IN'
+      this.isPaused = false;
+      this.continuousSession = false;
+      this.mode = 'en-IN';       // 'auto' or any supported Indian BCP-47 code
+      this.lang = 'en-IN';       // mirrors mode for backward-compatible callers
+      this.activeLang = 'en-IN'; // concrete SpeechRecognition BCP-47 tag ('hi-IN' in auto initially)
+      this.lastConfidence = null;
+      this._autoRetriedEn = false;
       this.silenceTimer = null;
+      this._restartTimer = null;
+      this._stableResetTimer = null;
+      this._restartAttempts = 0;
+      this._lastStartAt = 0;
+      this._intentionalStop = false;
+      this._benignRestart = false;
+      this._startingWatchdogTimer = null;
+      this._lastErrorCode = '';
       this.lastInterim = '';
       this.useOffscreen = false;
 
       // Callbacks
-      this.onTranscript = null; // ({ text, isFinal }) => {}
-      this.onCommand = null;    // ({ type, raw, sectionQuery }) => {}
+      this.onTranscript = null; // ({ text, isFinal, confidence, activeLang, mode }) => {}
+      this.onCommand = null;    // (parsed, meta) => {}
       this.onError = null;      // ({ error, message, isPermissionDenied }) => {}
       this.onStateChange = null;// (isListening) => {}
+      this.onLifecycleChange = null; // (state, detail) => {}
+      this.onActivity = null;   // ({ type }) => {}
+      this.onPauseChange = null;// (isPaused) => {}
 
       if (this.isSupported) {
         this.initRecognition(SpeechRecognition);
       }
 
       this.initOffscreenListener();
+    }
+
+    normalizeLangCode(rawLang) {
+      if (!rawLang || typeof rawLang !== 'string') return 'en-IN';
+      const trimmed = rawLang.trim();
+      const direct = LANG_ALIASES[trimmed.toLowerCase()];
+      if (direct) return direct;
+      if (trimmed.toLowerCase() === 'hi') return 'hi-IN';
+      if (trimmed.toLowerCase() === 'en') return 'en-IN';
+      return 'en-IN';
+    }
+
+    resolveSpeechLang(modeOrLang) {
+      const normalized = this.normalizeLangCode(modeOrLang);
+      return normalized === 'auto' ? AUTO_DEFAULT_LANG : normalized;
+    }
+
+    getMode() {
+      return this.mode;
+    }
+
+    getActiveLang() {
+      return this.activeLang;
+    }
+
+    resetAutoRetry() {
+      this._autoRetriedEn = false;
+      this.activeLang = this.resolveSpeechLang(this.mode);
+      if (this.recognition) {
+        this.recognition.lang = this.activeLang;
+      }
+    }
+
+    /**
+     * Check whether Auto mode should retry once in en-IN due to low ASR confidence.
+     */
+    shouldRetryWithEnIn(confidence = this.lastConfidence) {
+      return Boolean(
+        this.mode === 'auto' &&
+        this.activeLang === AUTO_DEFAULT_LANG &&
+        !this._autoRetriedEn &&
+        typeof confidence === 'number' &&
+        !Number.isNaN(confidence) &&
+        confidence > 0 &&
+        confidence < AUTO_CONFIDENCE_THRESHOLD
+      );
+    }
+
+    /**
+     * Switch Auto mode once from hi-IN to en-IN. Guarded so it never loops infinitely.
+     * @returns {boolean} True if retry was activated, false if already retried or ineligible.
+     */
+    retryWithEnIn(options = {}) {
+      const { restartListening = true } = options;
+      if (this.mode !== 'auto' || this.activeLang !== AUTO_DEFAULT_LANG || this._autoRetriedEn) {
+        return false;
+      }
+
+      this._autoRetriedEn = true;
+      this.activeLang = AUTO_RETRY_LANG;
+
+      if (this.recognition) {
+        this.recognition.lang = this.activeLang;
+      }
+
+      if (restartListening) {
+        if (this.useOffscreen && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_STOP_OFFSCREEN_VOICE' }, () => {
+            this.startListening({ preserveRetry: true });
+          });
+        } else if (this.isSupported && this.recognition) {
+          if (this.isListening) {
+            try {
+              this.recognition.stop();
+            } catch (e) {}
+          } else {
+            this.startListening({ preserveRetry: true });
+          }
+        }
+      }
+
+      return true;
+    }
+
+    /**
+     * Convenience single-retry helper for confidence > 0 && < 0.6 in Auto mode.
+     */
+    tryAutoEnInRetry(confidence = this.lastConfidence, options = {}) {
+      if (!this.shouldRetryWithEnIn(confidence)) {
+        return false;
+      }
+      return this.retryWithEnIn(options);
     }
 
     /**
@@ -56,15 +195,31 @@
 
           if (message.type === 'OFFSCREEN_TRANSCRIPT') {
             if (message.interim && this.onTranscript) {
-              this.onTranscript({ text: message.interim, isFinal: false });
+              this.onTranscript({
+                text: message.interim,
+                isFinal: false,
+                confidence: null,
+                activeLang: this.activeLang,
+                mode: this.mode
+              });
             }
             if (message.final) {
+              const confidence = typeof message.confidence === 'number' ? message.confidence : null;
+              this.lastConfidence = confidence;
+              const meta = {
+                confidence,
+                activeLang: this.activeLang,
+                mode: this.mode
+              };
               if (this.onTranscript) {
-                this.onTranscript({ text: message.final, isFinal: true });
+                this.onTranscript({ text: message.final, isFinal: true, ...meta });
               }
               const parsed = this.parseCommand(message.final);
+              parsed.confidence = confidence;
+              parsed.activeLang = this.activeLang;
+              parsed.mode = this.mode;
               if (this.onCommand) {
-                this.onCommand(parsed);
+                this.onCommand(parsed, meta);
               }
             }
           } else if (message.type === 'OFFSCREEN_ERROR') {
@@ -90,79 +245,309 @@
     }
 
     /**
+     * Request microphone permission inside a direct user click gesture, immediately stop the
+     * temporary MediaStream tracks so there is zero audio device contention, then start SpeechRecognition.
+     */
+    async requestMicPermissionWithGesture() {
+      this._diag('gesture_mic_request', {});
+      this._restartAttempts = 0;
+      this._lastRecoverableError = '';
+      this._lastErrorCode = '';
+      if (typeof window !== 'undefined' && window.isSecureContext === false) {
+        this._setLifecycleState('error', 'HTTPS required for microphone');
+        if (typeof this.onError === 'function') {
+          this.onError({
+            error: 'insecure-context',
+            message: 'Chrome only allows microphone access on HTTPS websites (or localhost). Open an https:// page or use the Type input box below.',
+            isPermissionDenied: true
+          });
+        }
+        return false;
+      }
+      if (navigator && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          if (stream && typeof stream.getTracks === 'function') {
+            stream.getTracks().forEach((t) => { try { t.stop(); } catch (_e) {} });
+          }
+        } catch (err) {
+          const errName = (err && (err.name || err.message)) || 'NotAllowedError';
+          const isNoMic = /NotFound|DeviceNotFound|DevicesNotFound/i.test(errName);
+          const isDenied = /NotAllowed|Permission|Security/i.test(errName);
+          if (isDenied || isNoMic) {
+            this._lastErrorCode = isNoMic ? 'audio-capture' : 'not-allowed';
+            this._setLifecycleState('error', isNoMic ? 'No microphone detected' : 'Microphone permission denied');
+            if (typeof this.onError === 'function') {
+              this.onError({
+                error: this._lastErrorCode,
+                message: isNoMic
+                  ? 'No microphone was detected. Connect a microphone in Windows Sound settings, then click Retry.'
+                  : 'Microphone permission is blocked for this site. Click the site icon next to the URL in Chrome’s address bar, set Microphone to Allow, then click Retry.',
+                isPermissionDenied: isDenied
+              });
+            }
+            return false;
+          }
+        }
+      }
+      this._recreateRecognition();
+      return this.startListening();
+    }
+
+    _diag(code, meta = {}) {
+      const diag = typeof window !== 'undefined' && window.SleepwalkerDiagnostics;
+      if (diag && typeof diag.log === 'function') {
+        diag.log('voice', code, { lifecycleState: this.lifecycleState, ...meta });
+      }
+    }
+
+    stripWakePrefix(rawText) {
+      const clean = String(rawText || '').trim();
+      if (!clean) return '';
+      if (/^(?:sleepwalker\s*,?\s*rest(?:\s+now)?|hey\s+sleepwalker\s*,?\s*rest(?:\s+now)?)$/i.test(clean)) {
+        return clean;
+      }
+      const stripped = clean
+        .replace(/^(?:hey\s+|ok\s+|okay\s+|hi\s+|hello\s+)?sleepwalker\s*[,:-]*\s+/i, '')
+        .trim();
+      return stripped || clean;
+    }
+
+    _recreateRecognition() {
+      const SpeechRec = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+      if (!SpeechRec) return false;
+      if (this.recognition) {
+        try {
+          this.recognition.onstart = null;
+          this.recognition.onresult = null;
+          this.recognition.onerror = null;
+          this.recognition.onend = null;
+          this.recognition.abort();
+        } catch (_e) {}
+        this.recognition = null;
+      }
+      this._recognitionRunning = false;
+      this.initRecognition(SpeechRec);
+      return Boolean(this.recognition);
+    }
+
+    _setLifecycleState(nextState, detail = '') {
+      this.lifecycleState = nextState;
+      this._diag(`state_${nextState}`, { detail });
+      if (typeof this.onLifecycleChange === 'function') {
+        this.onLifecycleChange(nextState, detail);
+      }
+    }
+
+    _emitCommandDeduped(rawText, meta = {}) {
+      const clean = this.stripWakePrefix(rawText);
+      if (!clean) return false;
+      const norm = clean.toLowerCase().replace(/[.,!?;:]+$/g, '').replace(/\s+/g, ' ').trim();
+      const now = Date.now();
+      if (
+        this._lastCommandFingerprint &&
+        this._lastCommandFingerprint.norm === norm &&
+        (now - this._lastCommandFingerprint.time) < 1200
+      ) {
+        this._diag('duplicate_blocked', { reason: 'within_1200ms' });
+        return false;
+      }
+      this._lastCommandFingerprint = { norm, time: now };
+      this._setLifecycleState('committing', clean);
+      const parsed = this.parseCommand(clean);
+      parsed.confidence = meta.confidence ?? null;
+      parsed.activeLang = meta.activeLang || this.activeLang;
+      parsed.mode = meta.mode || this.mode;
+      if (this.onCommand) {
+        this.onCommand(parsed, meta);
+      }
+      return true;
+    }
+
+    /**
      * Initialize SpeechRecognition instance and configure event listeners.
      */
     initRecognition(SpeechRecognition) {
+      if (this.recognition) return;
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
       this.recognition.maxAlternatives = 1;
-      this.recognition.lang = this.lang;
+      this.recognition.lang = this.activeLang;
 
       this.recognition.onstart = () => {
+        if (this._startingWatchdogTimer) {
+          clearTimeout(this._startingWatchdogTimer);
+          this._startingWatchdogTimer = null;
+        }
+        // Guard against an async onstart arriving after pauseTemporary/pauseForTabSwitch/stopListening was already requested
+        if (!this.isListening || this._intentionalStop || this.isPaused || this._pausedForTab) {
+          this._recognitionRunning = true;
+          try { this.recognition.stop(); } catch (_e) {}
+          return;
+        }
+        this._recognitionRunning = true;
         this.isListening = true;
+        this.isPaused = false;
+        this._intentionalStop = false;
+        this._lastErrorCode = '';
+        this._finalizedResults = new Map();
+        this._lastStartAt = Date.now();
+        this._setLifecycleState('listening', 'Listening...');
+        if (this._stableResetTimer) clearTimeout(this._stableResetTimer);
+        this._stableResetTimer = setTimeout(() => {
+          if (this.isListening && !this.isPaused) {
+            this._restartAttempts = 0;
+          }
+        }, 1500);
+        this._startLevelMonitor();
         if (this.onStateChange) this.onStateChange(true);
       };
 
       this.recognition.onresult = (event) => {
         let interimTranscript = '';
         let finalTranscript = '';
+        let finalConfidence = null;
+        let confidenceSum = 0;
+        let confidenceCount = 0;
+        let sawZeroConfidence = false;
 
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
+        if (!this._finalizedResults) this._finalizedResults = new Map();
+        const baseIdx = typeof event.resultIndex === 'number' ? event.resultIndex : 0;
+        if (event.results.length === 1 && event.results[0] && !event.results[0].isFinal) {
+          this._finalizedResults.clear();
+        }
+
+        for (let i = baseIdx; i < event.results.length; ++i) {
+          const result = event.results[i];
+          const alt = result && result[0];
+          if (!alt) continue;
+          const transcript = alt.transcript || '';
+          if (result.isFinal) {
+            if (event.results.length > 1 && this._finalizedResults.get(i) === transcript) {
+              continue;
+            }
+            this._finalizedResults.set(i, transcript);
             finalTranscript += transcript;
+            if (typeof alt.confidence === 'number' && !Number.isNaN(alt.confidence)) {
+              if (alt.confidence > 0) {
+                confidenceSum += alt.confidence;
+                confidenceCount += 1;
+              } else {
+                sawZeroConfidence = true;
+              }
+            }
           } else {
             interimTranscript += transcript;
           }
         }
 
+        if (confidenceCount > 0) {
+          finalConfidence = confidenceSum / confidenceCount;
+        } else if (sawZeroConfidence) {
+          finalConfidence = 0;
+        }
+
         // Live interim feedback
         if (interimTranscript && this.onTranscript) {
+          this._restartAttempts = 0;
+          this._micBoost = 0.72;
+          if (this.onActivity) this.onActivity({ type: 'interim' });
+          const prevInterimTrim = String(this.lastInterim || '').trim().toLowerCase();
+          const nextInterimTrim = interimTranscript.trim().toLowerCase();
+          const interimTextChanged = nextInterimTrim !== prevInterimTrim;
           this.lastInterim = interimTranscript;
-          this.onTranscript({ text: interimTranscript.trim(), isFinal: false });
+          this.onTranscript({
+            text: interimTranscript.trim(),
+            isFinal: false,
+            confidence: null,
+            activeLang: this.activeLang,
+            mode: this.mode
+          });
 
-          // Reset 2-second silence timer: if user goes quiet for 2s after speaking, auto-commit command!
-          if (this.silenceTimer) {
+          // Only reset silence timer when interim words actually change (prevents repeated identical onresult events from starving commit)
+          if (this.silenceTimer && interimTextChanged) {
             clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
           }
-          if (interimTranscript.trim().length > 1) {
+          // > 0 so single-digit choices ("1".."5") still commit for numbered link lists
+          if (interimTranscript.trim().length > 0 && !this.silenceTimer) {
             this.silenceTimer = setTimeout(() => {
-              if (this.isListening && this.lastInterim.trim().length > 1) {
-                console.log('[Sleepwalker Voice] Silence timeout (2s), executing command:', this.lastInterim);
+              this.silenceTimer = null;
+              if (this.isListening && !this.isPaused && this.lastInterim.trim().length > 0) {
+                console.log('[Sleepwalker Voice] Silence timeout (1.5s), executing command:', this.lastInterim);
                 const text = this.lastInterim.trim();
-                this.stopListening();
-                const parsed = this.parseCommand(text);
-                if (this.onCommand) {
-                  this.onCommand(parsed);
+                const meta = {
+                  confidence: null,
+                  activeLang: this.activeLang,
+                  mode: this.mode,
+                  isInterimCommit: true
+                };
+                this.lastInterim = '';
+                this._lastInterimCommit = { text: text.toLowerCase(), time: Date.now() };
+                if (this.continuousSession) {
+                  // Flush current Chrome recognition buffer without penalizing restart attempts
+                  this._benignRestart = true;
+                  if (this.recognition) {
+                    try {
+                      this.recognition.stop();
+                    } catch (e) {}
+                  }
+                } else {
+                  this.stopListening();
                 }
+                this._emitCommandDeduped(text, meta);
               }
-            }, 2000);
+            }, 1500);
           }
+        } else if (interimTranscript) {
+          this._restartAttempts = 0;
+          if (this.onActivity) this.onActivity({ type: 'interim' });
+          this.lastInterim = interimTranscript;
         }
 
         // Process final speech recognition result
         if (finalTranscript) {
+          this._restartAttempts = 0;
+          if (this.onActivity) this.onActivity({ type: 'final' });
           if (this.silenceTimer) {
             clearTimeout(this.silenceTimer);
             this.silenceTimer = null;
           }
           this.lastInterim = '';
+          this.lastConfidence = finalConfidence;
 
           const cleanFinal = finalTranscript.trim();
-          if (this.onTranscript) {
-            this.onTranscript({ text: cleanFinal, isFinal: true });
+          if (
+            this._lastInterimCommit &&
+            this._lastInterimCommit.text === cleanFinal.toLowerCase() &&
+            (Date.now() - this._lastInterimCommit.time) < 2500
+          ) {
+            this._lastInterimCommit = null;
+            return;
           }
 
-          const parsed = this.parseCommand(cleanFinal);
-          if (this.onCommand) {
-            this.onCommand(parsed);
+          const meta = {
+            confidence: finalConfidence,
+            activeLang: this.activeLang,
+            mode: this.mode
+          };
+          if (this.onTranscript) {
+            this.onTranscript({ text: cleanFinal, isFinal: true, ...meta });
           }
+
+          this._emitCommandDeduped(cleanFinal, meta);
         }
       };
 
       this.recognition.onerror = (event) => {
         console.warn('[Sleepwalker Voice] Recognition error:', event.error);
+        if (this._startingWatchdogTimer) {
+          clearTimeout(this._startingWatchdogTimer);
+          this._startingWatchdogTimer = null;
+        }
+        this._lastErrorCode = event.error || 'unknown';
+        this._diag('error', { errorCategory: this._lastErrorCode });
 
         let userMessage = 'Voice recognition error.';
         let isPermissionDenied = false;
@@ -172,18 +557,39 @@
           case 'service-not-allowed':
             isPermissionDenied = true;
             this.isListening = false;
-            userMessage = '⚠️ Microphone permission was blocked. Please click the lock/camera icon in Chrome’s address bar, allow Microphone, and reload the page. You can also use the typed input box below.';
+            this._setLifecycleState('error', 'Microphone permission denied');
+            userMessage = (typeof window !== 'undefined' && window.isSecureContext === false)
+              ? 'Chrome requires an HTTPS webpage (or localhost) for microphone access. Open an https:// page or use the typed input box below.'
+              : 'Microphone permission was blocked for this site. Click Allow Microphone below, or click the site icon in Chrome’s address bar -> Allow Microphone.';
             break;
           case 'no-speech':
-            // Harmless; user was just quiet
+            // Harmless; user was quiet — keep session alive without error card
+            return;
+          case 'aborted':
+            if (this.isPaused || this._pausedForTab || this._intentionalStop || !this.isListening) {
+              return;
+            }
+            this._lastRecoverableError = 'aborted';
+            this._restartAttempts += 1;
+            this._setLifecycleState('recovering', 'Recovering microphone...');
             return;
           case 'audio-capture':
-            userMessage = 'No microphone was detected. Please verify your microphone connection.';
+            this._setLifecycleState('error', 'No microphone detected');
+            userMessage = 'No microphone was detected or it is busy in another app. Check your Windows microphone device and click Retry.';
             break;
           case 'network':
-            userMessage = 'Speech recognition network error. Please check your internet connection or use typed commands.';
+            if (this.isListening && this._restartAttempts < 3) {
+              this._lastRecoverableError = 'network';
+              this._restartAttempts += 1;
+              this._setLifecycleState('recovering', 'Reconnecting speech service...');
+              this._diag('recovered', { errorCategory: 'network', attempt: this._restartAttempts });
+              return;
+            }
+            this._setLifecycleState('error', 'Temporarily unavailable');
+            userMessage = 'Speech recognition network error. Chrome Web Speech requires internet access; check your connection or use typed commands.';
             break;
           default:
+            this._setLifecycleState('error', `Temporarily unavailable (${event.error})`);
             userMessage = `Voice recognition error: ${event.error}`;
         }
 
@@ -195,21 +601,94 @@
           });
         }
 
-        if (isPermissionDenied) {
-          this.stopListening();
+        if (isPermissionDenied || event.error === 'audio-capture') {
+          this._recognitionRunning = false;
+          this.stopListening({ preserveErrorState: true });
         }
       };
 
       this.recognition.onend = () => {
-        // If user intentionally kept listening on, restart unless stopped or error
-        if (this.isListening) {
-          try {
-            this.recognition.start();
-          } catch (e) {
-            this.isListening = false;
-            if (this.onStateChange) this.onStateChange(false);
+        this._recognitionRunning = false;
+        this._diag('stopped', { intentional: this._intentionalStop, paused: this.isPaused, pausedForTab: this._pausedForTab, err: this._lastRecoverableError });
+        if (this._finalizedResults) this._finalizedResults.clear();
+        if (this._stableResetTimer) {
+          clearTimeout(this._stableResetTimer);
+          this._stableResetTimer = null;
+        }
+        if (this._restartTimer) {
+          clearTimeout(this._restartTimer);
+          this._restartTimer = null;
+        }
+
+        // If recognition ended while an uncommitted interim utterance was pending, commit it immediately
+        if (this.lastInterim && this.lastInterim.trim().length > 0 && !this.isPaused && !this._intentionalStop) {
+          if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
           }
-        } else {
+          const pendingText = this.lastInterim.trim();
+          this.lastInterim = '';
+          this._lastInterimCommit = { text: pendingText.toLowerCase(), time: Date.now() };
+          const meta = {
+            confidence: null,
+            activeLang: this.activeLang,
+            mode: this.mode,
+            isInterimCommit: true
+          };
+          if (this.onTranscript) {
+            this.onTranscript({ text: pendingText, isFinal: true, ...meta });
+          }
+          this._emitCommandDeduped(pendingText, meta);
+        }
+
+        if (this._pendingStartAfterStop) {
+          this._pendingStartAfterStop = false;
+          if (!this.isPaused && !this._pausedForTab) {
+            this._startContentRecognition();
+            return;
+          }
+        }
+
+        // Paused temporarily by half-duplex TTS or background tab switch: keep session open, do not mark idle
+        if (this.isPaused || this._pausedForTab) {
+          this._setLifecycleState('paused', this._pausedForTab ? 'Paused in background tab' : 'Paused while speaking');
+          return;
+        }
+
+        // Auto-restart recognition when Chrome ends it (~60s limit or silence) with controlled backoff
+        if (this.isListening && !this._intentionalStop) {
+          const ranMs = this._lastStartAt ? (Date.now() - this._lastStartAt) : 0;
+          const wasBenign = Boolean(this._benignRestart);
+          this._benignRestart = false;
+          if (!wasBenign && !this._lastRecoverableError && ranMs > 0 && ranMs < 1500) {
+            this._restartAttempts += 1;
+          }
+          this._lastRecoverableError = '';
+          if (this._restartAttempts > this._maxRestartAttempts) {
+            this.isListening = false;
+            this._setLifecycleState('error', 'Temporarily unavailable');
+            if (this.onStateChange) this.onStateChange(false);
+            return;
+          }
+          if (this._restartAttempts >= 2) {
+            this._recreateRecognition();
+          }
+          const delay = wasBenign
+            ? 120
+            : (this._restartAttempts <= 0
+              ? 80
+              : Math.min(3000, 160 * Math.pow(2, this._restartAttempts - 1)));
+
+          this._setLifecycleState('restarting', 'Waiting for next command...');
+          this._restartTimer = setTimeout(() => {
+            this._restartTimer = null;
+            if (!this.isListening || this.isPaused || this._pausedForTab || this._intentionalStop) return;
+            this._startContentRecognition();
+          }, delay);
+        } else if (!this.isListening) {
+          if (this.lifecycleState !== 'error') {
+            this._setLifecycleState('idle', '');
+          }
           if (this.onStateChange) this.onStateChange(false);
         }
       };
@@ -219,10 +698,16 @@
      * Start listening to voice input.
      * Evaluates offscreen document if enabled, falling back cleanly to content-script recognition.
      */
-    startListening() {
+    startListening(options = {}) {
+      if (!options.preserveRetry) {
+        this.resetAutoRetry();
+        this._restartAttempts = 0;
+      }
+      this.lastConfidence = null;
+
       if (this.useOffscreen && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage(
-          { type: 'SLEEPWALKER_START_OFFSCREEN_VOICE', lang: this.lang },
+          { type: 'SLEEPWALKER_START_OFFSCREEN_VOICE', lang: this.activeLang },
           (res) => {
             if (chrome.runtime.lastError || !res || res.status !== 'started') {
               console.warn('[Sleepwalker Voice] Offscreen start unavailable; using content script recognition.');
@@ -239,6 +724,7 @@
 
     _startContentRecognition() {
       if (!this.isSupported) {
+        this._setLifecycleState('error', 'Speech recognition not supported');
         if (this.onError) {
           this.onError({
             error: 'not-supported',
@@ -249,26 +735,203 @@
         return false;
       }
 
+      if (typeof window !== 'undefined' && window.isSecureContext === false) {
+        this._lastErrorCode = 'insecure-context';
+        this.isListening = false;
+        this._setLifecycleState('error', 'HTTPS required for microphone');
+        if (this.onError) {
+          this.onError({
+            error: 'not-allowed',
+            message: 'Chrome only allows microphone access on HTTPS websites (or localhost). Open an https:// page or use the typed input box below.',
+            isPermissionDenied: true
+          });
+        }
+        return false;
+      }
+
+      if (this._restartTimer) {
+        clearTimeout(this._restartTimer);
+        this._restartTimer = null;
+      }
       this.isListening = true;
+      this.isPaused = false;
+      this._intentionalStop = false;
+      this._benignRestart = false;
+      this._lastStartAt = Date.now();
+
+      // Prevent duplicate simultaneous recognition.start() calls
+      if (this._recognitionRunning || this.lifecycleState === 'starting') {
+        if (this._recognitionRunning && this.lifecycleState !== 'listening') {
+          this._setLifecycleState('listening', 'Listening...');
+        }
+        return true;
+      }
+
+      this._setLifecycleState('starting', 'Starting microphone...');
+      const armStartWatchdog = () => {
+        if (this._startingWatchdogTimer) clearTimeout(this._startingWatchdogTimer);
+        this._startingWatchdogTimer = setTimeout(() => {
+          this._startingWatchdogTimer = null;
+          if (this.lifecycleState === 'starting' && !this._recognitionRunning && this.isListening && !this.isPaused && !this._intentionalStop) {
+            this._pendingStartAfterStop = false;
+            this._recreateRecognition();
+            this._setLifecycleState('recovering', 'Recovering microphone...');
+            this._startContentRecognition();
+          }
+        }, 1200);
+      };
+
       try {
-        this.recognition.lang = this.lang;
+        if (!this.recognition) this._recreateRecognition();
+        this.recognition.lang = this.activeLang;
         this.recognition.start();
+        if (!this._recognitionRunning && this.lifecycleState === 'starting') armStartWatchdog();
         return true;
       } catch (err) {
-        // Recognition already started or error
+        const errName = (err && (err.name || err.message)) || '';
+        if (/NotAllowedError|SecurityError/i.test(errName)) {
+          this.isListening = false;
+          this._lastErrorCode = 'not-allowed';
+          this._setLifecycleState('error', 'Microphone permission denied');
+          if (this.onError) {
+            this.onError({
+              error: 'not-allowed',
+              message: 'Microphone permission is needed for this site. Click Allow Microphone below, or allow Microphone in Chrome’s address bar.',
+              isPermissionDenied: true
+            });
+          }
+          return false;
+        }
+        if (/InvalidStateError/i.test(errName) && !this._recognitionRunning) {
+          this._recreateRecognition();
+          try {
+            this.recognition.lang = this.activeLang;
+            this.recognition.start();
+            if (!this._recognitionRunning && this.lifecycleState === 'starting') armStartWatchdog();
+            return true;
+          } catch (_retryErr) {}
+        }
+        // Still finalizing a previous stop(): queue a start on onend, guarded by watchdog so 'starting' cannot deadlock
+        this._pendingStartAfterStop = true;
+        armStartWatchdog();
         return true;
       }
     }
 
     /**
-     * Stop listening to voice input.
+     * Temporarily pause recognition (half-duplex while TTS speaks) without closing the session.
      */
-    stopListening() {
+    pauseTemporary() {
       if (this.silenceTimer) {
         clearTimeout(this.silenceTimer);
         this.silenceTimer = null;
       }
+      if (this._restartTimer) {
+        clearTimeout(this._restartTimer);
+        this._restartTimer = null;
+      }
+      if (!this.isListening || this.isPaused) return false;
+      this.isPaused = true;
+      this._intentionalStop = true;
+      this._pendingStartAfterStop = false;
+      this._setLifecycleState('paused', 'Paused while speaking');
+      if (this.recognition) {
+        try {
+          this.recognition.stop();
+        } catch (e) {}
+      }
+      this._stopLevelMonitor();
+      if (this.onPauseChange) this.onPauseChange(true);
+      return true;
+    }
+
+    /**
+     * Resume recognition after a temporary half-duplex pause.
+     */
+    resumeAfterPause() {
+      if (this._restartTimer) {
+        clearTimeout(this._restartTimer);
+        this._restartTimer = null;
+      }
+      const wasPaused = this.isPaused;
+      this.isPaused = false;
+      this._intentionalStop = false;
+      if (!this.isListening) return false;
+      if (wasPaused && this.onPauseChange) this.onPauseChange(false);
+      if (this._recognitionRunning) {
+        this._pendingStartAfterStop = true;
+        return true;
+      }
+      return this.startListening({ preserveRetry: true });
+    }
+
+    /**
+     * Release microphone cleanly when this tab loses foreground focus (prevents multi-tab mic contention).
+     */
+    pauseForTabSwitch() {
+      if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+      if (this._restartTimer) { clearTimeout(this._restartTimer); this._restartTimer = null; }
+      if (!this.isListening || this._pausedForTab) return false;
+      this._pausedForTab = true;
+      this._intentionalStop = true;
+      this._pendingStartAfterStop = false;
+      this._setLifecycleState('paused', 'Paused in background tab');
+      if (this.recognition) {
+        try { this.recognition.stop(); } catch (_e) {}
+      }
+      this._stopLevelMonitor();
+      return true;
+    }
+
+    /**
+     * Re-acquire microphone when this tab becomes foreground active again.
+     */
+    resumeForTabSwitch() {
+      if (!this._pausedForTab) return false;
+      this._pausedForTab = false;
+      this._intentionalStop = false;
+      if (!this.isListening || this.isPaused) return false;
+      if (this._recognitionRunning) {
+        this._pendingStartAfterStop = true;
+        return true;
+      }
+      return this.startListening({ preserveRetry: true });
+    }
+
+    /**
+     * Stop listening to voice input.
+     */
+    stopListening(options = {}) {
+      const preserveErrorState = Boolean(options && options.preserveErrorState);
+      if (this.silenceTimer) {
+        clearTimeout(this.silenceTimer);
+        this.silenceTimer = null;
+      }
+      if (this._restartTimer) {
+        clearTimeout(this._restartTimer);
+        this._restartTimer = null;
+      }
+      if (this._stableResetTimer) {
+        clearTimeout(this._stableResetTimer);
+        this._stableResetTimer = null;
+      }
+      if (this._startingWatchdogTimer) {
+        clearTimeout(this._startingWatchdogTimer);
+        this._startingWatchdogTimer = null;
+      }
       this.isListening = false;
+      this.isPaused = false;
+      this._pausedForTab = false;
+      if (!preserveErrorState) {
+        this.continuousSession = false;
+      }
+      this._restartAttempts = 0;
+      this._intentionalStop = true;
+      this._benignRestart = false;
+      this._pendingStartAfterStop = false;
+      if (!preserveErrorState) {
+        this._setLifecycleState('idle', '');
+      }
 
       if (this.useOffscreen && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({ type: 'SLEEPWALKER_STOP_OFFSCREEN_VOICE' });
@@ -279,7 +942,56 @@
           this.recognition.stop();
         } catch (e) {}
       }
+      this._stopLevelMonitor();
       if (this.onStateChange) this.onStateChange(false);
+    }
+
+    /**
+     * Drive orb waveform without opening a competing getUserMedia stream alongside SpeechRecognition,
+     * avoiding Windows/Bluetooth/USB microphone hardware contention while boosting on speech activity.
+     */
+    async _startLevelMonitor() {
+      this._stopLevelMonitor();
+      this._micMonitorActive = true;
+      this._micBoost = 0;
+      this.levelMode = 'synthetic_listening';
+
+      if (!this._micMonitorActive || !this.isListening || this.isPaused) return;
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(() => fn(Date.now()), 50);
+      const step = (ts) => {
+        if (!this._micMonitorActive || !this.isListening || this.isPaused) return;
+        const t = (ts || Date.now()) / 1000;
+        let level = 0.24 + 0.22 * Math.abs(Math.sin(t * 3.8) * Math.cos(t * 2.1));
+        if (this._micBoost > 0.05) {
+          level = Math.max(level, this._micBoost);
+          this._micBoost *= 0.88;
+        }
+        if (typeof this.onLevel === 'function') this.onLevel(level, this.levelMode);
+        this._levelRaf = raf(step);
+      };
+      this._levelRaf = raf(step);
+    }
+
+    _stopLevelMonitor() {
+      this._micMonitorActive = false;
+      this.levelMode = 'idle';
+      this._micBoost = 0;
+      if (this._levelRaf) {
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._levelRaf);
+        else clearTimeout(this._levelRaf);
+        this._levelRaf = 0;
+      }
+      if (this._micStream) {
+        this._micStream.getTracks().forEach((t) => { try { t.stop(); } catch (_e) {} });
+        this._micStream = null;
+      }
+      if (this._audioCtx && typeof this._audioCtx.close === 'function') {
+        try { this._audioCtx.close(); } catch (_e) {}
+      }
+      this._audioCtx = null;
+      this._analyser = null;
+      this._analyserBuf = null;
+      if (typeof this.onLevel === 'function') this.onLevel(0, 'idle');
     }
 
     /**
@@ -292,14 +1004,21 @@
         this.silenceTimer = null;
       }
       const pending = (this.lastInterim || '').trim();
+      const meta = {
+        confidence: null,
+        activeLang: this.activeLang,
+        mode: this.mode,
+        isInterimCommit: true
+      };
       this.lastInterim = '';
       this.stopListening();
 
-      if (pending.length > 1) {
+      if (pending.length > 0) {
         const parsed = this.parseCommand(pending);
-        if (this.onCommand) {
-          this.onCommand(parsed);
-        }
+        parsed.confidence = null;
+        parsed.activeLang = meta.activeLang;
+        parsed.mode = meta.mode;
+        this._emitCommandDeduped(pending, meta);
         return parsed;
       }
       return null;
@@ -318,15 +1037,24 @@
     }
 
     /**
-     * Change recognition language ('en-IN' or 'hi-IN').
+     * Change recognition language/mode ('auto', 'en-IN', 'hi-IN', 'ta-IN', etc.).
      */
     setLang(newLang) {
-      this.lang = newLang;
+      const normalized = this.normalizeLangCode(newLang);
+      this.mode = normalized;
+      this.lang = normalized;
+      this._autoRetriedEn = false;
+      this.activeLang = this.resolveSpeechLang(normalized);
+      this.lastConfidence = null;
+
       if (this.recognition) {
-        this.recognition.lang = newLang;
-        // If listening, restart with new language
+        this.recognition.lang = this.activeLang;
+        // If listening, restart with new language without penalizing crash backoff
         if (this.isListening) {
-          this.recognition.stop();
+          this._benignRestart = true;
+          try {
+            this.recognition.stop();
+          } catch (e) {}
         }
       }
     }

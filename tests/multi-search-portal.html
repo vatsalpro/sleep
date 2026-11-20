@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>National University Portal — Multi-Search Test Page</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 24px; background: #f8f6f0; color: #1b1714; }
+    header { background: #fff; border: 1.5px solid #e2d9c8; border-radius: 16px; padding: 18px 22px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+    section { background: #fff; border: 1.5px solid #e2d9c8; border-radius: 16px; padding: 18px 20px; }
+    h1, h2, h3 { margin: 0 0 8px 0; }
+    p.desc { margin: 0 0 12px 0; color: #574f45; font-size: 14px; }
+    form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input[type="search"], input[type="text"], input[type="password"] { flex: 1; min-width: 180px; padding: 10px 12px; border: 1px solid #c8beae; border-radius: 10px; font-size: 15px; }
+    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #b47812; background: #f3c65f; color: #1b1407; font-weight: 700; cursor: pointer; }
+    .result-box { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: #f2efe9; font-size: 14px; min-height: 20px; }
+  </style>
+</head>
+<body>
+  <!-- 1. GLOBAL WEBSITE SEARCH -->
+  <header role="banner">
+    <div>
+      <h1>National University Portal</h1>
+      <p class="desc">Official academic portal for courses, students, faculty, and help resources.</p>
+    </div>
+    <nav aria-label="Main Navigation">
+      <h2>Main Navigation</h2>
+      <p class="desc">Global website search across all university pages, admission dates, and notices.</p>
+      <form id="global-search-form" action="/search/site" method="GET" role="search" aria-label="Global website search">
+        <input type="search" id="global-search-input" name="q_global" placeholder="Search website" aria-label="Search entire website">
+        <button type="submit" id="global-search-btn">Search Website</button>
+      </form>
+      <div id="global-results" class="result-box"></div>
+    </nav>
+  </header>
+
+  <main class="grid">
+    <!-- 2. COURSE CATALOGUE SEARCH -->
+    <section id="course-catalogue" class="catalogue">
+      <h2>Course Catalogue</h2>
+      <p class="desc">Available undergraduate and postgraduate courses, syllabi, and programming classes.</p>
+      <form id="course-search-form" action="/courses/search" method="GET" role="search" aria-label="Course catalogue search">
+        <input type="search" id="course-search-input" name="q_course" placeholder="Search courses" aria-label="Search courses">
+        <button type="submit" id="course-search-btn">Search Courses</button>
+      </form>
+      <div id="course-results" class="result-box"></div>
+    </section>
+
+    <!-- 3. STUDENT DIRECTORY SEARCH -->
+    <section id="student-directory" class="directory">
+      <h2>Student Directory</h2>
+      <p class="desc">Student records and enrolled scholar lookup by student name or roll number.</p>
+      <form id="student-search-form" action="/students/search" method="GET" role="search" aria-label="Student directory search">
+        <input type="search" id="student-search-input" name="q_student" placeholder="Search students" aria-label="Search students">
+        <button type="submit" id="student-search-btn">Find Student</button>
+      </form>
+      <div id="student-results" class="result-box"></div>
+    </section>
+
+    <!-- 4. FACULTY SEARCH -->
+    <section id="faculty-directory" class="directory">
+      <h2>Faculty Directory</h2>
+      <p class="desc">Search professors, teachers, instructors, and academic department staff.</p>
+      <form id="faculty-search-form" action="/faculty/search" method="GET" role="search" aria-label="Faculty search">
+        <input type="search" id="faculty-search-input" name="q_faculty" placeholder="Search faculty" aria-label="Search faculty">
+        <button type="submit" id="faculty-search-btn">Search Faculty</button>
+      </form>
+      <div id="faculty-results" class="result-box"></div>
+    </section>
+
+    <!-- 5. FAQ SEARCH -->
+    <section id="faq-section" class="faq">
+      <h2>Frequently Asked Questions (FAQ)</h2>
+      <p class="desc" id="faq-desc">Search FAQs, help center answers, account recovery, and password reset guides.</p>
+      <form id="faq-search-form" action="/faq/search" method="GET" role="search" aria-label="FAQ search">
+        <input type="search" id="faq-search-input" name="q_faq" placeholder="Search FAQs" aria-label="Search FAQs">
+        <button type="submit" id="faq-search-btn">Search FAQs</button>
+      </form>
+      <div id="faq-results" class="result-box"></div>
+    </section>
+
+    <!-- UNRELATED APPLICATION / SENSITIVE FORM (MUST NEVER BE COLLECTED OR SUBMITTED BY SEARCH) -->
+    <section id="application-section">
+      <h2>Scholarship Application Form</h2>
+      <p class="desc">Submit your annual scholarship application (Critical Action).</p>
+      <form id="unrelated-app-form" action="/application/submit" method="POST">
+        <input type="text" id="app-applicant-name" name="applicant_name" placeholder="Applicant Full Name" value="Secret Applicant Name">
+        <input type="text" id="app-aadhaar" name="aadhaar" placeholder="Aadhaar Number" value="1234 5678 9012">
+        <input type="password" id="app-password" name="password" placeholder="Portal Password" value="SuperSecretPass123">
+        <button type="submit" id="app-submit-btn">Submit Application</button>
+      </form>
+      <div id="app-results" class="result-box"></div>
+    </section>
+  </main>
+
+  <script>
+    window.__PORTAL_SUBMISSIONS__ = [];
+    window.__UNRELATED_SUBMITTED__ = false;
+
+    const searchForms = [
+      { formId: 'global-search-form', inputId: 'global-search-input', resultId: 'global-results', scope: 'global' },
+      { formId: 'course-search-form', inputId: 'course-search-input', resultId: 'course-results', scope: 'course' },
+      { formId: 'student-search-form', inputId: 'student-search-input', resultId: 'student-results', scope: 'student' },
+      { formId: 'faculty-search-form', inputId: 'faculty-search-input', resultId: 'faculty-results', scope: 'faculty' },
+      { formId: 'faq-search-form', inputId: 'faq-search-input', resultId: 'faq-results', scope: 'faq' }
+    ];
+
+    searchForms.forEach(({ formId, inputId, resultId, scope }) => {
+      const f = document.getElementById(formId);
+      const inp = document.getElementById(inputId);
+      const res = document.getElementById(resultId);
+      f.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const q = inp.value;
+        window.__PORTAL_SUBMISSIONS__.push({ formId, inputId, scope, query: q });
+        res.textContent = `[${scope.toUpperCase()} RESULTS] Showing results for: "${q}"`;
+      });
+    });
+
+    document.getElementById('unrelated-app-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      window.__UNRELATED_SUBMITTED__ = true;
+      document.getElementById('app-results').textContent = 'UNRELATED FORM SUBMITTED!';
+    });
+  </script>
+</body>
+</html>

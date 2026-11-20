@@ -1,0 +1,674 @@
+/**
+ * Sleepwalker Page Digest Builder
+ * Builds compact, privacy-safe page representations (title, heading tree,
+ * numbered interactive elements [id|type|label], and section-indexed chunks)
+ * strictly within LLM token budgets.
+ *
+ * Security / Privacy guarantees:
+ * - NEVER reads input/textarea/select .value or typed user text.
+ * - NEVER includes password inputs, hidden inputs, cookies, or URL query strings.
+ * - NEVER includes CSS selectors in outputs; elements are referenced solely by numeric id.
+ */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+  if (root && typeof root === 'object') {
+    root.SleepwalkerDigest = api;
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const DEFAULT_CLOUD_DIGEST_TOKENS = 1500;
+  const DEFAULT_OLLAMA_DIGEST_TOKENS = 800;
+  const DEFAULT_MAX_CHUNK_TOKENS = 1200;
+  const DEFAULT_MAX_CHUNKS = 3;
+
+  const DEVANAGARI_DIGITS = {
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+    '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
+  };
+
+  const STOPWORDS = new Set([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as', 'into',
+    'this', 'that', 'these', 'those', 'it', 'its', 'my', 'your', 'our',
+    'what', 'which', 'who', 'whom', 'where', 'when', 'why', 'how',
+    'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will',
+    'and', 'or', 'but', 'if', 'about', 'page', 'tell', 'me', 'explain',
+    'please', 'simple', 'words', 'like', 'im', 'ten',
+    'kya', 'hai', 'hain', 'ka', 'ki', 'ke', 'ko', 'mein', 'me', 'se',
+    'par', 'pe', 'ye', 'yeh', 'wo', 'woh', 'kitni', 'kitna', 'kitne',
+    'kaise', 'kab', 'kahan', 'kaun', 'batao', 'samjhao', 'mujhe', 'ise',
+    'क्या', 'है', 'हैं', 'का', 'की', 'के', 'को', 'में', 'से', 'पर',
+    'यह', 'ये', 'वह', 'वो', 'कितनी', 'कितना', 'कितने', 'कैसे', 'कब',
+    'कहाँ', 'कौन', 'बताओ', 'समझाओ', 'मुझे', 'इसमें', 'इस'
+  ]);
+
+  const SENSITIVE_FIELD_RE = /\b(password|passwd|pwd|otp|one[-_\s]?time|passcode|pin|upi|cvv|cvc|card\s*number|aadhaar|aadhar|pan\s*card|pan\s*number|secret|ssn|captcha)\b/i;
+
+  function estimateTokens(text) {
+    if (!text) return 0;
+    return Math.ceil(String(text).length / 4);
+  }
+
+  function truncateToTokenBudget(text, maxTokens) {
+    const str = String(text || '');
+    const budget = Math.max(0, Number(maxTokens) || 0);
+    if (budget <= 0) return '';
+    const maxChars = budget * 4;
+    if (str.length <= maxChars) return str;
+    if (maxChars <= 24) return str.slice(0, maxChars);
+
+    let cut = str.slice(0, maxChars - 3);
+    const lastNewline = cut.lastIndexOf('\n');
+    const lastSpace = cut.lastIndexOf(' ');
+    if (lastNewline > maxChars * 0.6) {
+      cut = cut.slice(0, lastNewline);
+    } else if (lastSpace > maxChars * 0.7) {
+      cut = cut.slice(0, lastSpace);
+    }
+    return cut.trimEnd() + '...';
+  }
+
+  function hashText(str) {
+    const input = String(str || '');
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i++) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return `${(hash >>> 0).toString(16).padStart(8, '0')}-${input.length}`;
+  }
+
+  function normalizeNumerals(text) {
+    return String(text || '').replace(/[०-९]/g, (ch) => DEVANAGARI_DIGITS[ch] || ch);
+  }
+
+  function cleanWhitespace(text) {
+    return normalizeNumerals(String(text || ''))
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function getCleanUrl(doc) {
+    try {
+      const targetDoc = doc || (typeof document !== 'undefined' ? document : null);
+      const loc = targetDoc && targetDoc.location ? targetDoc.location : (typeof window !== 'undefined' ? window.location : null);
+      if (!loc) return 'unknown';
+      if (loc.protocol === 'file:') {
+        return String(loc.href || 'file://').split(/[?#]/)[0];
+      }
+      if (loc.origin && loc.origin !== 'null') {
+        return `${loc.origin}${loc.pathname || '/'}`;
+      }
+      return String(loc.href || 'unknown').split(/[?#]/)[0];
+    } catch (_e) {
+      return 'unknown';
+    }
+  }
+
+  function isElementVisible(el, doc) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      const styleAttr = String(el.getAttribute('style') || '').toLowerCase();
+      if (/display\s*:\s*none|visibility\s*:\s*hidden/.test(styleAttr)) return false;
+
+      const win = (doc && doc.defaultView) || (typeof window !== 'undefined' ? window : null);
+      if (win && typeof win.getComputedStyle === 'function') {
+        const style = win.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+          return false;
+        }
+      }
+      if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) {
+        // Note: fallback when DOM isn't laid out (e.g., jsdom / mocked DOM): allow if no computed zero rect
+        if (el.offsetWidth === 0 && el.offsetHeight === 0 && styleAttr.includes('none')) {
+          return false;
+        }
+      }
+      return true;
+    } catch (_e) {
+      return true;
+    }
+  }
+
+  function isInsideSleepwalker(el) {
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur.id === 'sleepwalker-host' || (cur.classList && cur.classList.contains('sleepwalker-ignore'))) {
+        return true;
+      }
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function getAttributeSafe(el, name) {
+    return typeof el.getAttribute === 'function' ? el.getAttribute(name) : null;
+  }
+
+  function isSensitiveField(el, labelText) {
+    const tag = String(el.tagName || '').toLowerCase();
+    const type = String(getAttributeSafe(el, 'type') || '').toLowerCase();
+    if (tag === 'input' && (type === 'password' || type === 'hidden')) {
+      return true;
+    }
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      const fingerprint = [
+        getAttributeSafe(el, 'id') || '',
+        getAttributeSafe(el, 'name') || '',
+        getAttributeSafe(el, 'autocomplete') || '',
+        getAttributeSafe(el, 'placeholder') || '',
+        getAttributeSafe(el, 'aria-label') || '',
+        labelText || ''
+      ].join(' ');
+      if (SENSITIVE_FIELD_RE.test(fingerprint)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function resolveInteractiveLabel(el, doc) {
+    const ariaLabel = cleanWhitespace(getAttributeSafe(el, 'aria-label'));
+    if (ariaLabel) return ariaLabel;
+
+    const labelledBy = cleanWhitespace(getAttributeSafe(el, 'aria-labelledby'));
+    if (labelledBy && doc && typeof doc.getElementById === 'function') {
+      const parts = labelledBy
+        .split(/\s+/)
+        .map((id) => doc.getElementById(id))
+        .filter(Boolean)
+        .map((node) => cleanWhitespace(node.innerText || node.textContent || ''));
+      const joined = cleanWhitespace(parts.join(' '));
+      if (joined) return joined;
+    }
+
+    const id = getAttributeSafe(el, 'id');
+    if (id && doc && typeof doc.querySelectorAll === 'function') {
+      const labels = doc.querySelectorAll('label[for]');
+      for (let i = 0; i < labels.length; i++) {
+        if (labels[i].getAttribute('for') === id) {
+          const text = cleanWhitespace(labels[i].innerText || labels[i].textContent || '');
+          if (text) return text;
+        }
+      }
+    }
+
+    if (typeof el.closest === 'function') {
+      const wrapLabel = el.closest('label');
+      if (wrapLabel) {
+        // Clone-free text read excluding nested input/select/textarea descendants
+        let labelText = '';
+        const children = wrapLabel.childNodes || [];
+        for (let i = 0; i < children.length; i++) {
+          const ch = children[i];
+          if (ch.nodeType === 3) {
+            labelText += ' ' + ch.nodeValue;
+          } else if (ch.nodeType === 1 && !/^(INPUT|SELECT|TEXTAREA|BUTTON)$/i.test(ch.tagName)) {
+            labelText += ' ' + (ch.innerText || ch.textContent || '');
+          }
+        }
+        const cleaned = cleanWhitespace(labelText);
+        if (cleaned) return cleaned;
+      }
+    }
+
+    const tag = String(el.tagName || '').toLowerCase();
+    if (tag === 'a' || tag === 'button' || getAttributeSafe(el, 'role') === 'button' || getAttributeSafe(el, 'role') === 'link') {
+      const text = cleanWhitespace(el.innerText || el.textContent || '');
+      if (text) return text;
+    }
+
+    const type = String(getAttributeSafe(el, 'type') || '').toLowerCase();
+    if (tag === 'input' && (type === 'submit' || type === 'button' || type === 'reset')) {
+      // Static button caption attribute only (only safe non-user-data input types)
+      const attrVal = cleanWhitespace(getAttributeSafe(el, 'value'));
+      if (attrVal) return attrVal;
+    }
+
+    const placeholder = cleanWhitespace(getAttributeSafe(el, 'placeholder'));
+    if (placeholder) return placeholder;
+
+    const title = cleanWhitespace(getAttributeSafe(el, 'title'));
+    if (title) return title;
+
+    const name = cleanWhitespace(getAttributeSafe(el, 'name'));
+    if (name) return name;
+
+    return cleanWhitespace(el.innerText || el.textContent || '');
+  }
+
+  function classifyInteractiveElement(el) {
+    const tag = String(el.tagName || '').toLowerCase();
+    const role = String(getAttributeSafe(el, 'role') || '').toLowerCase();
+    const type = String(getAttributeSafe(el, 'type') || '').toLowerCase();
+
+    if (tag === 'a' || role === 'link') return 'link';
+    if (tag === 'button' || role === 'button' || (tag === 'input' && (type === 'submit' || type === 'button' || type === 'reset'))) {
+      return 'button';
+    }
+    if (tag === 'input' && type === 'file') return 'file';
+    if (tag === 'select') return 'select';
+    if (tag === 'textarea') return 'textarea';
+    if (tag === 'input') {
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'date' || type === 'datetime-local') return 'date';
+      return 'field';
+    }
+    return role || 'control';
+  }
+
+  function collectHeadingsAndElements(doc) {
+    const headings = [];
+    const elements = [];
+
+    if (!doc || !doc.body) {
+      return { headings, elements };
+    }
+
+    // 1. Headings H1-H4 (H5/H6 if non-empty)
+    if (typeof doc.querySelectorAll === 'function') {
+      const headingNodes = doc.querySelectorAll('h1, h2, h3, h4, h5, h6');
+      for (let i = 0; i < headingNodes.length; i++) {
+        const h = headingNodes[i];
+        if (isInsideSleepwalker(h) || !isElementVisible(h, doc)) continue;
+        const text = cleanWhitespace(h.innerText || h.textContent || '');
+        if (!text) continue;
+        const level = Number(String(h.tagName || 'H2').slice(1)) || 2;
+        headings.push({
+          id: `h${headings.length + 1}`,
+          level,
+          text: text.slice(0, 120)
+        });
+      }
+
+      // 2. Interactive elements [id|type|label] — NEVER store .value or CSS selectors
+      const interactiveNodes = doc.querySelectorAll(
+        'a[href], button, input, select, textarea, [role="button"], [role="link"]'
+      );
+      for (let i = 0; i < interactiveNodes.length; i++) {
+        const el = interactiveNodes[i];
+        if (isInsideSleepwalker(el) || !isElementVisible(el, doc)) continue;
+
+        const label = resolveInteractiveLabel(el, doc).slice(0, 90);
+        if (isSensitiveField(el, label)) continue;
+
+        const type = classifyInteractiveElement(el);
+        const cleanLabel = label || `${type} ${elements.length + 1}`;
+        elements.push({
+          id: elements.length + 1,
+          type,
+          label: cleanLabel,
+          required: Boolean(el.required || getAttributeSafe(el, 'aria-required') === 'true'),
+          accept: type === 'file' ? cleanWhitespace(getAttributeSafe(el, 'accept') || '') : ''
+        });
+        if (elements.length >= 120) break;
+      }
+    }
+
+    return { headings, elements };
+  }
+
+  function extractCleanNodeLines(rootEl, doc, lines, currentSectionRef) {
+    if (!rootEl) return;
+    const nodes = rootEl.childNodes || [];
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      if (node.nodeType === 3) {
+        const txt = cleanWhitespace(node.nodeValue || '');
+        if (txt) {
+          lines.push({ section: currentSectionRef.value, text: txt, isHeading: false });
+        }
+        continue;
+      }
+      if (node.nodeType !== 1) continue;
+
+      const tag = String(node.tagName || '').toLowerCase();
+      if (['script', 'style', 'noscript', 'template', 'svg', 'iframe', 'input', 'textarea', 'select', 'option', 'canvas', 'audio', 'video'].includes(tag)) {
+        continue;
+      }
+      if (tag === 'nav' || tag === 'footer' || getAttributeSafe(node, 'role') === 'navigation') {
+        continue;
+      }
+      if (isInsideSleepwalker(node) || !isElementVisible(node, doc)) {
+        continue;
+      }
+
+      if (/^h[1-6]$/.test(tag)) {
+        const hText = cleanWhitespace(node.innerText || node.textContent || '');
+        if (hText) {
+          currentSectionRef.value = hText.slice(0, 100);
+          lines.push({ section: currentSectionRef.value, text: hText, isHeading: true });
+        }
+        continue;
+      }
+
+      // If element has child element nodes, walk them to avoid reading child input values
+      if (node.children && node.children.length > 0) {
+        extractCleanNodeLines(node, doc, lines, currentSectionRef);
+      } else {
+        const leafText = cleanWhitespace(node.innerText || node.textContent || '');
+        if (leafText) {
+          lines.push({ section: currentSectionRef.value, text: leafText, isHeading: false });
+        }
+      }
+    }
+  }
+
+  function buildSectionChunks(doc, title, maxCharsPerChunk = 800) {
+    if (!doc || !doc.body) return [];
+
+    let contentRoot = null;
+    if (typeof doc.querySelector === 'function') {
+      contentRoot =
+        doc.querySelector('main') ||
+        doc.querySelector('[role="main"]') ||
+        doc.querySelector('article') ||
+        doc.body;
+    } else {
+      contentRoot = doc.body;
+    }
+
+    const lines = [];
+    const currentSectionRef = { value: cleanWhitespace(title) || 'Overview' };
+    extractCleanNodeLines(contentRoot, doc, lines, currentSectionRef);
+
+    // Fallback to body if <main> was unexpectedly tiny/empty
+    if (lines.length === 0 && contentRoot !== doc.body) {
+      extractCleanNodeLines(doc.body, doc, lines, currentSectionRef);
+    }
+
+    const chunks = [];
+    let activeSection = cleanWhitespace(title) || 'Overview';
+    let buffer = '';
+
+    const flush = () => {
+      const cleaned = cleanWhitespace(buffer);
+      if (cleaned) {
+        chunks.push({
+          id: `c${chunks.length + 1}`,
+          index: chunks.length,
+          section: activeSection,
+          text: cleaned,
+          tokens: estimateTokens(cleaned)
+        });
+      }
+      buffer = '';
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const entry = lines[i];
+      if (!entry.text) continue;
+
+      if (entry.isHeading) {
+        if (buffer.trim()) flush();
+        activeSection = entry.section;
+        buffer = entry.text;
+        continue;
+      }
+
+      const candidate = buffer ? `${buffer} ${entry.text}` : entry.text;
+      if (candidate.length > maxCharsPerChunk && buffer.trim()) {
+        flush();
+        activeSection = entry.section;
+        buffer = entry.text;
+      } else {
+        buffer = candidate;
+      }
+    }
+    flush();
+
+    return chunks;
+  }
+
+  function buildDigest(doc, options = {}) {
+    const targetDoc = doc || (typeof document !== 'undefined' ? document : null);
+    const title = cleanWhitespace((targetDoc && targetDoc.title) || 'Untitled Page').slice(0, 140);
+    const urlClean = getCleanUrl(targetDoc);
+    const { headings, elements } = collectHeadingsAndElements(targetDoc);
+    const chunks = buildSectionChunks(targetDoc, title, options.maxCharsPerChunk || 800);
+
+    const safeTextParts = [title];
+    for (let i = 0; i < chunks.length; i++) {
+      safeTextParts.push(chunks[i].text);
+    }
+    const fullSafeText = safeTextParts.join('\n');
+    const pageTextHash = hashText(fullSafeText);
+
+    return {
+      title,
+      urlClean,
+      pageTextHash,
+      headings,
+      elements,
+      chunks,
+      fullSafeText,
+      stats: {
+        headingCount: headings.length,
+        elementCount: elements.length,
+        chunkCount: chunks.length,
+        totalTextTokens: estimateTokens(fullSafeText)
+      }
+    };
+  }
+
+  function normalizeSearchTokens(text) {
+    const cleaned = normalizeNumerals(String(text || '').toLowerCase())
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ');
+    const rawTokens = cleaned.split(/\s+/).filter(Boolean);
+    const result = [];
+    for (let i = 0; i < rawTokens.length; i++) {
+      const tok = rawTokens[i];
+      if (tok.length < 2 && !/^\d+$/.test(tok)) continue;
+      if (STOPWORDS.has(tok)) continue;
+      result.push(tok);
+    }
+    return result;
+  }
+
+  function scoreChunks(chunks, query, options = {}) {
+    const list = Array.isArray(chunks) ? chunks : [];
+    const queryTokens = normalizeSearchTokens(query || '');
+    const targetTokens = normalizeSearchTokens(options.target || '');
+    const allQueryTokens = Array.from(new Set([...queryTokens, ...targetTokens]));
+    const normalizedQuery = cleanWhitespace(query || '').toLowerCase();
+
+    return list
+      .map((chunk, idx) => {
+        const sectionLower = cleanWhitespace(chunk.section || '').toLowerCase();
+        const textLower = cleanWhitespace(chunk.text || '').toLowerCase();
+        let score = 0;
+
+        if (normalizedQuery && normalizedQuery.length >= 4) {
+          if (sectionLower.includes(normalizedQuery)) score += 10;
+          if (textLower.includes(normalizedQuery)) score += 6;
+        }
+
+        for (let i = 0; i < allQueryTokens.length; i++) {
+          const tok = allQueryTokens[i];
+          if (sectionLower.includes(tok)) score += 4;
+          if (textLower.includes(tok)) {
+            score += 2;
+            // Small boost for prefix/exact word boundary match
+            if (textLower.split(/\s+/).some((w) => w.startsWith(tok))) {
+              score += 1;
+            }
+          }
+        }
+
+        return {
+          chunk,
+          index: typeof chunk.index === 'number' ? chunk.index : idx,
+          score
+        };
+      })
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.index - b.index;
+      });
+  }
+
+  function selectTopChunks(digest, query, options = {}) {
+    const chunks = (digest && Array.isArray(digest.chunks)) ? digest.chunks : [];
+    if (chunks.length === 0) return [];
+
+    const maxChunks = Math.max(1, Math.min(Number(options.maxChunks) || DEFAULT_MAX_CHUNKS, 3));
+    const maxTokens = Math.max(100, Number(options.maxTokens) || DEFAULT_MAX_CHUNK_TOKENS);
+
+    const scored = scoreChunks(chunks, query, options);
+    const hasPositiveScore = scored.some((item) => item.score > 0);
+    const orderedCandidates = hasPositiveScore
+      ? scored
+      : chunks.map((chunk, idx) => ({ chunk, index: idx, score: 0 }));
+
+    const selected = [];
+    let usedTokens = 0;
+
+    for (let i = 0; i < orderedCandidates.length && selected.length < maxChunks; i++) {
+      const candidate = orderedCandidates[i].chunk;
+      const chunkHeader = `[${candidate.section}] `;
+      const remaining = maxTokens - usedTokens;
+      if (remaining < 40) break;
+
+      const fullEntry = `${chunkHeader}${candidate.text}`;
+      const tok = estimateTokens(fullEntry);
+      if (tok <= remaining) {
+        selected.push({
+          ...candidate,
+          score: orderedCandidates[i].score,
+          text: candidate.text
+        });
+        usedTokens += tok;
+      } else {
+        const clippedText = truncateToTokenBudget(candidate.text, remaining - estimateTokens(chunkHeader));
+        if (clippedText) {
+          selected.push({
+            ...candidate,
+            score: orderedCandidates[i].score,
+            text: clippedText
+          });
+          usedTokens += estimateTokens(`${chunkHeader}${clippedText}`);
+        }
+        break;
+      }
+    }
+
+    return selected;
+  }
+
+  function formatElementsCompact(elements, maxTokens) {
+    const list = Array.isArray(elements) ? elements : [];
+    if (list.length === 0 || maxTokens <= 20) return '';
+
+    const lines = [];
+    let used = 0;
+    for (let i = 0; i < list.length; i++) {
+      const el = list[i];
+      const tag = `[${el.id}|${el.type}|${el.label}]`;
+      const cost = estimateTokens(tag + '\n');
+      if (used + cost > maxTokens) break;
+      lines.push(tag);
+      used += cost;
+    }
+    return lines.join('\n');
+  }
+
+  function formatHeadingsCompact(headings, maxTokens) {
+    const list = Array.isArray(headings) ? headings : [];
+    if (list.length === 0 || maxTokens <= 15) return '';
+
+    const lines = [];
+    let used = 0;
+    for (let i = 0; i < list.length; i++) {
+      const h = list[i];
+      const indent = '  '.repeat(Math.max(0, Math.min((h.level || 1) - 1, 3)));
+      const line = `${indent}H${h.level || 2}: ${h.text}`;
+      const cost = estimateTokens(line + '\n');
+      if (used + cost > maxTokens) break;
+      lines.push(line);
+      used += cost;
+    }
+    return lines.join('\n');
+  }
+
+  function formatDigestForPrompt(digest, options = {}) {
+    const d = digest || { title: 'Page', urlClean: '', headings: [], elements: [], chunks: [] };
+    const maxTokens = Math.max(200, Number(options.maxTokens) || DEFAULT_CLOUD_DIGEST_TOKENS);
+    const maxChunkTokens = Math.min(
+      Number(options.maxChunkTokens) || DEFAULT_MAX_CHUNK_TOKENS,
+      Math.max(120, Math.floor(maxTokens * 0.65))
+    );
+    const maxChunks = Math.max(1, Math.min(Number(options.maxChunks) || DEFAULT_MAX_CHUNKS, 3));
+    const includeElements = options.includeElements !== false;
+
+    const header = `TITLE: ${d.title || 'Page'}\nURL: ${d.urlClean || 'unknown'}`;
+    let remaining = maxTokens - estimateTokens(header + '\n');
+
+    const parts = [header];
+
+    // Reserve budget ratios cleanly: headings (~15%), elements (~25%), chunks (~60%)
+    const headingBudget = Math.min(Math.floor(maxTokens * 0.16), Math.max(0, remaining));
+    const headingsBlock = formatHeadingsCompact(d.headings, headingBudget);
+    if (headingsBlock) {
+      const block = `HEADINGS:\n${headingsBlock}`;
+      parts.push(block);
+      remaining -= estimateTokens('\n' + block);
+    }
+
+    if (includeElements && remaining > 60) {
+      const elementBudget = Math.min(Math.floor(maxTokens * 0.25), Math.floor(remaining * 0.4));
+      const elementsBlock = formatElementsCompact(d.elements, elementBudget);
+      if (elementsBlock) {
+        const block = `ELEMENTS [id|type|label]:\n${elementsBlock}`;
+        parts.push(block);
+        remaining -= estimateTokens('\n' + block);
+      }
+    }
+
+    if (remaining > 40) {
+      const effectiveChunkBudget = Math.min(maxChunkTokens, remaining - 8);
+      const selectedChunks = options.topChunksOnly
+        ? selectTopChunks(d, options.query || options.target || '', {
+            target: options.target || '',
+            maxChunks,
+            maxTokens: effectiveChunkBudget
+          })
+        : selectTopChunks(d, options.target || '', {
+            target: options.target || '',
+            maxChunks: Math.min(maxChunks, 3),
+            maxTokens: effectiveChunkBudget
+          });
+
+      if (selectedChunks.length > 0) {
+        const chunkLines = selectedChunks.map((c) => `[${c.id}|${c.section}] ${c.text}`);
+        parts.push(`CHUNKS:\n${chunkLines.join('\n')}`);
+      }
+    }
+
+    const joined = parts.join('\n');
+    return truncateToTokenBudget(joined, maxTokens);
+  }
+
+  return {
+    DEFAULT_CLOUD_DIGEST_TOKENS,
+    DEFAULT_OLLAMA_DIGEST_TOKENS,
+    DEFAULT_MAX_CHUNK_TOKENS,
+    DEFAULT_MAX_CHUNKS,
+    estimateTokens,
+    truncateToTokenBudget,
+    hashText,
+    normalizeNumerals,
+    cleanWhitespace,
+    getCleanUrl,
+    normalizeSearchTokens,
+    buildDigest,
+    scoreChunks,
+    selectTopChunks,
+    formatDigestForPrompt
+  };
+});

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sleepwalker Settings</title>
+  <style>
+    :root { --ink:#1b1714; --muted:#574f45; --gold:#d99b26; --card:rgba(255,250,240,0.92); --border:rgba(217,155,38,0.55); }
+    * { box-sizing:border-box; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Devanagari",sans-serif; }
+    body { margin:0; padding:28px 18px 48px; background:linear-gradient(160deg,#f7f1e3 0%,#ece7f7 100%); color:var(--ink); min-height:100vh; }
+    main { max-width:740px; margin:0 auto; display:flex; flex-direction:column; gap:18px; }
+    header h1 { margin:0 0 6px; font-size:28px; }
+    header p { margin:0; font-size:17px; color:var(--muted); }
+    section { background:var(--card); border:1.5px solid var(--border); border-radius:24px; padding:20px 22px; box-shadow:0 12px 32px rgba(24,18,12,0.08); }
+    h2 { margin:0 0 14px; font-size:20px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+    label { display:flex; flex-direction:column; gap:6px; font-size:15px; font-weight:600; }
+    input[type="text"], input[type="url"], input[type="password"], select {
+      min-height:48px; padding:10px 12px; border-radius:12px; border:1px solid rgba(27,23,20,0.22); background:#fff; color:var(--ink); font-size:16px;
+    }
+    label.chk { flex-direction:row; align-items:center; gap:10px; min-height:48px; cursor:pointer; font-size:16px; }
+    input[type="checkbox"] { width:22px; height:22px; accent-color:var(--gold); }
+    .row { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; align-items:center; }
+    button {
+      min-height:48px; min-width:48px; padding:10px 18px; border-radius:999px; border:1.5px solid rgba(27,23,20,0.22);
+      background:#fff; color:var(--ink); font-size:16px; font-weight:700; cursor:pointer;
+    }
+    button.primary { background:linear-gradient(135deg,#f3c65f,#d99b26); border-color:#b47812; color:#1b1407; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline:3px solid #2563eb; outline-offset:2px; }
+    .note { margin:6px 0 0; font-size:14px; color:var(--muted); line-height:1.45; }
+    #opt-status { font-size:15px; font-weight:700; min-height:22px; color:#14532d; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Sleepwalker Options</h1>
+      <p>Configure AI endpoints, edge glow effects, voice preferences, and optional non-sensitive autofill details.</p>
+    </header>
+
+    <section>
+      <h2>AI Engine &amp; Privacy</h2>
+      <div class="grid">
+        <label>Cloud Proxy URL (HTTPS)
+          <input id="opt-proxy-url" type="url" placeholder="https://your-proxy.example.com/explain">
+        </label>
+        <label>Local Ollama URL
+          <input id="opt-ollama-url" type="url" placeholder="http://localhost:11434">
+        </label>
+        <label>Ollama Model
+          <input id="opt-ollama-model" type="text" list="ollama-model-presets" placeholder="llama3.2:3b">
+          <datalist id="ollama-model-presets">
+            <option value="llama3.2:3b">llama3.2:3b (Default)</option>
+            <option value="qwen2.5:3b">qwen2.5:3b</option>
+          </datalist>
+        </label>
+        <label>Gemini Model
+          <input id="opt-gemini-model" type="text" placeholder="gemini-2.5-flash-lite">
+        </label>
+        <label>Optional Gemini API Key
+          <input id="opt-gemini-key" type="password" placeholder="Stored locally only (optional)">
+        </label>
+      </div>
+      <label class="chk"><input id="opt-ai-search-enabled" type="checkbox" checked> Enable Ollama AI Intelligent Search Selection (matches spoken intent to the right search box)</label>
+      <label class="chk"><input id="opt-live-ws" type="checkbox"> Enable Gemini Live WebSocket Mode for real-time Q&amp;A (persistent session + resumption; falls back to SSE/Ollama automatically)</label>
+      <label class="chk"><input id="opt-local-only" type="checkbox"> Local-Only Mode (skip external Gemini; use local Ollama / offline summary only)</label>
+      <div class="row">
+        <button id="opt-test-ollama" type="button">Verify Connections</button>
+        <button id="opt-test-ollama-model" type="button">Test Ollama &amp; Embeddings</button>
+        <button id="opt-reload-env" type="button">Reload Local .env</button>
+        <button id="opt-toggle-key" type="button">Show Key</button>
+      </div>
+      <div id="opt-health-grid" class="grid" style="margin-top:12px;">
+        <div><strong>Gemini REST/SSE:</strong> <span id="badge-gemini-rest" data-state="disconnected">Disconnected</span> <span id="detail-gemini-rest" class="note">Click Verify Connections</span></div>
+        <div><strong>Gemini Live WS:</strong> <span id="badge-gemini-ws" data-state="disconnected">Disconnected</span> <span id="detail-gemini-ws" class="note">Idle</span></div>
+        <div><strong>Ollama LLM (Gen):</strong> <span id="badge-ollama" data-state="disconnected">Disconnected</span> <span id="detail-ollama" class="note">Click Verify Connections</span></div>
+        <div><strong>Semantic Embeddings:</strong> <span id="badge-embed" data-state="disconnected">Disconnected</span> <span id="detail-embed" class="note">Not checked yet</span></div>
+      </div>
+      <p id="opt-ollama-origin-info" class="note">Extension Origin: detecting...</p>
+      <p id="opt-ai-hint" class="note">Transparency: Passwords, OTPs, payment numbers, private messages, and URL query strings are never captured or sent. External Gemini receives compact digested page text only when Local-Only Mode is unchecked and Page-Context Analysis is enabled.</p>
+    </section>
+
+    <section>
+      <h2>Privacy, Memory Management &amp; Personal Intelligence</h2>
+      <label class="chk"><input id="opt-memory-paused" type="checkbox"> Pause memory collection (stop recording browsing history, activities, and tasks)</label>
+      <label class="chk"><input id="opt-disable-page-analysis" type="checkbox"> Disable page-context analysis (prevent extracting or sending webpage content to AI)</label>
+      <label class="chk"><input id="opt-learning-enabled" type="checkbox" checked> Enable adaptive interaction learning (learn from repeated patterns &amp; feedback; never assumes from 1 action)</label>
+      <label class="chk"><input id="opt-proactive-enabled" type="checkbox" checked> Enable proactive next-step suggestions (compact, dismissible offers only; never executes actions automatically)</label>
+      <div class="row">
+        <button id="opt-clear-recent" type="button">Clear Recent Activity</button>
+        <button id="opt-clear-tasks" type="button">Clear Task History</button>
+        <button id="opt-clear-personal" type="button">Clear Personal Context</button>
+        <button id="opt-clear-all-mem" type="button">Clear All Memory</button>
+      </div>
+      <div style="margin-top:12px;">
+        <strong>Stored Preferences, Remembered Tasks &amp; Scheduled Reminders</strong>
+        <div id="opt-personal-inspector" class="note" style="margin-top:6px;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.72);border:1px solid rgba(27,23,20,0.12);">Click "Refresh Diagnostics" or save to inspect stored preferences, tasks, and reminders.</div>
+        <div class="row">
+          <button id="opt-reset-prefs" type="button">Reset Learned Preferences</button>
+          <button id="opt-clear-reminders" type="button">Clear All Reminders</button>
+        </div>
+      </div>
+      <p id="opt-mem-summary" class="note">Memory stays stored locally in chrome.storage. Click Inspect Live Diagnostics below for live counts.</p>
+      <p class="note"><strong>Shortcuts:</strong> <kbd>Alt+S</kbd> Toggle / Interrupt Sleepwalker &nbsp;|&nbsp; <kbd>Alt+Z</kbd> Hold-to-Talk &nbsp;|&nbsp; <kbd>Esc</kbd> Stop &amp; Dismiss</p>
+    </section>
+
+    <section>
+      <h2>Voice, Appearance &amp; Motion</h2>
+      <div class="grid">
+        <label>Default Language
+          <select id="opt-lang">
+            <option value="auto">Auto (Hinglish: HI -> EN retry)</option>
+            <option value="en-IN">English (India)</option>
+            <option value="hi-IN">Hindi (हिन्दी)</option>
+            <option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option>
+            <option value="bn-IN">Bengali</option><option value="mr-IN">Marathi</option>
+            <option value="gu-IN">Gujarati</option><option value="kn-IN">Kannada</option>
+            <option value="ml-IN">Malayalam</option><option value="pa-IN">Punjabi</option>
+          </select>
+        </label>
+        <label>Speech Speed
+          <select id="opt-rate">
+            <option value="0.8">Slow (0.8x)</option>
+            <option value="1">Normal (1.0x)</option>
+            <option value="1.2">Fast (1.2x)</option>
+          </select>
+        </label>
+        <label>Card Text Size
+          <select id="opt-font-size">
+            <option value="18">Standard (18px)</option>
+            <option value="20">Large (20px)</option>
+            <option value="22">Extra Large (22px)</option>
+          </select>
+        </label>
+      </div>
+      <label class="chk"><input id="opt-glow-enabled" type="checkbox" checked> Show luminous golden threads &amp; light page veil</label>
+      <label class="chk"><input id="opt-barge-in" type="checkbox"> Allow Barge-In while speaking (recommended with headphones only)</label>
+      <label class="chk"><input id="opt-translit" type="checkbox" checked> Transliterate Hindi dictation to English letters when required</label>
+    </section>
+
+    <section>
+      <h2>Opt-In Non-Sensitive Form Profile</h2>
+      <label class="chk"><input id="opt-profile-optin" type="checkbox"> Enable opt-in autofill when I say "Fill my details"</label>
+      <div class="grid">
+        <label>Full Name <input id="prof-name" type="text"></label>
+        <label>Email <input id="prof-email" type="text"></label>
+        <label>Phone <input id="prof-phone" type="text"></label>
+        <label>City <input id="prof-city" type="text"></label>
+        <label>State <input id="prof-state" type="text"></label>
+        <label>PIN Code <input id="prof-pin" type="text"></label>
+      </div>
+      <p class="note">Never stores passwords, OTP, Aadhaar, PAN, card/CVV, bank numbers, or CAPTCHA values.</p>
+      <div class="row">
+        <button id="opt-clear-profile" type="button">Clear Saved Profile</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Device Helpers &amp; Diagnostics</h2>
+      <div class="row">
+        <button id="opt-open-shelf" type="button">Open Document Shelf Setup</button>
+        <button id="opt-open-mic" type="button">Open Mic Check</button>
+        <button id="opt-load-diag" type="button">Inspect Live Diagnostics</button>
+      </div>
+      <pre id="opt-diag" class="note" style="white-space:pre-wrap;background:rgba(255,255,255,0.65);padding:10px;border-radius:10px;max-height:220px;overflow:auto;"></pre>
+    </section>
+
+    <div class="row">
+      <button id="opt-save" type="button" class="primary">Save Settings</button>
+      <span id="opt-status" role="status" aria-live="polite"></span>
+    </div>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

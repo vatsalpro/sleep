@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sleepwalker Phase 4.1 — Universal Element Selection Test Playground</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; line-height: 1.5; background: #f8fafc; color: #0f172a; }
+    section, form { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 18px; }
+    .hidden { display: none; }
+    .dropdown-wrap { position: relative; display: inline-block; min-width: 240px; }
+    .dropdown-menu { position: relative; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px; background: #fff; margin-top: 4px; }
+    .dropdown-item, [role="option"], [role="menuitem"] { padding: 6px 10px; cursor: pointer; border-radius: 4px; }
+    .dropdown-item:hover, [role="option"]:hover { background: #eff6ff; }
+    .selected { background: #dbeafe; font-weight: 600; border-color: #2563eb; }
+    .plan-grid { display: flex; gap: 12px; }
+    .plan-card { border: 2px solid #cbd5e1; border-radius: 8px; padding: 12px; min-width: 150px; }
+    [role="tab"] { padding: 6px 14px; border: 1px solid #cbd5e1; background: #f1f5f9; cursor: pointer; }
+    [role="tab"][aria-selected="true"] { background: #1e293b; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>Admissions &amp; Subscription Portal</h1>
+  <div id="submit-counter" data-submits="0" style="display:none">0</div>
+
+  <!-- 1 & 9. Primary Application Form + Multiple Native Dropdowns + Duplicate Country in Secondary Form -->
+  <form id="university-form" aria-label="University Application Form">
+    <h2>University Application Form</h2>
+    <div>
+      <label for="app-country">Country</label>
+      <select id="app-country" name="app_country">
+        <option value="">-- Select Country --</option>
+        <option value="IN">India</option>
+        <option value="DE">Germany</option>
+        <option value="JP">Japan</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="app-degree">Degree Level</label>
+      <select id="app-degree" name="app_degree">
+        <option value="">-- Choose Degree --</option>
+        <option value="bsc">Bachelor's degree</option>
+        <option value="msc">Master's degree</option>
+        <option value="phd">Doctorate (PhD)</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="app-department">Department</label>
+      <select id="app-department" name="app_department">
+        <option value="">-- Select Department --</option>
+        <option value="mech">Mechanical Engineering</option>
+        <option value="cs">Computer Science</option>
+        <option value="bio" disabled>Biotechnology (Closed)</option>
+      </select>
+    </div>
+
+    <!-- 7. Multi-select preserving existing selection -->
+    <div>
+      <label for="app-skills">Skills</label>
+      <select id="app-skills" name="app_skills" multiple size="3">
+        <option value="python" selected>Python</option>
+        <option value="java">Java</option>
+        <option value="rust">Rust</option>
+      </select>
+    </div>
+
+    <!-- 3 & 4. Radio group + Checkboxes + Switch -->
+    <fieldset>
+      <legend>Study Mode</legend>
+      <label><input type="radio" name="study_mode" value="full_time"> Full Time</label>
+      <label><input type="radio" name="study_mode" value="part_time"> Part Time</label>
+    </fieldset>
+
+    <div>
+      <label><input type="checkbox" id="chk-terms" name="terms"> I agree to the Terms and Conditions</label>
+    </div>
+    <div>
+      <label><input type="checkbox" id="chk-notify" name="notifications" checked> Email Notification Option</label>
+    </div>
+
+    <!-- 10. Disabled Control -->
+    <div>
+      <label for="disabled-voucher">Scholarship Voucher (Disabled)</label>
+      <select id="disabled-voucher" name="voucher" disabled>
+        <option value="v1">Early Bird</option>
+      </select>
+    </div>
+
+    <!-- Range slider -->
+    <div>
+      <label for="budget-slider">Monthly Budget</label>
+      <input type="range" id="budget-slider" name="budget" min="0" max="2000" step="100" value="500">
+    </div>
+
+    <button type="submit" id="btn-submit-app">Submit Application</button>
+  </form>
+
+  <!-- 9. Secondary Form with Duplicate Labels in Different Sections (Billing vs Preferences) -->
+  <section id="billing-section" aria-label="Billing Preferences">
+    <h2>Billing Preferences</h2>
+    <div>
+      <label><input type="checkbox" id="chk-sub-billing" name="sub_billing"> Subscribe</label>
+    </div>
+    <label for="billing-tier">Secondary Tier Options</label>
+    <select id="billing-tier" name="billing_tier">
+      <option value="">-- Select --</option>
+      <option value="std">Standard Delivery</option>
+      <option value="exp">Express Delivery</option>
+    </select>
+  </section>
+
+  <section id="marketing-section" aria-label="Newsletter Preferences">
+    <h2>Newsletter Preferences</h2>
+    <div>
+      <label><input type="checkbox" id="chk-sub-marketing" name="sub_marketing"> Subscribe</label>
+    </div>
+  </section>
+
+  <!-- 2, 5, 8. Custom Searchable Dropdown with Dynamically Loaded + DOM-Replaced Behavior -->
+  <section id="dynamic-section">
+    <h2>Dynamic Controls</h2>
+    <div class="dropdown-wrap searchable-select" id="custom-major-wrap">
+      <button type="button" id="custom-major-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Specialization Dropdown">Select Specialization</button>
+      <div id="custom-major-panel" class="dropdown-menu hidden" role="listbox" aria-label="Specialization Options"></div>
+    </div>
+
+    <!-- 6. Async Autocomplete Input -->
+    <div class="autocomplete" style="margin-top:12px;">
+      <label for="city-auto">Preferred City</label>
+      <input type="text" id="city-auto" name="city" placeholder="Type city..." aria-autocomplete="list" aria-controls="city-suggestions">
+      <ul id="city-suggestions" class="suggestions hidden" role="listbox"></ul>
+    </div>
+  </section>
+
+  <!-- Plan Cards (Cheapest Plan Comparison) -->
+  <section id="plans-section">
+    <h2>Membership Plans</h2>
+    <div class="plan-grid">
+      <div class="plan-card" data-plan="Starter Plan" data-price="$9/mo">
+        <h3>Starter Plan</h3>
+        <p>$9/mo — Core tools</p>
+        <button type="button" class="choose-plan-btn">Select Plan</button>
+      </div>
+      <div class="plan-card" data-plan="Pro Plan" data-price="$19/mo">
+        <h3>Pro Plan</h3>
+        <p>$19/mo — Team workspace</p>
+        <button type="button" class="choose-plan-btn">Select Plan</button>
+      </div>
+      <div class="plan-card" data-plan="Enterprise Plan" data-price="$49/mo">
+        <h3>Enterprise Plan</h3>
+        <p>$49/mo — Unlimited</p>
+        <button type="button" class="choose-plan-btn">Select Plan</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- University Result Cards ("Select the second university.") -->
+  <section id="uni-results">
+    <h2>Recommended Universities</h2>
+    <div class="university-card" data-result-item><h3>Technical University of Munich (TUM)</h3><a href="#tum">View TUM</a></div>
+    <div class="university-card" data-result-item><h3>LMU Munich</h3><a href="#lmu">View LMU</a></div>
+    <div class="university-card" data-result-item><h3>RWTH Aachen</h3><a href="#rwth">View RWTH</a></div>
+  </section>
+
+  <!-- Tabs -->
+  <section id="tabs-section">
+    <div role="tablist" aria-label="Account Sections">
+      <button type="button" role="tab" id="tab-general" aria-selected="true">General</button>
+      <button type="button" role="tab" id="tab-security" aria-selected="false">Security</button>
+    </div>
+  </section>
+
+  <!-- 11. Nested Menu -->
+  <nav aria-label="Quick Settings Navigation">
+    <ul style="list-style:none;padding:0;">
+      <li class="has-submenu">
+        <button type="button" id="menu-settings-btn" aria-haspopup="menu" aria-expanded="false">Settings</button>
+        <ul id="menu-settings-sub" class="hidden" role="menu">
+          <li role="menuitem" id="menu-privacy" data-submenu-item>Privacy Settings</li>
+          <li role="menuitem" id="menu-billing" data-submenu-item>Billing History</li>
+        </ul>
+      </li>
+    </ul>
+  </nav>
+
+  <!-- Hostile Revert Control (Verifies Sleepwalker reports honest failure instead of false success) -->
+  <section id="hostile-section">
+    <label for="hostile-select">Locked Region Selector</label>
+    <select id="hostile-select" name="hostile_region">
+      <option value="US">United States</option>
+      <option value="FR">France Locked</option>
+    </select>
+  </section>
+
+  <!-- Open Shadow DOM Control + Same-Origin Iframe -->
+  <div id="shadow-host"></div>
+  <iframe id="same-origin-frame" srcdoc="<label for='frame-note'>Iframe Checkbox <input type='checkbox' id='frame-note'></label>" style="height:44px;"></iframe>
+
+  <script>
+    (function () {
+      let submits = 0;
+      document.getElementById('university-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        submits += 1;
+        document.getElementById('submit-counter').setAttribute('data-submits', String(submits));
+      });
+
+      // Dynamic Searchable Dropdown (injects search input & options 40ms after opening!)
+      const majorBtn = document.getElementById('custom-major-btn');
+      const majorPanel = document.getElementById('custom-major-panel');
+      const majors = ['Artificial Intelligence', 'Data Science', 'Cybersecurity', 'Robotics'];
+      const renderMajorOptions = (filterText) => {
+        const q = (filterText || '').toLowerCase();
+        Array.from(majorPanel.querySelectorAll('[role="option"]')).forEach((n) => n.remove());
+        majors.filter((m) => !q || m.toLowerCase().includes(q)).forEach((m) => {
+          const item = document.createElement('div');
+          item.setAttribute('role', 'option');
+          item.setAttribute('data-value', m);
+          item.textContent = m;
+          item.addEventListener('click', () => {
+            majorBtn.textContent = m;
+            majorBtn.setAttribute('aria-expanded', 'false');
+            majorPanel.classList.add('hidden');
+            item.setAttribute('aria-selected', 'true');
+            window.__LAST_MAJOR_SELECTED = m;
+          });
+          majorPanel.appendChild(item);
+        });
+      };
+      majorBtn.addEventListener('click', () => {
+        const isOpen = majorBtn.getAttribute('aria-expanded') === 'true';
+        if (isOpen) return;
+        majorBtn.setAttribute('aria-expanded', 'true');
+        majorPanel.classList.remove('hidden');
+        setTimeout(() => {
+          if (!majorPanel.querySelector('input')) {
+            const searchInp = document.createElement('input');
+            searchInp.type = 'search';
+            searchInp.placeholder = 'Filter specialization...';
+            searchInp.addEventListener('input', () => renderMajorOptions(searchInp.value));
+            majorPanel.appendChild(searchInp);
+          }
+          renderMajorOptions('');
+        }, 45);
+      });
+
+      // Async Autocomplete: typing loads suggestions after 50ms; clicking commits city
+      const cityInp = document.getElementById('city-auto');
+      const cityList = document.getElementById('city-suggestions');
+      const cities = ['Berlin, Germany', 'Bern, Switzerland', 'Munich, Germany', 'Tokyo, Japan'];
+      cityInp.addEventListener('input', () => {
+        const q = cityInp.value.toLowerCase().trim();
+        cityList.innerHTML = '';
+        if (!q) { cityList.classList.add('hidden'); return; }
+        setTimeout(() => {
+          cityList.innerHTML = '';
+          cities.filter((c) => c.toLowerCase().includes(q)).forEach((c) => {
+            const li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.className = 'autocomplete-item';
+            li.textContent = c;
+            li.addEventListener('click', () => {
+              cityInp.value = c;
+              li.setAttribute('aria-selected', 'true');
+              cityList.classList.add('hidden');
+              window.__CITY_SUGGESTION_COMMITTED = c;
+            });
+            cityList.appendChild(li);
+          });
+          cityList.classList.remove('hidden');
+        }, 50);
+      });
+
+      // Plan cards selection state
+      document.querySelectorAll('.plan-card').forEach((card) => {
+        const btn = card.querySelector('.choose-plan-btn');
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.plan-card').forEach((c) => c.classList.remove('selected'));
+          card.classList.add('selected');
+          card.setAttribute('aria-selected', 'true');
+          window.__SELECTED_PLAN = card.getAttribute('data-plan');
+        });
+      });
+
+      // Tabs
+      document.querySelectorAll('[role="tab"]').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('[role="tab"]').forEach((t) => t.setAttribute('aria-selected', 'false'));
+          tab.setAttribute('aria-selected', 'true');
+        });
+      });
+
+      // Nested Menu
+      const setBtn = document.getElementById('menu-settings-btn');
+      const subMenu = document.getElementById('menu-settings-sub');
+      setBtn.addEventListener('click', () => {
+        setTimeout(() => {
+          setBtn.setAttribute('aria-expanded', 'true');
+          subMenu.classList.remove('hidden');
+        }, 35);
+      });
+      document.getElementById('menu-privacy').addEventListener('click', () => {
+        window.__PRIVACY_MENU_CLICKED = true;
+      });
+
+      // Hostile revert selector
+      document.getElementById('hostile-select').addEventListener('change', (e) => {
+        if (e.target.value === 'FR') {
+          e.target.value = 'US';
+        }
+      });
+
+      // Open Shadow DOM toggle
+      const sh = document.getElementById('shadow-host').attachShadow({ mode: 'open' });
+      sh.innerHTML = '<label><input type="checkbox" id="shadow-consent"> Shadow Consent</label>';
+    })();
+  </script>
+</body>
+</html>

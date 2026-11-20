@@ -1,0 +1,627 @@
+{
+  "version": "1.0.0",
+  "description": "Sleepwalker Phase 2 multilingual intent test table across all 13 intents (EN, HI Devanagari, Hinglish, and regional LLM fallback)",
+  "phrases": [
+    {
+      "id": "EXP01",
+      "phrase": "make me understand this",
+      "lang": "en-IN",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary", "level": "standard" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "EXP02",
+      "phrase": "explain this page in simple words",
+      "lang": "en-IN",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary", "level": "simple" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "EXP03",
+      "phrase": "what do i need to do",
+      "lang": "en-IN",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "action_steps" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "EXP04",
+      "phrase": "mujhe samjhao ye page kya hai",
+      "lang": "hinglish",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "EXP05",
+      "phrase": "mujhe samjhaao",
+      "lang": "hinglish",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary" },
+      "expectSource": "rules",
+      "tags": ["hinglish-variant"]
+    },
+    {
+      "id": "EXP06",
+      "phrase": "यह पेज क्या है",
+      "lang": "hi-IN",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary" },
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "RD01",
+      "phrase": "um basically please read this page",
+      "lang": "en-IN",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "page" },
+      "expectSource": "rules",
+      "tags": ["noisy-filler"]
+    },
+    {
+      "id": "RD02",
+      "phrase": "read eligibility section",
+      "lang": "en-IN",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "section", "target": "eligibility" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "RD03",
+      "phrase": "page parho",
+      "lang": "hinglish",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "page" },
+      "expectSource": "rules",
+      "tags": ["hinglish-variant"]
+    },
+    {
+      "id": "RD04",
+      "phrase": "पेज पढ़ो",
+      "lang": "hi-IN",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "page" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "RD05",
+      "phrase": "धारा २ पढ़ो",
+      "lang": "hi-IN",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "section", "target": "धारा 2" },
+      "expectSource": "rules",
+      "tags": ["devanagari-digits"]
+    },
+
+    {
+      "id": "ANS01",
+      "phrase": "इसमें फीस कितनी है",
+      "lang": "hi-IN",
+      "expectedIntent": "ANSWER",
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "ANS02",
+      "phrase": "what is the last date to apply?",
+      "lang": "en-IN",
+      "expectedIntent": "ANSWER",
+      "expectSource": "rules"
+    },
+    {
+      "id": "ANS03",
+      "phrase": "can i submit documents offline?",
+      "lang": "en-IN",
+      "expectedIntent": "ANSWER",
+      "expectSource": "rules"
+    },
+    {
+      "id": "ANS04",
+      "phrase": "last date kab hai",
+      "lang": "hinglish",
+      "expectedIntent": "ANSWER",
+      "expectSource": "rules"
+    },
+    {
+      "id": "ANS05",
+      "phrase": "आवेदन की अंतिम तिथि क्या है",
+      "lang": "hi-IN",
+      "expectedIntent": "ANSWER",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "NAV01",
+      "phrase": "scholarship wala link kholo",
+      "lang": "hinglish",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "click", "target": "scholarship" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "NAV02",
+      "phrase": "submit kar do",
+      "lang": "hinglish",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "click", "target": "submit", "isSubmit": true, "risk": "critical" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "NAV03",
+      "phrase": "wapas jao",
+      "lang": "hinglish",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "history", "dir": "back" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "NAV04",
+      "phrase": "neeche scroll karo",
+      "lang": "hinglish",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "scroll", "dir": "down" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "NAV05",
+      "phrase": "open login button",
+      "lang": "en-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "click", "target": "login" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "NAV06",
+      "phrase": "go to documents section",
+      "lang": "en-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "section", "target": "documents" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "NAV07",
+      "phrase": "show outline",
+      "lang": "en-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "outline" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "NAV08",
+      "phrase": "ऊपर स्क्रॉल करो",
+      "lang": "hi-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "scroll", "dir": "up" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "NAV09",
+      "phrase": "अगला पेज",
+      "lang": "hi-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "paginate", "dir": "next" },
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "SRCH01",
+      "phrase": "Search for artificial intelligence",
+      "lang": "en-IN",
+      "expectedIntent": "SEARCH",
+      "expectedArgs": { "action": "search", "query": "artificial intelligence" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "SRCH02",
+      "phrase": "machine learning search karo",
+      "lang": "hinglish",
+      "expectedIntent": "SEARCH",
+      "expectedArgs": { "action": "search", "query": "machine learning" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "SRCH03",
+      "phrase": "छात्रवृत्ति सर्च करो",
+      "lang": "hi-IN",
+      "expectedIntent": "SEARCH",
+      "expectedArgs": { "action": "search", "query": "छात्रवृत्ति" },
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "FG01",
+      "phrase": "form bharo",
+      "lang": "hinglish",
+      "expectedIntent": "FILL_GUIDED",
+      "expectedArgs": { "isPlan": false },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "FG02",
+      "phrase": "fill this form",
+      "lang": "en-IN",
+      "expectedIntent": "FILL_GUIDED",
+      "expectedArgs": { "isPlan": false },
+      "expectSource": "rules"
+    },
+    {
+      "id": "FG03",
+      "phrase": "apply for this",
+      "lang": "en-IN",
+      "expectedIntent": "FILL_GUIDED",
+      "expectedArgs": { "isPlan": true },
+      "expectSource": "rules"
+    },
+    {
+      "id": "FG04",
+      "phrase": "फॉर्म भरो",
+      "lang": "hi-IN",
+      "expectedIntent": "FILL_GUIDED",
+      "expectedArgs": { "isPlan": false },
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "DIC01",
+      "phrase": "mera naam Vatsal Kumar likho",
+      "lang": "hinglish",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "field": "naam", "value": "Vatsal Kumar" },
+      "expectSource": "rules",
+      "tags": ["prompt-example", "case-preserve"]
+    },
+    {
+      "id": "DIC02",
+      "phrase": "enter email as vatsal.test@example.com",
+      "lang": "en-IN",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "field": "email", "value": "vatsal.test@example.com" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "DIC03",
+      "phrase": "write Main Street 42",
+      "lang": "en-IN",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "value": "Main Street 42" },
+      "expectSource": "rules",
+      "tags": ["case-preserve"]
+    },
+    {
+      "id": "DIC04",
+      "phrase": "delete that",
+      "lang": "en-IN",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "specialOp": "delete that" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "DIC05",
+      "phrase": "मेरा नाम राहुल शर्मा लिखो",
+      "lang": "hi-IN",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "field": "नाम", "value": "राहुल शर्मा" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "DIC06",
+      "phrase": "मेरा पता सेक्टर ५ लिखो",
+      "lang": "hi-IN",
+      "expectedIntent": "DICTATE",
+      "expectedArgs": { "field": "पता", "value": "सेक्टर 5" },
+      "expectSource": "rules",
+      "tags": ["devanagari-digits"]
+    },
+
+    {
+      "id": "FP01",
+      "phrase": "fill my details",
+      "lang": "en-IN",
+      "expectedIntent": "FILL_PROFILE",
+      "expectSource": "rules"
+    },
+    {
+      "id": "FP02",
+      "phrase": "use saved profile",
+      "lang": "en-IN",
+      "expectedIntent": "FILL_PROFILE",
+      "expectSource": "rules"
+    },
+    {
+      "id": "FP03",
+      "phrase": "meri details bharo",
+      "lang": "hinglish",
+      "expectedIntent": "FILL_PROFILE",
+      "expectSource": "rules"
+    },
+    {
+      "id": "FP04",
+      "phrase": "मेरी जानकारी भरो",
+      "lang": "hi-IN",
+      "expectedIntent": "FILL_PROFILE",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "UP01",
+      "phrase": "photo upload karo",
+      "lang": "hinglish",
+      "expectedIntent": "UPLOAD",
+      "expectedArgs": { "target": "photo" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "UP02",
+      "phrase": "upload my marksheet",
+      "lang": "en-IN",
+      "expectedIntent": "UPLOAD",
+      "expectedArgs": { "target": "marksheet" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "UP03",
+      "phrase": "attach income certificate",
+      "lang": "en-IN",
+      "expectedIntent": "UPLOAD",
+      "expectedArgs": { "target": "income certificate" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "UP04",
+      "phrase": "फोटो अपलोड करो",
+      "lang": "hi-IN",
+      "expectedIntent": "UPLOAD",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "CY01",
+      "phrase": "yes",
+      "lang": "en-IN",
+      "expectedIntent": "CONFIRM_YES",
+      "expectSource": "rules"
+    },
+    {
+      "id": "CY02",
+      "phrase": "haan kar do",
+      "lang": "hinglish",
+      "expectedIntent": "CONFIRM_YES",
+      "expectSource": "rules"
+    },
+    {
+      "id": "CY03",
+      "phrase": "thk hai",
+      "lang": "hinglish",
+      "expectedIntent": "CONFIRM_YES",
+      "expectSource": "rules",
+      "tags": ["hinglish-variant"]
+    },
+    {
+      "id": "CY04",
+      "phrase": "हाँ",
+      "lang": "hi-IN",
+      "expectedIntent": "CONFIRM_YES",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "CN01",
+      "phrase": "cancel",
+      "lang": "en-IN",
+      "expectedIntent": "CONFIRM_NO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "CN02",
+      "phrase": "mat karo",
+      "lang": "hinglish",
+      "expectedIntent": "CONFIRM_NO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "CN03",
+      "phrase": "rehne do",
+      "lang": "hinglish",
+      "expectedIntent": "CONFIRM_NO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "CN04",
+      "phrase": "नहीं",
+      "lang": "hi-IN",
+      "expectedIntent": "CONFIRM_NO",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "UND01",
+      "phrase": "undo",
+      "lang": "en-IN",
+      "expectedIntent": "UNDO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "UND02",
+      "phrase": "revert last",
+      "lang": "en-IN",
+      "expectedIntent": "UNDO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "UND03",
+      "phrase": "pichla hatao",
+      "lang": "hinglish",
+      "expectedIntent": "UNDO",
+      "expectSource": "rules"
+    },
+    {
+      "id": "UND04",
+      "phrase": "पिछला हटाओ",
+      "lang": "hi-IN",
+      "expectedIntent": "UNDO",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "CTL01",
+      "phrase": "dheere padho",
+      "lang": "hinglish",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "slower" },
+      "expectSource": "rules",
+      "tags": ["prompt-example"]
+    },
+    {
+      "id": "CTL02",
+      "phrase": "pause reading",
+      "lang": "en-IN",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "pause" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "CTL03",
+      "phrase": "switch to hindi",
+      "lang": "en-IN",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "language", "lang": "hi-IN" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "CTL04",
+      "phrase": "dubara padho",
+      "lang": "hinglish",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "repeat" },
+      "expectSource": "rules",
+      "tags": ["hinglish-variant"]
+    },
+    {
+      "id": "CTL05",
+      "phrase": "बंद करो",
+      "lang": "hi-IN",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "stop" },
+      "expectSource": "rules"
+    },
+    {
+      "id": "CTL06",
+      "phrase": "तेज़ पढ़ो",
+      "lang": "hi-IN",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "faster" },
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "HLP01",
+      "phrase": "what can you do",
+      "lang": "en-IN",
+      "expectedIntent": "HELP",
+      "expectSource": "rules"
+    },
+    {
+      "id": "HLP02",
+      "phrase": "please help",
+      "lang": "en-IN",
+      "expectedIntent": "HELP",
+      "expectSource": "rules",
+      "tags": ["noisy-filler"]
+    },
+    {
+      "id": "HLP03",
+      "phrase": "madad karo",
+      "lang": "hinglish",
+      "expectedIntent": "HELP",
+      "expectSource": "rules"
+    },
+    {
+      "id": "HLP04",
+      "phrase": "मदद",
+      "lang": "hi-IN",
+      "expectedIntent": "HELP",
+      "expectSource": "rules"
+    },
+
+    {
+      "id": "REG01",
+      "phrase": "இந்தப் பக்கத்தை எனக்கு விளக்குங்கள்",
+      "lang": "ta-IN",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary" },
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG02",
+      "phrase": "இதைப் படியுங்கள்",
+      "lang": "ta-IN",
+      "expectedIntent": "READ",
+      "expectedArgs": { "scope": "page" },
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG03",
+      "phrase": "ఈ ఫారమ్ నింపడానికి సహాయం చేయండి",
+      "lang": "te-IN",
+      "expectedIntent": "FILL_GUIDED",
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG04",
+      "phrase": "এই পাতায় ফি কত",
+      "lang": "bn-IN",
+      "expectedIntent": "ANSWER",
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG05",
+      "phrase": "पुढच्या पानावर जा",
+      "lang": "mr-IN",
+      "expectedIntent": "NAVIGATE",
+      "expectedArgs": { "action": "paginate", "dir": "next" },
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG06",
+      "phrase": "મારું નામ લખો",
+      "lang": "gu-IN",
+      "expectedIntent": "DICTATE",
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "REG07",
+      "phrase": "ದಯವಿಟ್ಟು ನಿಧಾನವಾಗಿ ಓದಿ",
+      "lang": "kn-IN",
+      "expectedIntent": "CONTROL",
+      "expectedArgs": { "action": "slower" },
+      "expectSource": "llm",
+      "tags": ["regional-fallback"]
+    },
+    {
+      "id": "LOW01",
+      "phrase": "kuch samajh nahi aa raha yaar",
+      "lang": "hinglish",
+      "expectedIntent": "EXPLAIN",
+      "expectedArgs": { "mode": "summary" },
+      "expectSource": "llm",
+      "tags": ["low-confidence-llm"]
+    }
+  ]
+}

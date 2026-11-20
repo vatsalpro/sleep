@@ -43,26 +43,43 @@ Millions of low-vision, low-literacy, and elderly users struggle to navigate com
 
 ```text
 sleepwalker/
-├── manifest.json       # Manifest V3 configuration (activeTab, scripting, storage, offscreen)
-├── background.js       # Service worker: toggle, script injection, LLM cascade & offscreen manager
-├── content.js          # In-page bootstrap, Alt+S & Alt+Z Hold-to-Talk key listener
-├── widget.js           # Shadow DOM UI controller, settings, and module orchestrator
-├── widget.css          # Encapsulated styles: pill, glow animations, bubble, high contrast
-├── pill.js             # Wispr-Flow floating round pill, equalizer bars, companion bubble
-├── glow.js             # Full-screen prism glow edge overlay with center cutout mask
-├── explain.js          # Safe extraction, Devanagari normalizer, hallucination validator, offline fallback
-├── llm.js              # Cascade engine: Cache -> Cloud Gemini Proxy -> Local Ollama -> Offline Fallback
-├── voice.js            # Web Speech API recognition, silence auto-commit, en-IN & hi-IN parser
+├── manifest.json       # Manifest V3 config + options_ui (no extra permissions)
+├── background.js       # Service worker: toggle, script injection, LLM cascade, shelf IDB & options launcher
+├── content.js          # Lightweight coordinator connecting all logic modules directly to SW_UI (Alt+S/Alt+Z/Escape)
+├── orb.js              # window.SW_UI & __SW_UI_DEMO__: 78px frosted bottom-centre orb + 7 waveform bars
+├── threads.js          # HiDPI Shadow-DOM canvas: 4 golden edge/perimeter ribbons, max-40 petals, veil & dissolve
+├── card.js             # Frosted warm-white card (28px radius, sparkle header, tail, topics, confirm, file, pin, 6s hide)
+├── ui.css              # Shadow-DOM design tokens & GPU-only transform/opacity animations (stops on idle)
+├── options.html / .js  # Full-tab Options page (proxy, Ollama, local-only, glow on/off, barge-in, non-sensitive profile)
+├── intent.js           # 13-intent engine, Devanagari/Hinglish normaliser, privacy gate & 0-LLM rule matcher
+├── lexicon.json        # Multilingual EN / HI / Hinglish synonyms, Hinglish doc nouns & filler lexicon
+├── link-index.js       # Viewport/shadow-DOM/iframe link indexer with 300-target budget & debug hook
+├── link-intent.js      # Link action & positional parser (CLICK, FIND, FIND_THEN_CLICK, MORE_INFO, LIST)
+├── link-lexicon.json   # EN / HI / Hinglish navigation triggers, ordinals, zones & card synonyms
+├── match.js            # Cross-script phonetic skeleton matcher, Devanagari-Latin transliteration & ordinals
+├── confirm.js          # Risk-based confirmation controller (critical double-confirm, timeouts) & plan stepper
+├── digest.js           # Privacy-safe page digest, keyword chunk scorer & token budgets
+├── explain.js          # Summary / action steps / Q&A modes, 3-turn memory & hallucination validator
+├── llm.js              # Cascade engine: Cache -> Gemini / Proxy -> Ollama -> Offline + RPM & telemetry
+├── navigate.js         # Voice navigation, 1s highlight, risky link confirm & cross-page session resume
+├── form-index.js       # Multi-control form indexer (text, select, ARIA combobox, radios, switches, contenteditable)
+├── form-fill.js        # EN/HI spoken number, date, phone & spelled-email parsers + non-sensitive summary
+├── forms.js            # Guided & Free form-filling, validation error speech, multi-step resume & double-confirm submit
+├── shelf-db.js         # Extension-origin IndexedDB store, 2-level 3000-file shelf index & Hinglish ranker
+├── shelf.html / shelf.js # One-time showDirectoryPicker({mode:"read"}) & permission re-allow setup page
+├── upload.js           # Route A Document Shelf + Route B 48px Choose File fallback, compression & undo
+├── camera.js           # Permission helper (granted/prompt/denied), Shadow DOM 3-2-1 camera card & track cleanup
+├── voice.js            # Web Speech API recognition, pauseTemporary/resumeAfterPause, Auto retry & 10 Indian langs
 ├── reader.js           # Content extractor, table parser, sentence-by-sentence SpeechSynthesis
 ├── outline.js          # H1-H4 heading extractor and fuzzy section matcher
-├── mic-setup.html      # Microphone onboarding, live Web Audio volume visualizer & hardware report
-├── mic-setup.js        # getUserMedia, Web Audio AnalyserNode meter, and speech test
-├── offscreen.html      # Offscreen audio document host
-├── offscreen.js        # Chromium offscreen speech recognition evaluator & reporter
-├── test-sample.html    # Benchmark portal (articles, fees table, documents, login form with password)
+├── mic-setup.html/.js  # Microphone onboarding, live Web Audio volume visualizer & hardware report
+├── offscreen.html/.js  # Offscreen document host & evaluator
+├── demo-portal.html    # Full scholarship portal fixture (nav links, forms, sensitive inputs, uploads)
+├── test-sample.html    # Benchmark article & sign-in privacy test page
+├── tests/              # Automated Node (P2-P7, L2-L3, phonetic) & Playwright Chromium E2E suites (L1/L4/L5, C1-C5)
 ├── icons/              # 16px, 48px, 128px high-DPI extension icons
-└── proxy/              # Serverless proxy folder (keeps API keys off the client)
-    ├── worker.js       # Cloudflare Worker implementation (CORS, rate limiting, Gemini Flash)
+└── proxy/              # Serverless proxy folder (keeps API keys off the client; requires GEMINI_MODEL)
+    ├── worker.js       # Cloudflare Worker implementation (CORS, rate limiting, Gemini)
     ├── api/explain.js  # Vercel Serverless Function alternative
     ├── .env.example    # Environment variable template
     └── README.md       # Proxy deployment and security guide
@@ -173,11 +190,11 @@ If you see JSON containing `"models": [...]`, Ollama is running and ready.
 
 ### Option B: Cloud Gemini via Serverless Proxy (Fastest & Highest Quality)
 
-For ultra-low latency and superior Hindi fluency, Sleepwalker can call Google's **Gemini 1.5 Flash** model. 
+For ultra-low latency and multilingual fluency across English, Hindi, and regional Indian languages, Sleepwalker can call Google's **Gemini** model using the `GEMINI_MODEL` environment variable (Gemini 1.5 is retired; set e.g. `gemini-2.5-flash-lite` — the proxy fails loudly with HTTP 500 if `GEMINI_MODEL` is unset).
 
 > [!IMPORTANT]
 > **Why use a Serverless Proxy?**
-> Chrome extension packages are distributed as plain JavaScript. Hardcoding an API key inside client extension files exposes it to anyone who inspects DevTools or unzips the CRX. The proxy securely holds the `GEMINI_API_KEY` on your own serverless worker, rate-limits requests per IP, restricts CORS to Chrome extensions, and never logs user page text.
+> Chrome extension packages are distributed as plain JavaScript. Hardcoding an API key inside client extension files exposes it to anyone who inspects DevTools or unzips the CRX. The proxy securely holds `GEMINI_API_KEY` and `GEMINI_MODEL` on your own serverless worker, rate-limits requests per IP, restricts CORS to Chrome extensions, and never logs user page text.
 
 #### Step 1: Get a Free Gemini API Key
 1. Visit **[Google AI Studio](https://aistudio.google.com/app/apikey)**.
@@ -225,9 +242,9 @@ For ultra-low latency and superior Hindi fluency, Sleepwalker can call Google's 
    npm install -g vercel
    vercel
    ```
-3. In the Vercel Project Settings dashboard, add Environment Variables:
+3. In the Vercel Project Settings / Cloudflare Secrets dashboard, add Environment Variables:
    - `GEMINI_API_KEY`: Your Gemini API key
-   - `GEMINI_MODEL`: `gemini-1.5-flash-latest`
+   - `GEMINI_MODEL`: Active Gemini model name (required, e.g., `gemini-2.5-flash-lite`; proxy returns HTTP 500 if missing)
 4. Your endpoint will be `https://<your-project>.vercel.app/api/explain`.
 
 #### Step 3: Connect the Proxy to Sleepwalker
@@ -302,6 +319,49 @@ Press <kbd>Alt+S</kbd> or click the toolbar icon to access:
 2. **Encapsulated Shadow DOM:** All extension UI elements, animations, and styles reside inside an isolated Shadow DOM (`#sleepwalker-host`), preventing CSS conflicts and ensuring no page layout shifts.
 3. **No External Scripts:** Does not load any remote JavaScript or analytics scripts. Strictly complies with Chrome Manifest V3 security boundaries.
 4. **Transient Zero-Log Proxy:** The `/proxy` serverless code acts solely as a stateless pass-through to the Gemini API and never writes user page text to disks or database logs.
+
+---
+
+## 🌍 Multilingual Support, Intents, Safety & Honest Limits
+
+- **13 Voice/Typed Intents (`>=70%` Zero-LLM Rule Resolution):** Normalises Devanagari numerals (`१२३ -> 123`), Hinglish spelling variants (`samjhaao -> samjhao`), and noisy fillers locally using [lexicon.json](lexicon.json) before invoking at most one compact JSON LLM call (`<=300` input / `<=60` output tokens) when confidence `< 0.75`.
+- **Continuous Conversation Mode (`dialogue.js`):** <kbd>Alt+S</kbd> or tapping the floating orb starts a continuous listen → act → speak → listen loop until an EN/HI/Hinglish END phrase (`thanks`, `that's all`, `bye`, `bas`, `bas itna hi`, `shukriya`, `dhanyavaad`, `theek hai bas`, `band karo`). Half-done forms ask `"Stop now? Your form stays as it is."` first. Half-duplex mode pauses speech recognition while speaking (~300 ms resume delay; optional **Barge-in** toggle in Settings for headphones), auto-restarts on Chrome's ~60 s recognition cut-offs, prompts `"Are you still there?"` after 25 s of silence (ends quietly +15 s later), interprets replies answer-first (`skip`, `back`, `repeat`, `help`, `undo`, `"no, change it to..."`), and keeps a redacted 3-turn memory.
+- **Complete Voice Form Engine (`form-index.js`, `form-fill.js`, `forms.js`):** Indexes visible inputs (`text`, `number`, `email`, `tel`, `date`, `textarea`, `select`, ARIA `combobox`/`listbox`, `radio`, `checkbox_group`, hidden inputs paired with labels, `[role=switch]`, `contenteditable`) across open shadow roots and same-origin iframes. Supports Guided (`"fill this form"` with progress, 6-item option paging/`"more"`, and phonetic fuzzy matching for long State/Country dropdowns) & Free mode (`"select Karnataka in state"`, `"set gender to female"`, `"tick blue and black"`, `"write my city as Mysuru"`, `"clear that"`). Parses EN/HI numbers, digit-by-digit phones, dates (`"fifteen August two thousand five"`, Hindi months, `aaj`/`kal`), spelled emails, and long dictation until `"that's all"`. Verifies every applied DOM value, speaks validation errors aloud, resumes multi-step `Next` forms via `chrome.storage.session`, supports manual takeover (`"I'll do this one"`), and guards critical **Submit/Pay** buttons with a non-sensitive summary + double confirmation (`haan`, `nahi`, `theek hai`, `kar do`, `ruko`).
+- **Privacy & Confirmation Tiers (`confirm.js`, `intent.js`, `digest.js`):** Risk policy enforces 0 confirms (`low`), confirm if unsure (`medium`), explicit confirm (`high`: upload, camera, external nav), and summary + double confirm (`critical`: submit/payment), cancelling on timeout. Digests and LLM calls NEVER include form values, file data/names, captured images, passwords, OTPs, Aadhaar, PAN, card/CVV, bank accounts, UPI PINs, or CAPTCHAs (*"Please enter this one yourself. Say done when finished."*).
+- **File Upload Without OS Dialog Control (`shelf.html`, `shelf-db.js`, `upload.js`):**
+  - *Route A (Document Shelf):* One-time setup in `shelf.html` saves a `showDirectoryPicker({mode:"read"})` handle in extension IndexedDB, indexes up to 2 levels / 3,000 filenames locally, fuzzy-matches Hinglish synonyms (`tasveer`, `marksheet`, `resume`, `income certificate`), previews/confirms, resizes oversized images via Canvas under size caps (reporting honestly that PDFs cannot be compressed), and attaches via `DataTransfer` (honest browser reality: Chrome requires a single user tap for `requestPermission()` after restart).
+  - *Route B (One-Tap Fallback):* Highlights the field or dropzone and renders a large **Choose File** button so the user's tap provides the required Chrome user activation.
+- **Camera Capture & Permission Helper (`camera.js`, `pill.js`):** Handles `take a photo` / `use camera` / `input[capture]`, checks `navigator.permissions.query({name:"camera"})` (`granted`, `prompt` address-bar guide before `getUserMedia`, or `denied` with exact lock/tune icon -> Site settings -> Camera -> Allow instructions), renders an encapsulated 3-2-1 Shadow DOM capture preview with `Retake` / `Use this`, converts/resizes to JPEG, attaches via `DataTransfer`, and stops all `MediaStreamTracks` immediately so the hardware camera light turns off.
+- **Languages Supported:** `Auto` (`hi-IN` default for Hinglish with a single automatic `en-IN` retry on low confidence), `en-IN`, `hi-IN`, plus `ta-IN`, `te-IN`, `bn-IN`, `mr-IN`, `gu-IN`, `kn-IN`, `ml-IN`, and `pa-IN` (speech recognition + TTS by language code, compact LLM intent & reply in the user's language).
+- **Minimal Permissions (`manifest.json`):** Only `activeTab` (inject into current user-triggered tab), `scripting` (content UI & form/upload helpers), `storage` (`chrome.storage.local` preferences/non-sensitive opt-in profile & `chrome.storage.session` multi-step form resume), `offscreen` (mic diagnostics fallback). Camera and microphone use the standard browser permission prompt at point-of-use — zero extra camera permission declared, and zero remote code or analytics.
+
+---
+
+## ✅ Judge & Developer Test Checklist
+
+### Automated Verification (Zero Network Required)
+Run the phase suites and headless Chromium Playwright E2E checks from `D:\sleep`:
+- `node tests/run-p2-tests.js` .. `node tests/run-p7-tests.js` — Intent EN/HI/Hinglish normaliser & rules (`>=70%`), privacy digest, voice navigation, form parsers/guards, file compression/upload, multilingual retries, and `node --check` across all 27 extension `.js` files
+- `node tests/test_l2_match.js`, `node tests/test_l3_link_intent.js`, `node tests/test_phonetic_nav.js` — Phonetic/cross-script link matching & parser tables
+- `python tests/test_l1_link_index.py`, `python tests/test_l4_acting.py`, `python tests/test_l5_full_suite.py`, `python tests/test_bugfix_nav.py` — Link index, shadow/iframe traversal, acting & 3-fixture suite
+- `python tests/test_c1_dialogue.py` — Continuous conversation session, END phrases, half-done form guard, answer-first interpretation, half-duplex pause & silence timeout
+- `python tests/test_c2_forms.py` — All form control types (combobox, switches, hidden checkboxes, radios, contenteditable), EN/HI numbers/dates/emails, verification, sensitive verify-without-reading, multi-step resume
+- `python tests/test_c3_upload.py` — Route A IndexedDB/ranker + confirm flow + Route B Choose File & oversized image compression
+- `python tests/test_c4_camera.py` — Camera permission helper (`denied` / `prompt` / `granted`), countdown capture, JPEG attachment & immediate track stop
+- `python tests/test_c5_integration.py` — Full unified Fixture E2E (`Alt+S`, `window.__SW_SAY__`, all 18 form/file/button controls, fake-device camera, route guard proving zero unauthorized outbound requests)
+- `python tests/playwright_e2e.py` — Core `demo-portal.html` end-to-end E2E suite
+
+### Siri-Style Translucent UI & Honest Voice-Sync Notes
+- **Website-First Invocation (`orb.js`, `threads.js`, `card.js`, `ui.css`):** Idle state leaves zero DOM UI and zero running animations on the webpage. Pressing <kbd>Alt+S</kbd> (or toolbar icon; hold <kbd>Alt+Z</kbd> for push-to-talk) summons the 78 px frosted bottom-centre orb, luminous golden edge ribbons (`max 40` petals, `<=10%` veil tint), and frosted warm-white response cards (`45vh` cap, overflow Expand, progressive topic/sentence reveal, Pin, target avoidance, and `6 s` auto-dismiss unless hovered/focused/sticky). Settings live in `options.html` (`options_ui`).
+- **Approximated Audio Reactivity (Honest Browser Disclosure):**
+  - *Listening:* Attempts a local `AudioContext` `AnalyserNode` RMS level meter only when mic permission is already granted alongside `SpeechRecognition`; where browsers prevent concurrent mic access or sound isn't exposed, falls back cleanly to a synthetic listening waveform envelope boosted by interim transcripts (`voice.js`).
+  - *Speaking:* Chrome `SpeechSynthesis` exposes no raw PCM audio stream. Waveform bars animate from `utterance.onboundary` word/sentence events where supported and smoothly fall back to an approximated synthetic speech envelope on voices without boundary callbacks (`reader.js`).
+- **Additional UI Verification (`tests/test_ui_p1.py` .. `tests/test_ui_final.py`):** Headless Chromium checks at `1440x900` & `1024x700` capturing every orb/card state screenshot, verifying zero idle visibility/animations, zero layout shift, `>=4.5:1` card contrast, target-avoidance, hover auto-dismiss pause, `Escape` dismissal, and `prefers-reduced-motion`. Cannot automate real live audio mic levels, real subjective voice-sync feel across OS voices, or OS-installed Hindi TTS voices (verify manually in Chrome after reloading).
+Automated tests inject transcripts via `window.__SW_SAY__`, mock SpeechSynthesis/SpeechRecognition/LLM/IndexedDB-handle seams, and use Chromium fake media streams. Always manually check in real Google Chrome:
+- [ ] **Real Hindi/Hinglish Live Speech (`SpeechRecognition`):** Speak Hinglish and regional phrases aloud in `Auto` (`Alt+S`) and confirm real mic recognition + `hi-IN -> en-IN` retry behavior.
+- [ ] **File Shelf Permissions Across Browser Restart (`shelf.html`):** Connect a local folder via `showDirectoryPicker({mode:"read"})`, restart Chrome, upload a file, and verify the one-tap `requestPermission()` prompt re-grants access cleanly.
+- [ ] **Real Hardware Camera & Permission Bar:** Test `take a photo` on a real webcam under both `prompt` and `denied` site settings, confirming the hardware LED turns off immediately after capture/cancel.
+- [ ] **Real Gemini Proxy & Local Ollama:** Point Settings to your live proxy (`GEMINI_MODEL` set) or `ollama run llama3.2:3b` and inspect **Settings → Diagnostics** and Network tab to confirm zero sensitive form values or file names ever leave.
 
 ---
 

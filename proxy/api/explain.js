@@ -24,6 +24,15 @@ function checkRateLimit(ip) {
   return false;
 }
 
+function clampNumericOption(value, min, max, fallback, integer = false) {
+  if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+  if (typeof value === 'string' && !value.trim()) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = integer ? Math.round(parsed) : parsed;
+  return Math.min(max, Math.max(min, normalized));
+}
+
 export default async function handler(req, res) {
   const origin = req.headers.origin || '';
   res.setHeader('Access-Control-Allow-Origin', origin.startsWith('chrome-extension://') ? origin : '*');
@@ -43,7 +52,7 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'Rate limit exceeded. Please wait a moment.' });
   }
 
-  const { text, systemPrompt, lang } = req.body || {};
+  const { text, systemPrompt, lang, temperature, maxOutputTokens, responseMimeType } = req.body || {};
   if (!text || typeof text !== 'string') {
     return res.status(400).json({ error: 'Missing or invalid text field' });
   }
@@ -53,10 +62,22 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in Vercel environment' });
   }
 
-  const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash-latest';
+  const modelName = typeof process.env.GEMINI_MODEL === 'string' ? process.env.GEMINI_MODEL.trim() : '';
+  if (!modelName) {
+    return res.status(500).json({ error: 'GEMINI_MODEL is not configured in server environment' });
+  }
+
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
   const defaultSystemPrompt = `Explain this page in simple words for someone with low vision or low literacy. Use short sentences, no markdown, no lists, no symbols, at most 120 words. Say what the page is for, the key facts such as fees, dates and documents, and what the user can do next. Use ONLY the page text provided. If something is not in the text, do not mention it. Reply in the user's language (English or Hindi).`;
+
+  const generationConfig = {
+    temperature: clampNumericOption(temperature, 0, 1, 0.2, false),
+    maxOutputTokens: clampNumericOption(maxOutputTokens, 1, 512, 250, true)
+  };
+  if (responseMimeType === 'application/json') {
+    generationConfig.responseMimeType = 'application/json';
+  }
 
   const requestBody = {
     system_instruction: {
@@ -70,10 +91,7 @@ export default async function handler(req, res) {
         ]
       }
     ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 250,
-    }
+    generationConfig
   };
 
   try {

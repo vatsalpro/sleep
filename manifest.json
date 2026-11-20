@@ -7,13 +7,15 @@
     "activeTab",
     "scripting",
     "storage",
-    "offscreen"
+    "offscreen",
+    "alarms"
   ],
   "host_permissions": [
-    "https://generativelanguage.googleapis.com/*"
+    "https://generativelanguage.googleapis.com/*",
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
   ],
   "optional_host_permissions": [
-    "http://localhost:11434/*",
     "https://*/*"
   ],
   "background": {
@@ -35,17 +37,43 @@
       }
     }
   },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": [
         "reader.js",
         "outline.js",
+        "diagnostics.js",
+        "ai-comm.js",
         "voice.js",
-        "pill.js",
-        "glow.js",
+        "memory.js",
+        "task-planner.js",
+        "personal-intel.js",
+        "digest.js",
         "explain.js",
-        "widget.js",
+        "confirm.js",
+        "link-index.js",
+        "match.js",
+        "link-intent.js",
+        "intent.js",
+        "nav-engine.js",
+        "navigate.js",
+        "form-index.js",
+        "form-fill.js",
+        "forms.js",
+        "element-select.js",
+        "world-model.js",
+        "shelf-db.js",
+        "upload.js",
+        "camera.js",
+        "dialogue.js",
+        "threads.js",
+        "card.js",
+        "orb.js",
         "content.js"
       ],
       "run_at": "document_idle"
@@ -54,8 +82,10 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "widget.css",
-        "mic-setup.html"
+        "ui.css",
+        "mic-setup.html",
+        "lexicon.json",
+        "link-lexicon.json"
       ],
       "matches": ["<all_urls>"]
     }

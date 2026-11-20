@@ -26,12 +26,16 @@
       this.lang = 'en-IN';       // 'en-IN' or 'hi-IN'
       this.activeHighlight = null; // Currently highlighted element
       this._retriedWithDefaultVoice = false; // Flag for fallback attempt
+      this.lastMode = 'page'; // 'page' | 'elements' | 'text'
 
       // Callbacks for UI updates
       this.onSentenceChange = null; // ({ index, total, text }) => {}
       this.onStatusChange = null;   // ({ isPlaying, isPaused }) => {}
       this.onFinished = null;       // () => {}
       this.onError = null;          // (errorMessage) => {}
+
+      this._currentUtterance = null;
+      this._utteranceWatchdogTimer = null;
 
       // Pre-bind voices
       this.voices = [];
@@ -281,6 +285,7 @@
      */
     readPage() {
       this.stop();
+      this.lastMode = 'page';
       this.sentences = this.extractSentences();
       this.currentIndex = 0;
       this._retriedWithDefaultVoice = false;
@@ -312,10 +317,15 @@
     /**
      * Read arbitrary custom text sentence-by-sentence (e.g. for explanations or summaries).
      * @param {string} text - Raw text to speak.
+     * @param {Object} [options] - Optional playback flags ({ keepStream }).
      */
-    readText(text) {
+    readText(text, options = {}) {
       if (!text || !text.trim()) return false;
+      if (!options.keepStream && this._isStreamingMode) {
+        this._teardownStreamState();
+      }
       this.stop();
+      this.lastMode = 'text';
       this.sentences = [];
       this._retriedWithDefaultVoice = false;
 
@@ -344,6 +354,112 @@
       return true;
     }
 
+    /** True while a streamed TTS session is open or waiting on final sentence drain. */
+    isStreamingActive() {
+      return Boolean(this._isStreamingMode && (!this._streamEnded || this.isPlaying));
+    }
+
+    _teardownStreamState() {
+      if (this._wrappedOnFinished) {
+        this.onFinished = this._wrappedOnFinished.orig;
+        this._wrappedOnFinished = null;
+      }
+      this._isStreamingMode = false;
+      this._streamEnded = true;
+      this._streamPumpIdle = true;
+    }
+
+    /**
+     * Begin an incremental streaming speech session so sentences play as soon as they arrive
+     * instead of waiting for the full LLM response to complete.
+     */
+    startStream({ lang } = {}) {
+      this._teardownStreamState();
+      this.stop();
+      if (lang && typeof this.setLang === 'function') this.setLang(lang);
+      this.lastMode = 'text';
+      this.sentences = [];
+      this.currentIndex = 0;
+      this._retriedWithDefaultVoice = false;
+      this._isStreamingMode = true;
+      this._streamEnded = false;
+      this._streamPumpIdle = true;
+
+      const origOnFinished = this.onFinished;
+      this._wrappedOnFinished = {
+        orig: origOnFinished,
+        proxy: (mode) => {
+          if (this._isStreamingMode && !this._streamEnded) {
+            this._streamPumpIdle = true;
+            return;
+          }
+          const cb = this._wrappedOnFinished ? this._wrappedOnFinished.orig : origOnFinished;
+          this._teardownStreamState();
+          if (typeof cb === 'function') cb(mode);
+        }
+      };
+      this.onFinished = this._wrappedOnFinished.proxy;
+      return true;
+    }
+
+    /**
+     * Enqueue a newly completed sentence chunk during streaming TTS.
+     */
+    enqueueStreamChunk(chunkText) {
+      const clean = String(chunkText || '').trim();
+      if (!clean) return false;
+      if (!this._isStreamingMode) {
+        return this.readText(clean);
+      }
+
+      if (this.isPlaying && !this._streamPumpIdle) {
+        const parts = this.splitIntoSentences(clean);
+        for (const s of parts) {
+          if (s && s.trim()) {
+            this.sentences.push({ text: s.trim(), element: null });
+          }
+        }
+        return true;
+      }
+
+      this._streamPumpIdle = false;
+      return this.readText(clean, { keepStream: true });
+    }
+
+    /**
+     * Mark streaming source complete; fires `onFinished` immediately if queued audio already drained,
+     * otherwise lets queued sentences finish naturally.
+     */
+    finishStream() {
+      if (!this._isStreamingMode) return false;
+      this._streamEnded = true;
+      if (this._streamPumpIdle && !this.isPlaying) {
+        const cb = this._wrappedOnFinished ? this._wrappedOnFinished.orig : null;
+        this._teardownStreamState();
+        this.notifyStatus();
+        if (typeof cb === 'function') cb('text');
+      }
+      return true;
+    }
+
+    /** Cancel any active streaming TTS session immediately (used on barge-in / Escape / supersede). */
+    cancelStream() {
+      this._teardownStreamState();
+      this.stop();
+    }
+
+    /**
+     * Convenience helper: read an outline heading object's section elements.
+     */
+    readHeadingSection(heading) {
+      if (!heading) return false;
+      const els = Array.isArray(heading.sectionElements) && heading.sectionElements.length > 0
+        ? heading.sectionElements
+        : (heading.element ? [heading.element] : []);
+      if (els.length === 0) return false;
+      return this.readElements(els, heading.text || '');
+    }
+
     /**
      * Read a specific subset of DOM elements (used by Outline: "read the <name> section").
      * @param {HTMLElement[]} elements - Array of section elements to read.
@@ -351,6 +467,7 @@
      */
     readElements(elements, sectionTitle = '') {
       this.stop();
+      this.lastMode = 'elements';
       this.sentences = [];
       this._retriedWithDefaultVoice = false;
 
@@ -426,20 +543,62 @@
       const utterance = new SpeechSynthesisUtterance(sentenceText);
       utterance.rate = this.rate;
       utterance.lang = this.lang;
+      this._currentUtterance = utterance;
 
       const voice = this.getBestVoice(this.lang);
       if (voice) {
-        utterance.voice = voice;
+        try { utterance.voice = voice; } catch (_e) {}
       }
 
-      utterance.onend = () => {
+      let sawStart = false;
+      let quietSinceMs = 0;
+      const startedWaitingAt = Date.now();
+      this._clearUtteranceWatchdog();
+
+      const finishUtteranceCleanly = () => {
+        this._clearUtteranceWatchdog();
+        this._currentUtterance = null;
         this._retriedWithDefaultVoice = false;
-        if (!this.isPlaying || this.isPaused) return;
+        if (!this.isPlaying || this.isPaused) {
+          this._stopSpeechEnvelope();
+          return;
+        }
         this.currentIndex++;
         this.playCurrentSentence();
       };
 
+      this._utteranceWatchdogTimer = setInterval(() => {
+        if (!this.isPlaying || this.isPaused) return;
+        const synth = window.speechSynthesis;
+        if (!synth) return;
+        if (synth.speaking || synth.pending) {
+          quietSinceMs = 0;
+          return;
+        }
+        if (sawStart) {
+          quietSinceMs += 350;
+          if (quietSinceMs >= 900) finishUtteranceCleanly();
+        } else if ((Date.now() - startedWaitingAt) >= 4000) {
+          finishUtteranceCleanly();
+        }
+      }, 350);
+
+      utterance.onstart = () => {
+        sawStart = true;
+        this._startSpeechEnvelope();
+      };
+      utterance.onboundary = (e) => {
+        sawStart = true;
+        this._sawBoundary = true;
+        this.speechLevelMode = 'boundary';
+        this._speechPulse = (e && e.name === 'sentence') ? 0.92 : 0.78;
+      };
+      utterance.onend = () => {
+        finishUtteranceCleanly();
+      };
+
       utterance.onerror = (e) => {
+        this._clearUtteranceWatchdog();
         // If interrupted intentionally by stop() or pause(), ignore
         if (e.error === 'interrupted' || e.error === 'canceled') return;
         console.warn('[Sleepwalker] Speech synthesis error:', e.error || e);
@@ -452,8 +611,10 @@
           const fallbackUtterance = new SpeechSynthesisUtterance(sentenceText);
           fallbackUtterance.rate = this.rate;
           fallbackUtterance.voice = this.voices.find(v => v.default) || null;
+          this._currentUtterance = fallbackUtterance;
 
           fallbackUtterance.onend = () => {
+            this._currentUtterance = null;
             this._retriedWithDefaultVoice = false;
             if (!this.isPlaying || this.isPaused) return;
             this.currentIndex++;
@@ -461,6 +622,7 @@
           };
 
           fallbackUtterance.onerror = (retryErr) => {
+            this._currentUtterance = null;
             this._retriedWithDefaultVoice = false;
             this.stop();
             const msg = `Speech synthesis failed (${retryErr.error || 'error'}). Please check your system audio/voices.`;
@@ -472,6 +634,7 @@
         }
 
         // Already retried with default voice; stop and notify clearly
+        this._currentUtterance = null;
         this._retriedWithDefaultVoice = false;
         this.stop();
         const msg = `Speech synthesis failed (${e.error || 'error'}). Please check your system audio output.`;
@@ -479,6 +642,13 @@
       };
 
       window.speechSynthesis.speak(utterance);
+    }
+
+    _clearUtteranceWatchdog() {
+      if (this._utteranceWatchdogTimer) {
+        clearInterval(this._utteranceWatchdogTimer);
+        this._utteranceWatchdogTimer = null;
+      }
     }
 
     /**
@@ -516,6 +686,7 @@
       if (!this.isPlaying || this.isPaused) return;
 
       this.isPaused = true;
+      this._stopSpeechEnvelope();
       if ('speechSynthesis' in window) {
         window.speechSynthesis.pause();
       }
@@ -529,6 +700,7 @@
       if (!this.isPlaying || !this.isPaused) return;
 
       this.isPaused = false;
+      this._startSpeechEnvelope();
       this.notifyStatus();
 
       if ('speechSynthesis' in window) {
@@ -543,9 +715,12 @@
      * Stop reading and reset highlights.
      */
     stop() {
+      this._clearUtteranceWatchdog();
+      this._currentUtterance = null;
       this.isPlaying = false;
       this.isPaused = false;
       this._retriedWithDefaultVoice = false;
+      this._stopSpeechEnvelope();
 
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -553,6 +728,42 @@
 
       this.clearHighlight();
       this.notifyStatus();
+    }
+
+    _startSpeechEnvelope() {
+      if (this._speechRaf) return;
+      this._sawBoundary = false;
+      this._speechPulse = 0.45;
+      this.speechLevelMode = 'synthetic_speech';
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(() => fn(Date.now()), 50);
+      const step = (ts) => {
+        if (!this.isPlaying || this.isPaused) {
+          this._stopSpeechEnvelope();
+          return;
+        }
+        let level;
+        if (this._sawBoundary) {
+          this._speechPulse = Math.max(0.22, (this._speechPulse || 0.22) * 0.86);
+          level = this._speechPulse;
+        } else {
+          const t = ((ts || Date.now()) / 1000) * Math.max(0.8, this.rate || 1);
+          level = 0.32 + 0.48 * Math.abs(Math.sin(t * 7.4) * Math.cos(t * 3.1));
+        }
+        if (typeof this.onLevel === 'function') this.onLevel(level, this.speechLevelMode);
+        this._speechRaf = raf(step);
+      };
+      this._speechRaf = raf(step);
+    }
+
+    _stopSpeechEnvelope() {
+      this.speechLevelMode = 'idle';
+      this._speechPulse = 0;
+      if (this._speechRaf) {
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._speechRaf);
+        else clearTimeout(this._speechRaf);
+        this._speechRaf = 0;
+      }
+      if (typeof this.onLevel === 'function') this.onLevel(0, 'idle');
     }
 
     /**
@@ -576,9 +787,10 @@
      * Called when all sentences have finished reading.
      */
     finishReading() {
+      const finishedMode = this.lastMode;
       this.stop();
       if (this.onFinished) {
-        this.onFinished();
+        this.onFinished(finishedMode);
       }
     }
 
@@ -605,7 +817,8 @@
           isPlaying: this.isPlaying,
           isPaused: this.isPaused,
           currentIndex: this.currentIndex,
-          total: this.sentences.length
+          total: this.sentences.length,
+          lastMode: this.lastMode
         });
       }
     }

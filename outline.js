@@ -60,6 +60,9 @@
       const elements = [headingEl];
       let sibling = headingEl.nextElementSibling;
       const parent = headingEl.parentElement;
+      const isUiChromeSibling = (node) => Boolean(
+        node && node.matches && node.matches('.mw-editsection, .mw-editsection-bracket, button, [role="button"]')
+      );
 
       // 1. Direct siblings under the same parent
       while (sibling) {
@@ -69,12 +72,19 @@
             break;
           }
         }
-        elements.push(sibling);
+        if (!isUiChromeSibling(sibling)) {
+          elements.push(sibling);
+        }
         sibling = sibling.nextElementSibling;
       }
 
-      // 2. If the heading was inside a container with no direct siblings (e.g. <div class="mw-heading"><h2>...</h2></div>)
-      if (elements.length === 1 && parent && parent !== document.body && parent.tagName !== 'MAIN' && parent.tagName !== 'ARTICLE') {
+      // 2. If the heading was inside a wrapper with no substantive content siblings (e.g. Wikipedia <div class="mw-heading"><h2>...</h2><span class="mw-editsection">...</span></div>)
+      const hasBodySibling = elements.slice(1).some((el) => {
+        if (!el) return false;
+        if (el.matches && el.matches('p, ul, ol, table, blockquote, pre, article, section')) return true;
+        return ((el.textContent || '').replace(/\s+/g, ' ').trim().length > 20);
+      });
+      if (!hasBodySibling && parent && parent !== document.body && parent.tagName !== 'MAIN' && parent.tagName !== 'ARTICLE' && parent.tagName !== 'SECTION') {
         let parentSibling = parent.nextElementSibling;
         while (parentSibling) {
           const nextH = /^H[1-6]$/i.test(parentSibling.tagName)

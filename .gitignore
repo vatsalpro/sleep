@@ -10,3 +10,6 @@ desktop.ini
 # Local credentials
 config.local.js
 *.local.js
+.env
+.env.*
+!.env.example

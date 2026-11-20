@@ -163,6 +163,24 @@
     }
   }
 
+  function stopAudioMonitor() {
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
+    }
+    if (activeStream) {
+      try {
+        activeStream.getTracks().forEach(t => t.stop());
+      } catch (e) {}
+      activeStream = null;
+    }
+    if (audioContext) {
+      try { audioContext.close(); } catch (e) {}
+      audioContext = null;
+    }
+    analyser = null;
+  }
+
   // Step 3: Test Web Speech API recognition
   btnTestRec.addEventListener('click', () => {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -171,6 +189,9 @@
       testTranscript.classList.remove('empty');
       return;
     }
+
+    // Release active getUserMedia capture first so SpeechRecognition gets exclusive hardware access on Windows/Bluetooth mics
+    stopAudioMonitor();
 
     if (testRecognition) {
       try { testRecognition.abort(); } catch (e) {}
@@ -199,13 +220,19 @@
     };
 
     testRecognition.onerror = (event) => {
-      testTranscript.textContent = `Recognition error: ${event.error}`;
+      const hintMap = {
+        'not-allowed': 'Microphone permission denied. Click the lock/tune icon in Chrome’s address bar -> Allow Microphone.',
+        'audio-capture': 'No microphone detected or device busy in another app. Check Windows Sound input settings.',
+        'no-speech': 'No speech heard. Check that the right microphone is selected as Default in Windows Sound settings.',
+        'network': 'Speech recognition network error. Chrome Web Speech requires internet access.'
+      };
+      testTranscript.textContent = hintMap[event.error] || `Recognition error: ${event.error}`;
       btnTestRec.textContent = '🎤 Start Voice Test';
     };
 
     testRecognition.onend = () => {
       btnTestRec.textContent = '🎤 Start Voice Test';
-      if (!testTranscript.textContent.startsWith('Recognized')) {
+      if (!testTranscript.textContent.startsWith('Recognized') && !testTranscript.textContent.includes('error') && !testTranscript.textContent.includes('Microphone')) {
         testTranscript.textContent += ' (Voice test finished)';
       }
     };
@@ -220,13 +247,7 @@
 
   // Step 4: Done / Close Tab
   btnDone.addEventListener('click', () => {
-    if (animFrameId) cancelAnimationFrame(animFrameId);
-    if (activeStream) {
-      activeStream.getTracks().forEach(t => t.stop());
-    }
-    if (audioContext) {
-      audioContext.close();
-    }
+    stopAudioMonitor();
     window.close();
   });
 })();

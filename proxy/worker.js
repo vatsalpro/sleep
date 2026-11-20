@@ -42,6 +42,15 @@ setInterval(() => {
   }
 }, 300000);
 
+function clampNumericOption(value, min, max, fallback, integer = false) {
+  if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+  if (typeof value === 'string' && !value.trim()) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = integer ? Math.round(parsed) : parsed;
+  return Math.min(max, Math.max(min, normalized));
+}
+
 export default {
   async fetch(request, env) {
     // 1. CORS Preflight
@@ -84,7 +93,7 @@ export default {
       });
     }
 
-    const { text, systemPrompt, lang } = payload || {};
+    const { text, systemPrompt, lang, temperature, maxOutputTokens, responseMimeType } = payload || {};
     if (!text || typeof text !== 'string') {
       return new Response(JSON.stringify({ error: 'Missing or invalid text field' }), {
         status: 400,
@@ -92,7 +101,7 @@ export default {
       });
     }
 
-    const apiKey = env.GEMINI_API_KEY;
+    const apiKey = typeof env?.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '';
     if (!apiKey) {
       return new Response(JSON.stringify({ error: 'GEMINI_API_KEY is not configured in worker environment' }), {
         status: 500,
@@ -100,13 +109,33 @@ export default {
       });
     }
 
-    const modelName = env.GEMINI_MODEL || 'gemini-1.5-flash-latest';
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+    const modelName = typeof env?.GEMINI_MODEL === 'string' ? env.GEMINI_MODEL.trim() : '';
+    if (!modelName) {
+      return new Response(JSON.stringify({ error: 'GEMINI_MODEL is not configured in worker environment' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${apiKey}`;
 
     const defaultSystemPrompt = `Explain this page in simple words for someone with low vision or low literacy. Use short sentences, no markdown, no lists, no symbols, at most 120 words. Say what the page is for, the key facts such as fees, dates and documents, and what the user can do next. Use ONLY the page text provided. If something is not in the text, do not mention it. Reply in the user's language (English or Hindi).`;
 
-    const effectiveSystemPrompt = systemPrompt || defaultSystemPrompt;
+    const effectiveSystemPrompt = (typeof systemPrompt === 'string' && systemPrompt.trim())
+      ? systemPrompt.trim()
+      : defaultSystemPrompt;
 
+    const effectiveTemp = clampNumericOption(temperature, 0, 1, 0.2, false);
+    const effectiveMaxTokens = clampNumericOption(maxOutputTokens, 1, 512, 250, true);
+    const generationConfig = {
+      temperature: effectiveTemp,
+      maxOutputTokens: effectiveMaxTokens
+    };
+    if (typeof responseMimeType === 'string' && responseMimeType.trim() === 'application/json') {
+      generationConfig.responseMimeType = 'application/json';
+    }
+
+    const contentLabel = generationConfig.responseMimeType === 'application/json' ? 'INPUT' : 'PAGE TEXT';
     const requestBody = {
       system_instruction: {
         parts: [{ text: effectiveSystemPrompt }]
@@ -115,14 +144,11 @@ export default {
         {
           role: 'user',
           parts: [
-            { text: `Language requested: ${lang || 'en-IN'}\n\nPAGE TEXT:\n${text.substring(0, 7000)}` }
+            { text: `Language requested: ${lang || 'en-IN'}\n\n${contentLabel}:\n${text.substring(0, 7000)}` }
           ]
         }
       ],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 250,
-      }
+      generationConfig
     };
 
     try {
