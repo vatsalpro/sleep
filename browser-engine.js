@@ -1135,25 +1135,105 @@
     }
 
     async select(targetOrQuery, optionText, options = {}) {
+      // 1. Observe
+      const obs = this.observe(options.root || document);
       let targetEl = null;
-      if (typeof targetOrQuery === 'string') {
+      let wantOpt = String(optionText !== undefined && optionText !== null ? optionText : targetOrQuery || '').trim();
+      const hasExplicitSelectTarget = Boolean(optionText !== undefined && optionText !== null && typeof targetOrQuery === 'string' && targetOrQuery.trim());
+
+      // 2. Resolve
+      if (targetOrQuery instanceof Element) {
+        targetEl = targetOrQuery;
+      } else if (hasExplicitSelectTarget) {
         const located = this.locate(targetOrQuery, Object.assign({ role: 'combobox' }, options));
-        if (located.status !== 'FOUND' || !located.target) {
-          const genLoc = this.locate(targetOrQuery, options);
-          if (genLoc.status !== 'FOUND') return { status: 'FAILED', verified: false, reason: 'select_element_not_found' };
-          targetEl = genLoc.target;
-        } else {
+        if (located.status === 'AMBIGUOUS') {
+          return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+        }
+        if (located.status === 'FOUND' && located.target) {
           targetEl = located.target;
         }
-      } else {
-        targetEl = targetOrQuery;
       }
 
-      const res = await this.executor.selectOption(targetEl, optionText);
+      if (!targetEl && wantOpt) {
+        const wantLow = wantOpt.toLowerCase();
+        const comboboxes = obs.elements.filter(e =>
+          e.states.visible && !e.states.disabled &&
+          (e.role === 'combobox' || (e.domNode && e.domNode.tagName === 'SELECT'))
+        );
+        const matchingSelects = [];
+        for (const cb of comboboxes) {
+          const node = cb.domNode;
+          if (!node) continue;
+          if (node.tagName === 'SELECT') {
+            const opts = Array.from(node.options || []);
+            const hit = opts.find(o => !o.disabled && (
+              (o.textContent || '').trim().toLowerCase() === wantLow ||
+              (o.value || '').trim().toLowerCase() === wantLow ||
+              (o.textContent || '').trim().toLowerCase().includes(wantLow)
+            ));
+            if (hit) matchingSelects.push({ item: cb, element: node, matchedOption: hit });
+          }
+        }
+        if (matchingSelects.length > 1 && options.section) {
+          const secLow = String(options.section).toLowerCase();
+          const secFiltered = matchingSelects.filter(m =>
+            `${m.item.name} ${m.item.parentSection}`.toLowerCase().includes(secLow)
+          );
+          if (secFiltered.length === 1) {
+            targetEl = secFiltered[0].element;
+          }
+        }
+        if (!targetEl) {
+          if (matchingSelects.length === 1) {
+            targetEl = matchingSelects[0].element;
+          } else if (matchingSelects.length > 1) {
+            return {
+              status: 'AMBIGUOUS',
+              verified: false,
+              candidates: matchingSelects.map(m => ({
+                id: m.item.id,
+                name: m.item.name || m.item.parentSection || 'Dropdown',
+                label: m.item.name || m.item.parentSection || 'Dropdown',
+                role: m.item.role,
+                section: m.item.parentSection,
+                element: m.element
+              })),
+              prompt: `Multiple dropdowns contain "${wantOpt}". Which one did you mean?`
+            };
+          }
+        }
+      }
+
+      if (!targetEl && typeof targetOrQuery === 'string' && targetOrQuery.trim()) {
+        const genLoc = this.locate(targetOrQuery, options);
+        if (genLoc.status === 'FOUND' && genLoc.target && (genLoc.target.tagName === 'SELECT' || genLoc.target.getAttribute('role') === 'combobox' || genLoc.target.getAttribute('role') === 'listbox')) {
+          targetEl = genLoc.target;
+        }
+      }
+
+      if (!targetEl || !targetEl.isConnected) {
+        return { status: 'FAILED', verified: false, reason: 'select_element_not_found' };
+      }
+
+      // 3. Validate -> 4. Execute
+      const res = await this.executor.selectOption(targetEl, wantOpt);
+      this.invalidateCache();
+
+      // 5. Re-observe & Verify
+      let verified = Boolean(res.ok);
+      if (verified && targetEl.tagName === 'SELECT') {
+        const selOpt = targetEl.options && targetEl.options[targetEl.selectedIndex];
+        const actualVal = targetEl.value;
+        const actualTxt = selOpt ? (selOpt.textContent || '').trim() : '';
+        verified = (actualVal === res.selectedValue) || actualTxt.toLowerCase().includes(wantOpt.toLowerCase());
+      }
+      this.observe(options.root || document, { force: true });
+
       return {
-        status: res.ok ? 'SUCCESS' : 'FAILED',
-        verified: res.ok,
+        status: verified ? 'SUCCESS' : 'FAILED',
+        verified,
         action: 'select_option',
+        targetLabel: sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetEl), 80),
         selectedText: res.selectedText,
         selectedValue: res.selectedValue,
         reason: res.reason

@@ -1968,7 +1968,11 @@
         return { ...navRes, verified: Boolean(navRes && (navRes.verified || navRes.status !== 'not_found')) };
       }
 
-      if (cat === C.FORM_ASSISTANCE && central.subAction === 'element_select' && this.elementSelector) {
+      if (cat === C.FORM_ASSISTANCE && central.subAction === 'element_select' && (this.elementSelector || this.browserEngine)) {
+        if (this.browserEngine && this.useRebuiltBrowserEngine && !/^(?:no|not\s+that|instead)\b/i.test(raw) && !/\b(?:first|second|third|fourth|fifth|1st|2nd|3rd|\d+th)\b/i.test(raw)) {
+          const beDrop = await this._tryRebuiltDropdownSelect(raw);
+          if (beDrop) return beDrop;
+        }
         const selRes = await this.elementSelector.handleCommand(raw, {
           intentArgs: (classified && classified.args) || {},
           doc: document,
@@ -4215,6 +4219,16 @@
             }
           }
 
+          if (this.browserEngine && this.useRebuiltBrowserEngine && desiredOptLabel) {
+            const beDrop = await this._tryRebuiltDropdownSelect(raw, {
+              optionText: desiredOptLabel,
+              groupHint: desiredGroupHint
+            });
+            if (beDrop) {
+              return { ...beDrop, nluSource: meta.nluSource };
+            }
+          }
+
           if (optEnt && optEnt.controlCandidate && typeof this.elementSelector.executeAndVerifyCandidate === 'function') {
             selRes = await this.elementSelector.executeAndVerifyCandidate(
               { action: 'select', candidate: optEnt.controlCandidate, targetOption: optEnt.label, matchedOptionObj: optEnt.optionDescriptor || undefined },
@@ -4384,6 +4398,62 @@
         return this.forms.handleDictateIntent(args, rawText);
       }
       return { status: 'not_found', ok: false, verified: false };
+    }
+
+    async _tryRebuiltDropdownSelect(rawText = '', opts = {}) {
+      if (!this.browserEngine || !this.useRebuiltBrowserEngine || typeof this.browserEngine.select !== 'function') {
+        return null;
+      }
+      const clean = String(rawText || '').trim().replace(/[.,!?;:]+$/, '');
+      if (/\b(?:checkbox|radio|tab)\b/i.test(clean)) return null;
+
+      let optionText = opts.optionText || '';
+      let groupHint = opts.groupHint || '';
+      if (!optionText) {
+        const scopedM = clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick)\s+(?:the\s+)?(.+?)(?:\s+option)?\s+(?:from|in|under|inside|for)\s+(?:the\s+)?(.+?)(?:\s+(?:dropdown|menu|select|list|field))?$/i);
+        const simpleM = !scopedM ? clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick)\s+(?:the\s+)?(.+?)(?:\s+option)?$/i) : null;
+        if (scopedM) {
+          optionText = scopedM[1].trim();
+          groupHint = scopedM[2].trim();
+        } else if (simpleM) {
+          optionText = simpleM[1].trim();
+        }
+      }
+      if (!optionText) return null;
+
+      const t0 = performance.now();
+      try {
+        const beRes = await this.browserEngine.select(groupHint || '', optionText, { section: groupHint || '' });
+        const ms = performance.now() - t0;
+        if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
+          this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+          if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+            this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 60 });
+          }
+          const msg = `Selected "${beRes.selectedText || optionText}"${beRes.targetLabel ? ` in ${beRes.targetLabel}` : ''}.`;
+          this.setAssistantReply(msg);
+          if (window.SW_UI) {
+            window.SW_UI.setState('speaking');
+            window.SW_UI.showCard({ type: 'answer', title: 'Updated Control', text: msg });
+          }
+          return {
+            status: 'selected',
+            ok: true,
+            verified: true,
+            engine: 'rebuilt_browser_engine',
+            selectedOption: beRes.selectedText || optionText,
+            selectedValue: beRes.selectedValue,
+            field: beRes.targetLabel || groupHint || 'Dropdown',
+            message: msg
+          };
+        }
+        if (beRes && beRes.status === 'AMBIGUOUS') {
+          this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_dropdowns', latencyMs: ms });
+        }
+      } catch (err) {
+        this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
+      }
+      return null;
     }
 
     async dispatchIntent(c, rawText = '', resolvedContext = null) {
