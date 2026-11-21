@@ -47,6 +47,26 @@
     return String(str || '').replace(/\s+/g, ' ').trim();
   }
 
+  function isSleepwalkerUiNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const id = node.id || '';
+    if (id === 'sleepwalker-host' || id === 'sleepwalker-ui-host' || id === 'sleepwalker-candidate-overlay-root') {
+      return true;
+    }
+    return Boolean(typeof node.getAttribute === 'function' && node.getAttribute('data-sleepwalker-ui') === '1');
+  }
+
+  function isInsideSleepwalkerUi(node) {
+    if (!node) return false;
+    if (isSleepwalkerUiNode(node)) return true;
+    if (typeof node.closest === 'function' && node.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"]')) {
+      return true;
+    }
+    const rootNode = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    if (rootNode && rootNode.host && isSleepwalkerUiNode(rootNode.host)) return true;
+    return false;
+  }
+
   function safeDecodeURIComponent(str) {
     try {
       return decodeURIComponent(str);
@@ -125,8 +145,7 @@
         let relevant = false;
         for (let i = 0; i < mutations.length; i++) {
           const t = mutations[i].target;
-          if (t && t.nodeType === 1 && t.closest && t.closest('#sleepwalker-host')) continue;
-          if (t && t.id === 'sleepwalker-host') continue;
+          if (isInsideSleepwalkerUi(t)) continue;
           relevant = true;
           break;
         }
@@ -227,7 +246,8 @@
       if (el.hidden || (el.hasAttribute && el.hasAttribute('hidden'))) return false;
       if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
 
-      if (el.closest && el.closest('#sleepwalker-host, [hidden], [aria-hidden="true"], [disabled], [aria-disabled="true"], input[type="password"]')) {
+      if (isInsideSleepwalkerUi(el)) return false;
+      if (el.closest && el.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"], [hidden], [aria-hidden="true"], [disabled], [aria-disabled="true"], input[type="password"]')) {
         return false;
       }
 
@@ -236,7 +256,7 @@
       let cur = el;
       while (cur) {
         if (cur.nodeType === 1) {
-          if (cur.id === 'sleepwalker-host') return false;
+          if (isSleepwalkerUiNode(cur)) return false;
           if (cur.hidden || (cur.hasAttribute && cur.hasAttribute('hidden'))) return false;
           if (cur.getAttribute && cur.getAttribute('aria-hidden') === 'true') return false;
           if (cur.disabled || (cur.hasAttribute && cur.hasAttribute('disabled'))) return false;
@@ -518,7 +538,7 @@
         if (node.nodeType !== 1) return;
         const tag = String(node.tagName || '').toLowerCase();
         if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'input' || tag === 'textarea' || tag === 'select') return;
-        if (node.id === 'sleepwalker-host' || node.hidden || (node.hasAttribute && node.hasAttribute('hidden'))) return;
+        if (isSleepwalkerUiNode(node) || node.hidden || (node.hasAttribute && node.hasAttribute('hidden'))) return;
         if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return;
         if (node.style && (node.style.display === 'none' || node.style.visibility === 'hidden')) return;
         const kids = node.childNodes || [];
@@ -604,7 +624,7 @@
         const children = parent.children || [];
         for (let i = 0; i < children.length; i++) {
           const el = children[i];
-          if (el.id === 'sleepwalker-host') continue;
+          if (isSleepwalkerUiNode(el)) continue;
 
           if (!visitedEls.has(el) && this._isNativeInteractive(el, win)) {
             visitedEls.add(el);

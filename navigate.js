@@ -1964,14 +1964,23 @@
       const matches = [];
 
       for (const tbl of tables) {
+        const secHay = normalizeText(`${tbl.caption} ${tbl.section}`);
+        const hdrs = Array.isArray(tbl.headers) ? tbl.headers : [];
         for (const row of (tbl.rows || [])) {
-          const hay = normalizeText(`${tbl.caption} ${tbl.section} ${row.rowSummary}`);
+          const cells = Array.isArray(row.rawCells) ? row.rawCells : [];
+          const isDupHeader = hdrs.length > 0 && cells.length === hdrs.length &&
+            cells.every((c, idx) => normalizeText(c) === normalizeText(hdrs[idx]));
+          if (isDupHeader) continue;
+          const cellText = cells.map((c) => String(c || '')).join(' ');
+          const rowHay = normalizeText(`${cellText} ${row.rowSummary}`);
           let score = 0;
-          if (cleanQ && hay.includes(cleanQ)) score += 10;
+          if (cleanQ && rowHay.includes(cleanQ)) score += 20;
           for (const tok of qToks) {
-            if (new RegExp(`\\b${escapeRegExp(tok)}\\b`, 'i').test(hay)) score += 4;
-            else if (hay.includes(tok)) score += 2;
+            if (new RegExp(`\\b${escapeRegExp(tok)}\\b`, 'i').test(rowHay)) score += 6;
+            else if (rowHay.includes(tok)) score += 3;
+            else if (secHay && new RegExp(`\\b${escapeRegExp(tok)}\\b`, 'i').test(secHay)) score += 1;
           }
+          if (cleanQ && secHay && secHay.includes(cleanQ) && score === 0) score += 2;
           if (score > 0) {
             matches.push({ table: tbl, row, score });
           }
@@ -2170,6 +2179,15 @@
           verifyEffect: true,
           requireStrictEffect: Boolean(opts.requireStrictEffect)
         });
+        if (lastRes && (lastRes.awaiting === true || lastRes.status === 'confirming')) {
+          return {
+            ...lastRes,
+            status: lastRes.status || 'confirming',
+            verified: true,
+            recovered: attempt > 1,
+            attempts: attempt
+          };
+        }
         const report = this.lastActionReport || null;
         if (lastRes && lastRes.status && !['not_found', 'verification_failed', 'stale_candidate_rejected'].includes(lastRes.status)) {
           if (!report || report.verified !== false) {

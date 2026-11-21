@@ -536,7 +536,8 @@ function startFixtureServer() {
               btnTop: btnRect ? Math.round(btnRect.top) : null,
               inpFocusedOk: Boolean(inp && !form?.hidden)
             };
-          `);
+          `).catch(() => ({ url: 'navigated' }));
+          if (snap && snap.url === 'navigated') break;
           const curSig = snap ? `${snap.cardTitle}||${snap.cardBody}` : '';
           const busy = snap && (
             snap.state === 'thinking'

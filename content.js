@@ -27,6 +27,19 @@
       this._commandQueue = Promise.resolve();
       this._pendingDueReminders = [];
       this._lastElementSelectMeta = null;
+      this._inFlightExecCount = 0;
+      this.taskLifecycle = {
+        state: 'IDLE',
+        activeTaskId: 0,
+        activeLabel: '',
+        stage: '',
+        abortController: null,
+        clarificationHandler: null,
+        clarificationQuestion: '',
+        lastSubmittedNorm: '',
+        lastSubmittedAt: 0,
+        resetTimer: null
+      };
 
       this.initModules();
       this.bindEvents();
@@ -37,6 +50,10 @@
       this._bootPromise = this.restorePersistentSessionOnBoot()
         .catch(() => null)
         .finally(() => { this._bootDone = true; });
+      if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function' &&
+          typeof document !== 'undefined' && !document.hidden) {
+        this.worldModel.scheduleProactiveScan(document, { delayMs: 120, reason: 'initial_page_load' });
+      }
 
       window.__SW_SAY__ = (text, opts = {}) => this.simulateVoiceInput(text, opts);
       window.__SW_DIAGNOSTICS__ = () => (this.diagnostics && typeof this.diagnostics.getReport === 'function' ? this.diagnostics.getReport() : null);
@@ -69,7 +86,16 @@
       this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
       this.forms = window.SleepwalkerForms ? new window.SleepwalkerForms(this) : null;
       this.elementSelector = window.SleepwalkerElementSelector ? new window.SleepwalkerElementSelector(this) : null;
-      this.worldModel = window.SleepwalkerWorldModel ? new window.SleepwalkerWorldModel(this) : null;
+      this.worldModel = window.SleepwalkerWorldModel
+        ? new window.SleepwalkerWorldModel(this, {
+            onScanStateChange: (active, label) => {
+              if (window.SW_UI && typeof window.SW_UI.setScanning === 'function' && (this.isOpen || (this.dialogue && this.dialogue.isActive()))) {
+                window.SW_UI.setScanning(active, label);
+              }
+            }
+          })
+        : null;
+      this.teach = window.SleepwalkerTeach ? new window.SleepwalkerTeach(this) : null;
       this.upload = window.SleepwalkerUpload ? new window.SleepwalkerUpload(this) : null;
       this.camera = window.SleepwalkerCamera ? new window.SleepwalkerCamera(this, { onCardChange: (s) => this.handleCameraCardChange(s) }) : null;
       this.dialogue = window.SleepwalkerDialogue ? new window.SleepwalkerDialogue(this) : null;
@@ -83,6 +109,7 @@
           onOrbClick: () => this.toggle({ startDialogue: true, source: 'orb' }),
           onSubmitText: (text) => this.handleUserInput(text, 'typed'),
           onDismiss: (reason) => this.dismissUi(reason || 'escape'),
+          onCancelTask: () => this.cancelActiveTask('Cancelled.', { source: 'ui_cancel' }),
           onQuickControl: (pref, val) => {
             if (pref === 'lang') this.setLanguage(val);
             else if (pref === 'rate') this.setRate(Number(val));
@@ -93,6 +120,19 @@
           }
         });
       }
+
+      this.voice.shouldAcceptCommand = (cleanText, meta = {}) => {
+        const norm = (meta && meta.norm) || String(cleanText || '').toLowerCase().replace(/[.,!?;:]+$/g, '').replace(/\s+/g, ' ').trim();
+        if (!norm) return { accept: false, reason: 'empty' };
+        if (this._isTaskCancelPhrase(cleanText)) return { accept: true };
+        if (this.taskLifecycle && this.taskLifecycle.state === 'PROCESSING' && this._inFlightExecCount > 0) {
+          return {
+            accept: false,
+            reason: norm === this.taskLifecycle.lastSubmittedNorm ? 'duplicate_during_active_task' : 'active_task_locked'
+          };
+        }
+        return { accept: true };
+      };
 
       this.voice.onTranscript = ({ text }) => {
         if (window.SW_UI && (!this.dialogue || this.dialogue.isActive() || window.SW_UI.getState() === 'listening')) {
@@ -114,6 +154,7 @@
       this.voice.onLifecycleChange = (lifecycleState, detail) => {
         if (!window.SW_UI) return;
         const turnBusy = Boolean(
+          (this.taskLifecycle && (this.taskLifecycle.state === 'PROCESSING' || this.taskLifecycle.state === 'WAITING_FOR_CLARIFICATION')) ||
           (window.SW_UI._orb && window.SW_UI._orb._processingTurn) ||
           window.SW_UI.getState() === 'thinking' ||
           (this.reader && (this.reader.isPlaying || (typeof this.reader.isStreamingActive === 'function' && this.reader.isStreamingActive()))) ||
@@ -164,7 +205,12 @@
       this.voice.onError = ({ error, message, isPermissionDenied }) => {
         this.recordError(message);
         if (window.SW_UI) {
-          const hasInteractiveCard = Boolean((this.dialogue && this.dialogue.pendingPrompt) || (this.confirm && this.confirm.isAwaiting()));
+          const hasInteractiveCard = Boolean(
+            (this.dialogue && this.dialogue.pendingPrompt) ||
+            (this.confirm && this.confirm.isAwaiting()) ||
+            (this.taskLifecycle && ['PROCESSING', 'WAITING_FOR_CLARIFICATION'].includes(this.taskLifecycle.state)) ||
+            (this._inFlightExecCount > 0)
+          );
           if (hasInteractiveCard) {
             this._setStatusChip('Mic unavailable — tap button or Type below');
           } else {
@@ -503,6 +549,13 @@
         }
       }
 
+      if (this.worldModel && (typeof document === 'undefined' || !document.hidden) && typeof this.worldModel.scheduleProactiveScan === 'function') {
+        this.worldModel.scheduleProactiveScan(document, { delayMs: 80, reason: 'boot_proactive' });
+      }
+      if (this.teach && typeof this.teach.restoreFromBoot === 'function') {
+        await this.teach.restoreFromBoot().catch(() => null);
+      }
+
       return state;
     }
 
@@ -543,6 +596,11 @@
 
       window.addEventListener('popstate', onRouteChange);
       window.addEventListener('hashchange', onRouteChange);
+      window.addEventListener('pageshow', () => {
+        if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+          this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 40 });
+        }
+      });
 
       try {
         const origPush = history.pushState;
@@ -615,16 +673,198 @@
     syncStopButton() {}
     recordError(msg) { if (msg) { this.errors.unshift({ time: new Date().toLocaleTimeString(), message: String(msg) }); this.errors.length = Math.min(10, this.errors.length); } }
     open() { this.isOpen = true; }
+    _normalizeTaskPhrase(text) {
+      return String(text || '')
+        .toLowerCase()
+        .replace(/[\u200B-\u200F\uFEFF]/g, '')
+        .replace(/[।.,!?;:'"()\[\]]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    _isTaskCancelPhrase(text) {
+      const norm = this._normalizeTaskPhrase(text);
+      if (!norm) return false;
+      return /^(?:no need|cancel(?:\s+(?:it|that|this|the task|task))?|leave it|forget it|never ?mind|stop(?:\s+(?:it|that|this|the task|task|now))?|abort|rehne do|mat karo|ruko|band karo|nahi|नहीं|मत करो|रहने दो|रुको|रोको|बंद करो|कैंसल|रद्द करो)$/i.test(norm);
+    }
+
+    _setAuroraTaskUi(state, stage = '', taskLabel = null) {
+      const normState = String(state || 'idle').toLowerCase();
+      if (normState === 'processing' && this.taskLifecycle && this.taskLifecycle.state === 'CANCELLED') {
+        return;
+      }
+      if (this.taskLifecycle) this.taskLifecycle.stage = stage;
+      if (window.SW_UI && typeof window.SW_UI.setTaskStatus === 'function') {
+        window.SW_UI.setTaskStatus({
+          state: normState,
+          stage: String(stage || ''),
+          taskLabel: taskLabel !== null ? String(taskLabel) : ((this.taskLifecycle && this.taskLifecycle.activeLabel) || '')
+        });
+      }
+    }
+
+    _isTaskCurrent(taskId, signal = null) {
+      if (!this.taskLifecycle || !taskId) return true;
+      if (signal && signal.aborted) return false;
+      if (this.taskLifecycle.activeTaskId !== taskId) return false;
+      return this.taskLifecycle.state === 'PROCESSING' || this.taskLifecycle.state === 'WAITING_FOR_CLARIFICATION';
+    }
+
+    _notifyBackgroundCancelLlm(taskId = '') {
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_CANCEL_ACTIVE_LLM', taskId: String(taskId || '') }, () => { void chrome.runtime.lastError; });
+        } catch (_e) {}
+      }
+    }
+
+    _enterWaitingForClarification(taskId, question, handler) {
+      if (!this.taskLifecycle) return;
+      if (this.taskLifecycle.resetTimer) {
+        clearTimeout(this.taskLifecycle.resetTimer);
+        this.taskLifecycle.resetTimer = null;
+      }
+      this.taskLifecycle.activeTaskId = taskId;
+      this.taskLifecycle.state = 'WAITING_FOR_CLARIFICATION';
+      this.taskLifecycle.clarificationQuestion = String(question || '');
+      this.taskLifecycle.clarificationHandler = typeof handler === 'function' ? handler : null;
+      this._setAuroraTaskUi('waiting_for_clarification', 'Waiting for clarification', this.taskLifecycle.activeLabel);
+    }
+
+    _finishActiveTask(taskId, outcome = 'COMPLETED', stageLabel = '') {
+      if (!this.taskLifecycle || this.taskLifecycle.activeTaskId !== taskId) return;
+      if (['CANCELLED', 'WAITING_FOR_CLARIFICATION', 'COMPLETED', 'ERROR', 'IDLE'].includes(this.taskLifecycle.state)) return;
+      if (this.taskLifecycle.resetTimer) {
+        clearTimeout(this.taskLifecycle.resetTimer);
+        this.taskLifecycle.resetTimer = null;
+      }
+      this.taskLifecycle.abortController = null;
+      this.taskLifecycle.clarificationHandler = null;
+      this.taskLifecycle.clarificationQuestion = '';
+      if (outcome === 'ERROR') {
+        this.taskLifecycle.state = 'ERROR';
+        this._setAuroraTaskUi('error', stageLabel || 'Action failed', this.taskLifecycle.activeLabel);
+      } else {
+        this.taskLifecycle.state = 'COMPLETED';
+        this._setAuroraTaskUi('completed', stageLabel || 'Completed', this.taskLifecycle.activeLabel);
+        if (window.SW_UI && typeof window.SW_UI.getState === 'function' && window.SW_UI.getState() === 'thinking' &&
+            !(this.reader && this.reader.isPlaying) && !(this.confirm && this.confirm.isAwaiting())) {
+          window.SW_UI.setState('silent');
+        }
+      }
+      this.taskLifecycle.resetTimer = setTimeout(() => {
+        if (this.taskLifecycle && this.taskLifecycle.activeTaskId === taskId &&
+            (this.taskLifecycle.state === 'COMPLETED' || this.taskLifecycle.state === 'ERROR')) {
+          this.taskLifecycle.state = 'IDLE';
+          this.taskLifecycle.activeLabel = '';
+          this._setAuroraTaskUi('idle', '', '');
+        }
+      }, 1500);
+    }
+
+    cancelActiveTask(reasonText = 'Cancelled.', _opts = {}) {
+      const tl = this.taskLifecycle;
+      const hadActive = Boolean(
+        (tl && (tl.state === 'PROCESSING' || tl.state === 'WAITING_FOR_CLARIFICATION')) ||
+        (this.confirm && this.confirm.isAwaiting()) ||
+        (this.explainer && typeof this.explainer.isInFlight === 'function' && this.explainer.isInFlight())
+      );
+      if (!hadActive) return { status: 'none' };
+
+      const prevId = tl ? tl.activeTaskId : 0;
+      const prevLabel = (tl && tl.activeLabel) || '';
+      if (tl) {
+        if (tl.resetTimer) { clearTimeout(tl.resetTimer); tl.resetTimer = null; }
+        tl.state = 'CANCELLED';
+        if (tl.abortController) {
+          try { tl.abortController.abort('user_cancelled'); } catch (_e) {}
+          tl.abortController = null;
+        }
+        tl.clarificationHandler = null;
+        tl.clarificationQuestion = '';
+      }
+      this._notifyBackgroundCancelLlm(prevId);
+      if (this.agentFsm && typeof this.agentFsm.abortTurn === 'function') {
+        try { this.agentFsm.abortTurn('user_cancelled'); } catch (_e) {}
+      } else if (this.agentFsm && this.agentFsm.currentTurn) {
+        try { this.agentFsm.finishTurn(this.agentFsm.currentTurn.requestId, 'IDLE', { status: 'cancelled' }); } catch (_e) {}
+      }
+      if (this.explainer && typeof this.explainer.abort === 'function') this.explainer.abort();
+      if (this.reader && typeof this.reader.cancelStream === 'function') this.reader.cancelStream();
+      else if (this.reader && typeof this.reader.stop === 'function') this.reader.stop();
+      if (this.confirm && this.confirm.isAwaiting()) this.confirm.cancel('user_cancelled');
+      if (this.dialogue && this.dialogue.pendingPrompt) this.dialogue.pendingPrompt = null;
+      if (this.elementSelector && typeof this.elementSelector.clearCandidateOverlay === 'function') {
+        this.elementSelector.clearCandidateOverlay();
+      }
+      if (this.navigator) {
+        if (typeof this.navigator.clearCandidateOverlay === 'function') this.navigator.clearCandidateOverlay();
+        if (typeof this.navigator.cancelPendingHighlight === 'function') this.navigator.cancelPendingHighlight();
+      }
+      if (this.teach && typeof this.teach.cancelTeaching === 'function' && this.teach.isTeachingActive && this.teach.isTeachingActive()) {
+        this.teach.cancelTeaching('user_cancelled');
+      }
+
+      this.setAssistantReply('Cancelled.');
+      this._setStatusChip('Task cancelled.');
+      this._setAuroraTaskUi('cancelled', 'Cancelled', prevLabel);
+      if (window.SW_UI) {
+        window.SW_UI.setState('silent');
+        if (typeof window.SW_UI.setScanning === 'function') window.SW_UI.setScanning(false);
+        window.SW_UI.setTranscript('Cancelled.');
+      }
+
+      if (tl) {
+        tl.resetTimer = setTimeout(() => {
+          if (this.taskLifecycle && this.taskLifecycle.state === 'CANCELLED' && this.taskLifecycle.activeTaskId === prevId) {
+            this.taskLifecycle.state = 'IDLE';
+            this.taskLifecycle.activeLabel = '';
+            this._setAuroraTaskUi('idle', '', '');
+          }
+        }, 1200);
+      }
+      return { status: 'task_cancelled', cancelledTaskId: prevId, answer: 'Cancelled.', reason: reasonText };
+    }
+
     close() { this.dismissUi('close'); }
 
     dismissUi(reason = 'escape') {
       this.isOpen = false;
+      if (this.taskLifecycle) {
+        if (this.taskLifecycle.resetTimer) {
+          clearTimeout(this.taskLifecycle.resetTimer);
+          this.taskLifecycle.resetTimer = null;
+        }
+        if (this.taskLifecycle.abortController) {
+          try { this.taskLifecycle.abortController.abort('ui_dismissed'); } catch (_e) {}
+          this.taskLifecycle.abortController = null;
+        }
+        this._notifyBackgroundCancelLlm(this.taskLifecycle.activeTaskId);
+        this.taskLifecycle.clarificationHandler = null;
+        this.taskLifecycle.clarificationQuestion = '';
+        this.taskLifecycle.state = 'IDLE';
+        this.taskLifecycle.activeLabel = '';
+        this._setAuroraTaskUi('idle', '', '');
+      }
       if (this.camera && this.camera.isActive()) this.camera.cancelCapture();
       if (this.confirm && this.confirm.isAwaiting()) this.confirm.cancel('user_escape');
       if (this.confirm && this.confirm.isPlanActive()) this.confirm.cancelPlan('user_escape');
       if (this.forms && this.forms.isGuidedActive()) this.forms.stopGuidedFill('cancelled');
       if (this.reader && this.reader.isPlaying) this.stopReading();
       if (this.explainer) this.explainer.abort();
+      if (this.elementSelector && typeof this.elementSelector.clearCandidateOverlay === 'function') {
+        this.elementSelector.clearCandidateOverlay();
+      }
+      if (this.navigator) {
+        if (typeof this.navigator.clearCandidateOverlay === 'function') this.navigator.clearCandidateOverlay();
+        if (typeof this.navigator.cancelPendingHighlight === 'function') this.navigator.cancelPendingHighlight();
+      }
+      if (this.teach && typeof this.teach.cancelTeaching === 'function' && this.teach.isTeachingActive && this.teach.isTeachingActive()) {
+        this.teach.cancelTeaching('user_escape');
+      }
+      if (window.SW_UI && typeof window.SW_UI.setScanning === 'function') {
+        window.SW_UI.setScanning(false);
+      }
 
       if (reason === 'escape' || reason === 'close' || reason === 'hide_ui') {
         if (this.dialogue && this.dialogue.isActive()) {
@@ -747,6 +987,65 @@
     }
 
     handleUserInput(text, inputSource = 'voice', meta = {}) {
+      const rawTrim = String(text || '').trim();
+      const cleanInput = (this.voice && typeof this.voice.stripWakePrefix === 'function')
+        ? this.voice.stripWakePrefix(rawTrim)
+        : rawTrim;
+      const normInput = this._normalizeTaskPhrase(cleanInput);
+      const tl = this.taskLifecycle;
+
+      // Priority 4A: Immediate cancellation bypasses _commandQueue so active LLM/TTS work aborts right away
+      if (cleanInput && this._isTaskCancelPhrase(cleanInput)) {
+        const hasCancelableWork = Boolean(
+          (tl && ((tl.state === 'PROCESSING' && this._inFlightExecCount > 0) || tl.state === 'WAITING_FOR_CLARIFICATION')) ||
+          (this.confirm && this.confirm.isAwaiting()) ||
+          (this.explainer && typeof this.explainer.isInFlight === 'function' && this.explainer.isInFlight())
+        );
+        if (hasCancelableWork) {
+          return Promise.resolve(this.cancelActiveTask(cleanInput, { source: inputSource }));
+        }
+      }
+
+      // Priority 4B: Answer to active clarification question keeps the SAME active task context
+      if (cleanInput && tl && tl.state === 'WAITING_FOR_CLARIFICATION' && !(meta && meta.internalResumeTaskId)) {
+        const clarifyTaskId = tl.activeTaskId;
+        const clarifyHandler = tl.clarificationHandler;
+        if (typeof clarifyHandler === 'function') {
+          tl.clarificationHandler = null;
+          tl.state = 'PROCESSING';
+          this._setAuroraTaskUi('processing', 'Performing action', tl.activeLabel);
+          return Promise.resolve(clarifyHandler(cleanInput, { inputSource, meta, taskId: clarifyTaskId }))
+            .then((res) => {
+              if (!res || (res.status !== 'needs_clarification' && res.status !== 'task_cancelled')) {
+                this._finishActiveTask(clarifyTaskId, (res && res.ok === false) ? 'ERROR' : 'COMPLETED', 'Completed');
+              }
+              return res;
+            })
+            .catch((err) => {
+              this._finishActiveTask(clarifyTaskId, 'ERROR', 'Action failed');
+              throw err;
+            });
+        }
+      }
+
+      // Priority 4C: Active task lock — reject duplicate/unrelated commands mid-execution (preserves synchronous FIFO batch queueing when _inFlightExecCount === 0)
+      if (cleanInput && tl && tl.state === 'PROCESSING' && this._inFlightExecCount > 0 && !(meta && meta.internalResumeTaskId) && !(meta && meta.allowQueue)) {
+        const isDup = Boolean(normInput && normInput === tl.lastSubmittedNorm);
+        // Deliberately typed (non-duplicate) commands keep the existing FIFO queue semantics; they run after the
+        // active task finishes and never interleave with its state. Voice echoes / unrelated voice commands are locked.
+        const isDeliberateTyped = inputSource === 'typed' && !isDup;
+        if (!isDeliberateTyped) {
+          if (!isDup) {
+            this._setStatusChip('Finishing current task — say "Cancel" or "Stop" to abort.');
+          }
+          return Promise.resolve({
+            status: 'task_locked',
+            activeTaskId: tl.activeTaskId,
+            reason: isDup ? 'duplicate_command' : 'active_task_busy'
+          });
+        }
+      }
+
       if (text && String(text).trim() && !(meta && meta.noPreempt)) {
         if (this.explainer && typeof this.explainer.isInFlight === 'function' && this.explainer.isInFlight()) {
           this.explainer.abort();
@@ -764,6 +1063,30 @@
     }
 
     async _processUserInputInner(text, inputSource = 'voice', meta = {}) {
+      this._inFlightExecCount += 1;
+      const rawClean = (this.voice && typeof this.voice.stripWakePrefix === 'function')
+        ? this.voice.stripWakePrefix(String(text || '').trim())
+        : String(text || '').trim();
+      const tl = this.taskLifecycle;
+      let taskId = 0;
+      let abortController = null;
+      if (tl && rawClean) {
+        if (tl.resetTimer) { clearTimeout(tl.resetTimer); tl.resetTimer = null; }
+        taskId = (meta && meta.internalResumeTaskId) || (tl.activeTaskId + 1);
+        abortController = typeof AbortController === 'function' ? new AbortController() : null;
+        tl.activeTaskId = taskId;
+        tl.state = 'PROCESSING';
+        if (!(meta && meta.internalResumeTaskId)) {
+          tl.activeLabel = rawClean.slice(0, 68);
+        }
+        tl.abortController = abortController;
+        tl.clarificationHandler = null;
+        tl.clarificationQuestion = '';
+        tl.lastSubmittedNorm = this._normalizeTaskPhrase(rawClean);
+        tl.lastSubmittedAt = Date.now();
+        this._setAuroraTaskUi('processing', 'Understanding request', tl.activeLabel);
+      }
+
       if (this.dialogue) {
         this.dialogue._externalTurnInProgress = true;
         if (typeof this.dialogue._clearSilenceTimers === 'function') this.dialogue._clearSilenceTimers();
@@ -774,9 +1097,25 @@
           window.SW_UI._orb.card._clearDismissTimer();
         }
       }
+      let out = null;
       try {
-        return await this._processUserInputBody(text, inputSource, meta);
+        out = await this._processUserInputBody(text, inputSource, {
+          ...(meta && typeof meta === 'object' ? meta : {}),
+          _taskId: taskId,
+          _taskSignal: abortController ? abortController.signal : null
+        });
+        return out;
+      } catch (err) {
+        if (taskId) this._finishActiveTask(taskId, 'ERROR', 'Action failed');
+        throw err;
       } finally {
+        this._inFlightExecCount = Math.max(0, this._inFlightExecCount - 1);
+        if (taskId) {
+          const st = out && out.status;
+          if (st !== 'needs_clarification' && st !== 'waiting_for_user' && st !== 'awaiting_skill_confirmation' && st !== 'task_cancelled' && st !== 'aborted_stale_turn') {
+            this._finishActiveTask(taskId, (out && out.ok === false) ? 'ERROR' : 'COMPLETED', 'Completed');
+          }
+        }
         if (window.SW_UI && window.SW_UI._orb) {
           window.SW_UI._orb._processingTurn = false;
           if (window.SW_UI._orb.card && typeof window.SW_UI._orb.card._syncAutoDismiss === 'function') {
@@ -796,6 +1135,8 @@
 
     async _processUserInputBody(text, inputSource = 'voice', meta = {}) {
       const turnStart = performance.now();
+      const taskId = (meta && meta._taskId) || 0;
+      const taskSignal = (meta && meta._taskSignal) || null;
       const rawInput = String(text || '').trim();
       if (!rawInput) return null;
       const raw = (this.voice && typeof this.voice.stripWakePrefix === 'function')
@@ -803,6 +1144,7 @@
         : rawInput;
       if (!raw) return null;
       if (this._bootPromise) await this._bootPromise;
+      if (!this._isTaskCurrent(taskId, taskSignal)) return { status: 'task_cancelled' };
 
       const cmdId = (meta && meta.cmdId) || `sw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const currentTabId = (this.worldModel && typeof this.worldModel._getTabId === 'function' ? this.worldModel._getTabId() : null) || (this.memory && this.memory.tabId) || 'default';
@@ -811,9 +1153,13 @@
         ? this.agentFsm.beginTurn({ tabId: currentTabId, command: raw, inventoryVersion: currentInv ? currentInv.inventoryVersion : 0, url: window.location.href })
         : null;
       const requestId = turn ? turn.requestId : cmdId;
-      const checkTurnValid = (opts = {}) => (!this.agentFsm || !requestId ? { ok: true } : this.agentFsm.assertTurnCurrent(requestId, opts));
+      const checkTurnValid = (opts = {}) => {
+        if (!this._isTaskCurrent(taskId, taskSignal)) return { ok: false, reason: 'user_cancelled' };
+        return !this.agentFsm || !requestId ? { ok: true } : this.agentFsm.assertTurnCurrent(requestId, opts);
+      };
       if (this.agentFsm) this.agentFsm.transition('CLASSIFYING', { requestId, reason: 'command_received' });
       this._setStatusChip(`Understanding: "${raw}"`);
+      this._setAuroraTaskUi('processing', 'Understanding request');
 
       // 1. Hide UI / UI visibility command without ending conversation
       if (/^(?:hide\s+(?:the\s+)?(?:ui|orb|assistant)|minimize)$/i.test(raw)) {
@@ -822,9 +1168,63 @@
         return { status: 'ui_hidden' };
       }
 
+      // 1b. Teaching mode lifecycle commands (start, pause, resume, finish, cancel)
+      if (this.teach) {
+        const lowerTeach = raw.toLowerCase().trim();
+        if (this.teach.active) {
+          if (/^(?:finish|done|complete|end|stop|save)\s+(?:the\s+)?(?:teaching|recording|demonstration|workflow|skill)\.?$/i.test(lowerTeach) || /^(?:save\s+(?:this\s+)?(?:workflow|skill)|finish\s+teaching)\.?$/i.test(lowerTeach)) {
+            const tRes = await this.teach.finishTeaching();
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            if (tRes && tRes.status !== 'awaiting_skill_confirmation') {
+              this._finishActiveTask(taskId, 'COMPLETED', tRes.answer || 'Teaching finished');
+            }
+            return tRes;
+          }
+          if (/^pause\s+(?:the\s+)?(?:teaching|recording|demonstration)\.?$/i.test(lowerTeach)) {
+            const tRes = await this.teach.pauseTeaching();
+            this.setAssistantReply(`Teaching paused (${tRes.steps || 0} step(s) captured). Say "Resume teaching" to continue.`);
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            this._finishActiveTask(taskId, 'COMPLETED', 'Teaching paused');
+            return tRes;
+          }
+          if (/^(?:resume|continue)\s+(?:the\s+)?(?:teaching|recording|demonstration)\.?$/i.test(lowerTeach)) {
+            const tRes = await this.teach.resumeTeaching();
+            this.setAssistantReply(`Teaching resumed (${tRes.steps || 0} step(s) so far).`);
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            this._finishActiveTask(taskId, 'COMPLETED', 'Teaching resumed');
+            return tRes;
+          }
+          if (/^(?:cancel|discard|abort)\s+(?:the\s+)?(?:teaching|recording|demonstration)\.?$/i.test(lowerTeach)) {
+            const tRes = await this.teach.cancelTeaching();
+            this.setAssistantReply('Teaching cancelled.');
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            this._finishActiveTask(taskId, 'CANCELLED', 'Teaching cancelled');
+            return tRes;
+          }
+        } else {
+          const explicitTeachM = raw.match(/^(?:teach\s+(?:sleepwalker|you)(?:\s+how\s+to)?|let\s+me\s+teach\s+(?:sleepwalker|you)(?:\s+how\s+to)?|record\s+(?:a\s+)?(?:workflow|skill)(?:\s+for)?)\s+(.+)$/i);
+          if (explicitTeachM && explicitTeachM[1]) {
+            const goalText = explicitTeachM[1].trim();
+            const tRes = await this.teach.startTeaching(goalText, { mode: 'teach' });
+            this.setAssistantReply(tRes.message || `Teaching mode started for "${goalText}".`);
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            this._finishActiveTask(taskId, 'COMPLETED', 'Teaching started');
+            return tRes;
+          }
+        }
+      }
+
       // 2. Priority interruption / Stop Action / Escape before blocking modals
       const hasPendingChoice = Boolean((this.dialogue && this.dialogue.pendingPrompt) || (this.navigator && Array.isArray(this.navigator.pendingChoices) && this.navigator.pendingChoices.length));
-      const quickRoute = this.fastRouter ? this.fastRouter.classify(raw, { hasPendingPrompt: Boolean(this.confirm && this.confirm.isAwaiting()), navChoiceCount: (this.navigator && Array.isArray(this.navigator.pendingChoices) && this.navigator.pendingChoices.length) || 0 }) : null;
+      const hasPageTabMatch = Boolean(
+        document && typeof document.querySelectorAll === 'function' &&
+        document.querySelectorAll('[role="tab"], .tab, .nav-tab, [data-tab]').length > 0
+      );
+      const quickRoute = this.fastRouter ? this.fastRouter.classify(raw, {
+        hasPendingPrompt: Boolean(this.confirm && this.confirm.isAwaiting()),
+        navChoiceCount: (this.navigator && Array.isArray(this.navigator.pendingChoices) && this.navigator.pendingChoices.length) || 0,
+        hasPageTabMatch
+      }) : null;
       if (quickRoute && quickRoute.path === 'A' && quickRoute.fastAction && ['press_escape', 'stop_scroll', 'stop_action'].includes(quickRoute.fastAction.type)) {
         const fastEarlyRes = await this._executeFastPathAction(quickRoute.fastAction, raw, requestId, turnStart);
         return fastEarlyRes;
@@ -911,6 +1311,12 @@
             }
           });
         }
+        this._enterWaitingForClarification(taskId, msg, async (answerText, info) => {
+          return this._processUserInputInner(answerText, (info && info.inputSource) || inputSource, {
+            ...((info && info.meta) || meta),
+            internalResumeTaskId: taskId
+          });
+        });
         this.setAssistantReply(msg);
         if (window.SW_UI) {
           window.SW_UI.setState('confirm');
@@ -961,6 +1367,7 @@
         this.agentFsm.recordStageTiming(requestId, 'routing', Math.round((performance.now() - turnStart) * 100) / 100);
         this.agentFsm.transition('OBSERVING', { requestId, reason: 'observe_page' });
       }
+      this._setAuroraTaskUi('processing', 'Gathering context');
       const tIntent0 = performance.now();
       const tWm0 = performance.now();
       const wmInv = this.worldModel ? await this.worldModel.observeTab(document).catch(() => null) : null;
@@ -970,7 +1377,9 @@
         if (wmInv && wmInv.inventoryVersion) this.agentFsm.updateInventoryVersion(requestId, wmInv.inventoryVersion);
       }
       const postObserveValid = checkTurnValid({ tabId: currentTabId });
-      if (!postObserveValid.ok) return { status: 'aborted_stale_turn', reason: postObserveValid.reason };
+      if (!postObserveValid.ok) {
+        return { status: postObserveValid.reason === 'user_cancelled' ? 'task_cancelled' : 'aborted_stale_turn', reason: postObserveValid.reason };
+      }
       const structuredCtx = this._syncStructuredPageContext(document);
       const syncRule = (this.intentEngine && typeof this.intentEngine.matchRules === 'function')
         ? this.intentEngine.matchRules(queryForClassification, intentOpts)
@@ -979,7 +1388,7 @@
         ? this.memory.classifyCentralIntent(raw, resolvedContext, syncRule, pageDigest)
         : null;
 
-      // Phase 4.3 + 4.4: Hybrid World Model + Semantic Page Retrieval + Reasoner (`llama3.2:3b`)
+      // Phase 4.3 + 4.4 + Master 2.0: Learned Skills + Hybrid World Model + Qwen -> Ollama Escalation
       let nluPlan = null;
       let nluCandidateNavigationIdentity = wmInv && wmInv.navigationIdentity;
       let nluSource = '';
@@ -990,29 +1399,82 @@
       let nluOllamaStatus = 'skipped';
       let nluHttpStatus = 0;
       let nluErrorDetail = '';
-      const useRichNlu = this._needsRichNluUnderstanding(raw, resolvedContext, preCentral, syncRule, structuredCtx, navChoiceCount, wmInv);
+      let ollamaReply = null;
+      let learnedSkillHits = [];
+      let failedLearnedSkill = null;
+      let earlySkillDispatch = null;
+      const isControlOrReadOnlyCmd = Boolean(
+        (preCentral && this.memory && [
+          this.memory.CENTRAL_INTENTS.CONVERSATION_CONTROL,
+          this.memory.CENTRAL_INTENTS.PAGE_READING
+        ].includes(preCentral.category)) ||
+        /^(?:summarize|summary|explain|read\s+(?:this|the)\s+page|what\s+is|who\s+is|hello|hi|hey)\b/i.test(raw.trim())
+      );
+
+      if (
+        this.memory &&
+        typeof this.memory.retrieveLearnedSkillsAsync === 'function' &&
+        !isControlOrReadOnlyCmd &&
+        (!meta || meta.skipLearnedSkills !== true)
+      ) {
+        learnedSkillHits = await this.memory.retrieveLearnedSkillsAsync(raw, window.location.href, {
+          topK: 3,
+          minScore: 0.44
+        }).catch(() => []);
+        if (this.teach && learnedSkillHits.length > 0 && learnedSkillHits[0].score >= 0.70) {
+          const topSkill = learnedSkillHits[0].skill;
+          if (this.agentFsm) this.agentFsm.transition('EXECUTING', { requestId, reason: 'learned_skill_replay' });
+          this._setAuroraTaskUi('processing', `Running learned skill: ${topSkill.name}`);
+          const skRes = await this.teach.executeLearnedSkill(topSkill, { utterance: raw }).catch((err) => ({
+            status: 'skill_step_failed',
+            verified: false,
+            skill: topSkill,
+            message: (err && err.message) || 'Learned skill execution failed.'
+          }));
+          if (skRes && (skRes.verified === true || skRes.status === 'skill_executed' || skRes.status === 'skill_step_navigating')) {
+            earlySkillDispatch = { ...skRes, nluSource: 'learned_skill', matchedSkillId: topSkill.id };
+            nluSource = 'learned_skill';
+          } else if (skRes && skRes.status === 'skill_step_failed') {
+            failedLearnedSkill = skRes;
+            const relearnOffer = this.teach.promptRelearnOffer(skRes, raw);
+            earlySkillDispatch = { ...relearnOffer, failedStep: skRes.failedStep, failedStepIndex: skRes.failedStepIndex, nluSource: 'learned_skill', matchedSkillId: topSkill.id };
+            nluSource = 'learned_skill';
+          }
+        }
+      }
+
+      const useRichNlu = !earlySkillDispatch && (Boolean(failedLearnedSkill) || this._needsRichNluUnderstanding(raw, resolvedContext, preCentral, syncRule, structuredCtx, navChoiceCount, wmInv));
       if (useRichNlu) {
         if (this.worldModel && wmInv) {
           if (this.agentFsm) this.agentFsm.transition('RETRIEVING', { requestId, reason: 'semantic_retrieval' });
           const tSem0 = performance.now();
+          const useNeuralEmbed = this._shouldUseNeuralEmbeddings(resolvedContext.resolvedText || raw, wmInv, resolvedContext, structuredCtx);
           semanticMatches = await this.worldModel.retrieveRelevantCandidatesAsync(
             resolvedContext.resolvedText || raw,
-            { topK: 6, inventory: wmInv, timeoutMs: 2200 }
+            { topK: 6, inventory: wmInv, timeoutMs: 2200, offlineOnly: !useNeuralEmbed }
           ).catch(() => []);
           semRetrieveMs = Math.round((performance.now() - tSem0) * 100) / 100;
           if (this.agentFsm) this.agentFsm.recordStageTiming(requestId, 'retrieval', semRetrieveMs);
         }
         const postSemValid = checkTurnValid({ tabId: currentTabId });
-        if (!postSemValid.ok) return { status: 'aborted_stale_turn', reason: postSemValid.reason };
+        if (!postSemValid.ok) {
+          return { status: postSemValid.reason === 'user_cancelled' ? 'task_cancelled' : 'aborted_stale_turn', reason: postSemValid.reason };
+        }
 
         if (this.agentFsm) this.agentFsm.transition('PLANNING', { requestId, reason: 'nlu_reasoner' });
+        this._setAuroraTaskUi('processing', 'Processing with AI');
         const tReason0 = performance.now();
-        const ollamaReply = await this._requestOllamaNluPlan(raw, resolvedContext, structuredCtx, wmInv, semanticMatches);
+        ollamaReply = await this._requestOllamaNluPlan(raw, resolvedContext, structuredCtx, wmInv, semanticMatches, {
+          learnedSkills: learnedSkillHits,
+          forcePrimary: Boolean(meta && meta.forcePrimary)
+        });
         nluCandidateNavigationIdentity = (ollamaReply && ollamaReply.candidateNavigationIdentity) || nluCandidateNavigationIdentity;
         nluReasoningMs = Math.round((performance.now() - tReason0) * 100) / 100;
         if (this.agentFsm) this.agentFsm.recordStageTiming(requestId, 'reasoning', nluReasoningMs);
         const postReasonValid = checkTurnValid({ tabId: currentTabId });
-        if (!postReasonValid.ok) return { status: 'aborted_stale_turn', reason: postReasonValid.reason };
+        if (!postReasonValid.ok) {
+          return { status: postReasonValid.reason === 'user_cancelled' ? 'task_cancelled' : 'aborted_stale_turn', reason: postReasonValid.reason };
+        }
 
         if (ollamaReply && ollamaReply.diag) nluDiag = ollamaReply.diag;
         if (ollamaReply && ollamaReply.status) {
@@ -1020,7 +1482,7 @@
           nluHttpStatus = Number(ollamaReply.httpStatus || (ollamaReply.diag && ollamaReply.diag.httpStatus) || 0);
           nluErrorDetail = ollamaReply.message || (ollamaReply.diag && ollamaReply.diag.errorDetail) || '';
         }
-        if (ollamaReply && ollamaReply.status === 'ok' && ollamaReply.plan && this._isPlanPlausibleForUtterance(ollamaReply.plan, raw)) {
+        if (ollamaReply && ollamaReply.status === 'ok' && ollamaReply.plan && this._isPlanPlausibleForUtterance(ollamaReply.plan, raw, wmInv, structuredCtx)) {
           nluPlan = ollamaReply.plan;
           nluSource = ollamaReply.source || 'local ollama';
         }
@@ -1031,20 +1493,29 @@
       }
 
       const skipLlmFallback = Boolean(
+        earlySkillDispatch ||
         nluPlan ||
         (preCentral && this.memory && preCentral.category !== this.memory.CENTRAL_INTENTS.GENERAL_QUESTION) ||
         (resolvedContext && resolvedContext.resolvedListItem && resolvedContext.resolvedListItem.entityType)
       );
 
-      const classified = this.intentEngine
-        ? await this.intentEngine.classify(queryForClassification, { ...intentOpts, skipLlmFallback })
-        : { intent: 'HELP', args: {}, confidence: 0.5, cmdId };
+      if (!useRichNlu && !skipLlmFallback) {
+        this._setAuroraTaskUi('processing', 'Processing with AI');
+      }
+      const classified = earlySkillDispatch
+        ? { intent: 'LEARNED_SKILL', args: {}, confidence: 0.99, cmdId, source: 'learned_skill' }
+        : (this.intentEngine
+          ? await this.intentEngine.classify(queryForClassification, { ...intentOpts, skipLlmFallback })
+          : { intent: 'HELP', args: {}, confidence: 0.5, cmdId });
+      if (!this._isTaskCurrent(taskId, taskSignal)) return { status: 'task_cancelled' };
       const intentMs = Math.round((performance.now() - tIntent0) * 100) / 100;
 
       // 4. Central 12-Category Intent Router
-      const centralIntent = this.memory
-        ? (skipLlmFallback && preCentral ? preCentral : this.memory.classifyCentralIntent(raw, resolvedContext, classified, pageDigest))
-        : null;
+      const centralIntent = earlySkillDispatch
+        ? null
+        : (this.memory
+          ? (skipLlmFallback && preCentral ? preCentral : this.memory.classifyCentralIntent(raw, resolvedContext, classified, pageDigest))
+          : null);
 
       if (this.diagnostics) {
         this.diagnostics.log('intent', 'classified', {
@@ -1057,27 +1528,185 @@
       }
 
       this._setStatusChip('Processing...');
+      if (!earlySkillDispatch) this._setAuroraTaskUi('processing', 'Performing action');
 
       const tExec0 = performance.now();
       const execValid = checkTurnValid({ tabId: currentTabId });
-      if (!execValid.ok) return { status: 'aborted_stale_turn', reason: execValid.reason };
+      if (!execValid.ok) {
+        return { status: execValid.reason === 'user_cancelled' ? 'task_cancelled' : 'aborted_stale_turn', reason: execValid.reason };
+      }
       if (this.agentFsm) this.agentFsm.transition('EXECUTING', { requestId, reason: 'dispatch_action' });
-      let dispatchRes = null;
-      if (nluPlan) {
-        dispatchRes = await this._executeNluActionPlan(nluPlan, raw, resolvedContext, structuredCtx, { classified, centralIntent, pageDigest, nluSource, wmInv, semanticMatches, requestId, candidateNavigationIdentity: nluCandidateNavigationIdentity });
+      let dispatchRes = earlySkillDispatch || null;
+      const previousAttempts = [];
+      if (!dispatchRes && nluPlan) {
+        dispatchRes = await this._executeNluActionPlan(nluPlan, raw, resolvedContext, structuredCtx, { classified, centralIntent, pageDigest, nluSource, wmInv, semanticMatches, requestId, taskId, candidateNavigationIdentity: nluCandidateNavigationIdentity });
+        previousAttempts.push({
+          source: nluSource || 'qwen_primary',
+          plan: nluPlan,
+          status: dispatchRes && dispatchRes.status,
+          verified: Boolean(dispatchRes && dispatchRes.verified)
+        });
+        // Qwen produced a plan the execution engine cannot act on (unhandled intent) -> deterministic page-map fallback before generic routing
+        if (!dispatchRes && nluSource !== 'deterministic_nlu_fallback') {
+          const detPlan = this._buildFallbackNluPlan(raw, resolvedContext, structuredCtx, wmInv, semanticMatches);
+          if (detPlan) {
+            dispatchRes = await this._executeNluActionPlan(detPlan, raw, resolvedContext, structuredCtx, { classified, centralIntent, pageDigest, nluSource: 'deterministic_nlu_fallback', wmInv, semanticMatches, requestId, taskId, candidateNavigationIdentity: nluCandidateNavigationIdentity });
+            if (dispatchRes) {
+              nluPlan = detPlan;
+              nluSource = 'deterministic_nlu_fallback';
+            }
+            previousAttempts.push({ source: 'deterministic_nlu_fallback', plan: detPlan, status: dispatchRes && dispatchRes.status, verified: Boolean(dispatchRes && dispatchRes.verified) });
+          }
+        }
       }
-      if (!dispatchRes && centralIntent) {
+      if (!this._isTaskCurrent(taskId, taskSignal) && (!dispatchRes || dispatchRes.status !== 'needs_clarification')) {
+        return { status: 'task_cancelled' };
+      }
+      const isGenericQuestionFallback = Boolean(
+        failedLearnedSkill &&
+        (!centralIntent || (this.memory && centralIntent.category === this.memory.CENTRAL_INTENTS.GENERAL_QUESTION)) &&
+        (!classified || classified.intent === 'ANSWER' || classified.intent === 'HELP')
+      );
+      if (!dispatchRes && centralIntent && !isGenericQuestionFallback) {
         dispatchRes = await this._handleCentralRoute(centralIntent, classified, raw, resolvedContext, pageDigest);
+        previousAttempts.push({
+          source: 'central_router',
+          status: dispatchRes && dispatchRes.status,
+          verified: Boolean(dispatchRes && (dispatchRes.verified === true || dispatchRes.ok === true))
+        });
       }
-      if (!dispatchRes) {
+      if (!dispatchRes && !isGenericQuestionFallback) {
         dispatchRes = await this.dispatchIntent(classified, raw, resolvedContext);
+        previousAttempts.push({
+          source: 'intent_dispatcher',
+          status: dispatchRes && dispatchRes.status,
+          verified: Boolean(dispatchRes && (dispatchRes.verified === true || dispatchRes.ok === true))
+        });
+      }
+      if (!this._isTaskCurrent(taskId, taskSignal) && (!dispatchRes || dispatchRes.status !== 'needs_clarification')) {
+        return { status: 'task_cancelled' };
+      }
+
+      // 5. Intelligent Qwen -> Stronger Ollama Primary Fallback Escalation (Section 1.2)
+      const qwenTierUsed = (ollamaReply && (ollamaReply.modelTier || ollamaReply.tier)) || 'compact';
+      let escalatedToOllama = Boolean((meta && meta.forcePrimary) || qwenTierUsed === 'primary' || qwenTierUsed === 'escalated_primary');
+      const isActionableTask = Boolean(
+        failedLearnedSkill ||
+        (!isControlOrReadOnlyCmd &&
+          (useRichNlu || (centralIntent && ['PAGE_NAVIGATION', 'FORM_ASSISTANCE', 'PAGE_SEARCH', 'MULTI_STEP_TASK'].includes(centralIntent.category))))
+      );
+      const isFailureNeedingRecovery = (res) => {
+        if (!res) return true;
+        if (res.awaiting === true) return false;
+        const st = String(res.status || '');
+        if (['disabled', 'option_disabled', 'sensitive_skipped', 'needs_clarification', 'ambiguous', 'ambiguous_video', 'confirming', 'moved', 'scrolled', 'acted', 'navigated', 'clicked', 'selected', 'selected_video', 'found_in_table', 'found', 'section_found', 'filter_applied', 'media_controlled', 'cancelled', 'user_denied', 'task_cancelled', 'aborted_stale_turn', 'captions_unavailable', 'waiting_for_user', 'explained_video', 'explained_paragraph', 'explained', 'skill_executed', 'skill_step_navigating'].includes(st)) {
+          return false;
+        }
+        if (res.verified === true || res.ok === true) return false;
+        return res.verified === false || res.ok === false || ['not_found', 'option_not_found', 'verification_failed', 'validation_rejected', 'error', 'unrecognized_repeat'].includes(st);
+      };
+
+      if (
+        !earlySkillDispatch &&
+        !escalatedToOllama &&
+        isActionableTask &&
+        isFailureNeedingRecovery(dispatchRes) &&
+        nluOllamaStatus !== 'ollama_unavailable' &&
+        (!meta || meta.skipEscalation !== true) &&
+        typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function'
+      ) {
+        this._setAuroraTaskUi('processing', 'Reassessing with stronger AI');
+        escalatedToOllama = true;
+        const escReply = await this._escalateToOllamaPrimary(raw, ollamaReply, {
+          status: (dispatchRes && dispatchRes.status) || 'failed',
+          reason: (dispatchRes && (dispatchRes.message || dispatchRes.error)) || nluErrorDetail || 'Primary attempt could not complete or verify action.'
+        }, {
+          resolvedContext,
+          structuredCtx,
+          wmInv,
+          semanticMatches,
+          learnedSkills: learnedSkillHits,
+          worldModelDigestText: (ollamaReply && ollamaReply._sentDigestText) || '',
+          candidateIds: (ollamaReply && ollamaReply._sentCandidateIds) || [],
+          previousAttempts,
+          navigationIdentity: nluCandidateNavigationIdentity
+        });
+
+        const postEscValid = checkTurnValid({ tabId: currentTabId });
+        if (!postEscValid.ok) {
+          return { status: postEscValid.reason === 'user_cancelled' ? 'task_cancelled' : 'aborted_stale_turn', reason: postEscValid.reason };
+        }
+
+        if (escReply && escReply.requiresGeminiSpecialist && this.explainer) {
+          dispatchRes = await this.explainPage({
+            mode: /\bsummar/i.test(raw) ? 'summary' : 'qa',
+            query: raw,
+            specialist: true,
+            explicitGemini: true,
+            lang: this.resolveReplyLang(classified)
+          });
+          nluSource = 'gemini_specialist_authorized_by_ollama';
+        } else if (escReply && escReply.status === 'ok' && escReply.plan && this._isPlanPlausibleForUtterance(escReply.plan, raw, wmInv, structuredCtx)) {
+          const escExecRes = await this._executeNluActionPlan(escReply.plan, raw, resolvedContext, structuredCtx, {
+            classified,
+            centralIntent,
+            pageDigest,
+            nluSource: escReply.source || 'ollama_escalated_primary',
+            wmInv,
+            semanticMatches,
+            requestId,
+            taskId,
+            candidateNavigationIdentity: nluCandidateNavigationIdentity,
+            fromEscalation: true,
+            allowGeminiSpecialist: Boolean(escReply.requiresGeminiSpecialist)
+          });
+          if (escExecRes) {
+            dispatchRes = { ...escExecRes, recovered: escExecRes.verified !== false, escalatedFromQwen: true };
+            nluPlan = escReply.plan;
+            nluSource = escReply.source || 'ollama_escalated_primary';
+          }
+        }
+      }
+
+      // 6. Failure-triggered Teaching / Relearning Offer (Section 6 & Section 7)
+      if (
+        !earlySkillDispatch &&
+        this.teach &&
+        !this.teach.active &&
+        isActionableTask &&
+        isFailureNeedingRecovery(dispatchRes) &&
+        (!meta || meta.offerTeachOnFailure !== false)
+      ) {
+        if (failedLearnedSkill) {
+          dispatchRes = this.teach.promptRelearnOffer(failedLearnedSkill, raw);
+        } else {
+          dispatchRes = this.teach.promptTeachOffer({
+            command: raw,
+            reason: (dispatchRes && (dispatchRes.message || dispatchRes.error)) || 'Could not locate or verify the target control.',
+            taskId
+          });
+        }
       }
       const execMs = Math.round((performance.now() - tExec0) * 100) / 100;
       if (this.agentFsm) {
         this.agentFsm.recordStageTiming(requestId, 'execution', execMs);
         this.agentFsm.transition('VERIFYING', { requestId, reason: 'post_action_verify' });
+        if (!dispatchRes || (dispatchRes.status !== 'needs_clarification' && dispatchRes.status !== 'waiting_for_user')) {
+          this._setAuroraTaskUi('processing', 'Verifying result');
+        }
         const finishedMetrics = this.agentFsm.finishTurn(requestId, 'IDLE', { status: (dispatchRes && dispatchRes.status) || 'executed' });
         if (finishedMetrics) window.__SW_LAST_TURN_METRICS__ = finishedMetrics;
+      }
+      // Release the active task lock as soon as action execution & verification complete (before async memory/storage persistence)
+      const postExecStatus = dispatchRes && dispatchRes.status;
+      if (taskId && postExecStatus === 'needs_clarification') {
+        if (this.taskLifecycle && this.taskLifecycle.state !== 'WAITING_FOR_CLARIFICATION') {
+          this.taskLifecycle.state = 'WAITING_FOR_CLARIFICATION';
+        }
+        this._setAuroraTaskUi('waiting_for_clarification', 'Waiting for clarification');
+      }
+      if (taskId && postExecStatus !== 'needs_clarification' && postExecStatus !== 'waiting_for_user' && postExecStatus !== 'task_cancelled' && postExecStatus !== 'aborted_stale_turn') {
+        this._finishActiveTask(taskId, (dispatchRes && dispatchRes.ok === false) ? 'ERROR' : 'COMPLETED', 'Completed');
       }
 
       const resultText = (dispatchRes && (dispatchRes.answer || dispatchRes.message || dispatchRes.section)) ||
@@ -1117,6 +1746,9 @@
       const memoryMs = Math.round((performance.now() - tMem0) * 100) / 100;
       const totalMs = Math.round((performance.now() - turnStart) * 100) / 100;
 
+      const effectiveStatus = (dispatchRes && dispatchRes.status)
+        || ((dispatchRes && dispatchRes.awaiting && !dispatchRes.executed) ? 'awaiting_confirmation' : 'dispatched');
+
       if (this.diagnostics) {
         const isNav = centralIntent && ['PAGE_NAVIGATION', 'EXTERNAL_NAVIGATION', 'PAGE_SEARCH'].includes(centralIntent.category);
         const usedLlm = Boolean((classified && classified.source === 'llm') || (dispatchRes && dispatchRes.source && !/basic|extractive|rules/i.test(String(dispatchRes.source))));
@@ -1131,7 +1763,7 @@
           navigationMs: isNav ? execMs : 0,
           totalMs,
           usedLlm,
-          status: (dispatchRes && dispatchRes.status) || 'dispatched'
+          status: effectiveStatus
         });
 
         if (typeof this.diagnostics.recordWorldModelTrace === 'function') {
@@ -1160,8 +1792,12 @@
             ollamaResponse: (nluDiag && nluDiag.rawResponsePreview) || '',
             structuredAction: nluPlan ? { intent: nluPlan.intent, target_id: nluPlan.target_id, action: nluPlan.action, goal: nluPlan.goal } : null,
             candidateValidation: (dispatchRes && dispatchRes.validationStatus) || 'ok',
-            browserExecution: (dispatchRes && dispatchRes.status) || 'dispatched',
-            verificationResult: (dispatchRes && dispatchRes.verified === true) ? 'verified' : ((dispatchRes && dispatchRes.verified === false) ? 'unverified' : 'n/a'),
+            browserExecution: effectiveStatus,
+            verificationResult: (dispatchRes && dispatchRes.verified === true)
+              ? 'verified'
+              : ((dispatchRes && dispatchRes.verified === false)
+                  ? 'unverified'
+                  : (effectiveStatus === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'n/a')),
             failureStage: (dispatchRes && dispatchRes.failureStage) || 'none',
             recovered: Boolean(dispatchRes && dispatchRes.recovered),
             timingMs: { corefMs, wmBuildMs, semRetrieveMs, intentMs, execMs, memoryMs, totalMs }
@@ -1173,7 +1809,7 @@
       }
 
       return {
-        status: (dispatchRes && dispatchRes.status) || 'dispatched',
+        status: effectiveStatus,
         centralIntent: centralIntent ? centralIntent.category : null,
         classified,
         resolvedContext,
@@ -1234,6 +1870,18 @@
       }
 
       if (cat === C.PAGE_NAVIGATION && central.subAction === 'history_back' && this.navigator) {
+        if (/\bsection\b/i.test(raw)) {
+          const prevSec = (resolvedContext && resolvedContext.resolvedSection) ||
+            (this.memory && this.memory.state && this.memory.state.selectionState && this.memory.state.selectionState.previousSection) || '';
+          if (prevSec) {
+            this._setStatusChip(`Returning to "${prevSec}" section...`);
+            const navRes = await this.navigator.goToSection(prevSec, { readAfter: false });
+            if (this.memory && navRes && navRes.section && typeof this.memory.setActiveUiFocus === 'function') {
+              this.memory.setActiveUiFocus({ section: navRes.section });
+            }
+            return { ...navRes, verified: Boolean(navRes && (navRes.verified || navRes.status !== 'not_found')) };
+          }
+        }
         this._setStatusChip('Going back to the previous page...');
         return this.navigator.historyAction('back', 0.95);
       }
@@ -1254,12 +1902,20 @@
       }
 
       if (cat === C.PAGE_NAVIGATION && central.subAction === 'navigate_section' && central.sectionTarget && this.navigator) {
-        this._setStatusChip(`Executing: finding "${central.sectionTarget}" section...`);
-        const navRes = await this.navigator.goToSection(central.sectionTarget, { readAfter: true });
-        if (navRes && navRes.status === 'not_found' && this.taskPlanner) {
-          await this.taskPlanner.recordFailure(`Navigate section: ${central.sectionTarget}`, `Section "${central.sectionTarget}" not found`, window.location.href);
+        let secTarget = central.sectionTarget;
+        if (/^(?:the\s+)?(?:previous|last|earlier)(?:\s+section)?$/i.test(String(secTarget).trim())) {
+          secTarget = (resolvedContext && resolvedContext.resolvedSection) ||
+            (this.memory && this.memory.state && this.memory.state.selectionState && this.memory.state.selectionState.previousSection) || secTarget;
         }
-        return navRes;
+        this._setStatusChip(`Executing: finding "${secTarget}" section...`);
+        const navRes = await this.navigator.goToSection(secTarget, { readAfter: false });
+        if (this.memory && navRes && navRes.section && typeof this.memory.setActiveUiFocus === 'function') {
+          this.memory.setActiveUiFocus({ section: navRes.section });
+        }
+        if (navRes && navRes.status === 'not_found' && this.taskPlanner) {
+          await this.taskPlanner.recordFailure(`Navigate section: ${secTarget}`, `Section "${secTarget}" not found`, window.location.href);
+        }
+        return { ...navRes, verified: Boolean(navRes && (navRes.verified || navRes.status !== 'not_found')) };
       }
 
       if (cat === C.FORM_ASSISTANCE && central.subAction === 'element_select' && this.elementSelector) {
@@ -1329,7 +1985,9 @@
 
       // Context Separation (Phase 5): Entity-specific research query ("What are LMU Munich's deadlines/fees?")
       const isoCtx = resolvedContext && resolvedContext.isolatedEntityContext;
-      if (isoCtx && isoCtx.entity && (isoCtx.entity.facts.length > 0 || isoCtx.entity.fees || isoCtx.entity.deadlines || isoCtx.entity.requirements)) {
+      if (isoCtx && isoCtx.entity &&
+          !/\b(?:find|open|play|watch|select|choose)\b.*\bvideos?\b/i.test(String(raw || '')) &&
+          (isoCtx.entity.facts.length > 0 || isoCtx.entity.fees || isoCtx.entity.deadlines || isoCtx.entity.requirements)) {
         const ent = isoCtx.entity;
         const factBits = [
           ent.fees ? `Fees: ${ent.fees}.` : '',
@@ -2000,7 +2658,7 @@
         if (routed && routed.path === 'A') return true;
         if (routed && routed.reason === 'contextual_scroll_target') return false;
       }
-      const s = String(raw || '').trim().toLowerCase();
+      const s = String(raw || '').trim().replace(/[।.,!?]+$/g, '').trim().toLowerCase();
       if (!s) return true;
       if (/^(?:yes|yeah|yep|no|nope|ok|okay|haan|nahi)$/i.test(s)) return true;
       if (navChoiceCount > 0 && /^(?:[1-5]|first|second|third|fourth|fifth|one|two|three|four|five)$/i.test(s)) return true;
@@ -2164,6 +2822,29 @@
       return reply;
     }
 
+    _shouldUseNeuralEmbeddings(queryText, wmInv, resolvedContext, structuredCtx) {
+      const q = String(queryText || '').toLowerCase();
+      if (!q || !wmInv) return false;
+      if (resolvedContext && resolvedContext.resolvedSimilarTo) return true;
+      const isFeed = Boolean((structuredCtx && /^youtube_(?:search|feed)$/i.test(structuredCtx.pageType || '')) || (wmInv.discoveryMode === 'progressive_feed'));
+      if (isFeed) {
+        // Pure positional feed commands ("open 2nd video") don't need neural embedding calls
+        if (/^(?:open|play|select|pick|click)\s+(?:the\s+)?(?:\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|\w+teenth)\s+(?:video|item|result|one)\b/i.test(q)) {
+          return false;
+        }
+        return true;
+      }
+      if (/\b(?:where\s+(?:they|do\s+they)|explain(?:ing|s)?|discuss(?:ing|es)?|advantages|benefits|tutorial|beginner|how\s+.+?\s+learn|like\s+this|similar|find\s+another)\b/i.test(q)) {
+        return true;
+      }
+      const stop = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'under', 'inside', 'below', 'section', 'option', 'open', 'select', 'choose', 'click', 'link', 'article', 'go', 'take']);
+      const toks = q.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 3 && !stop.has(t));
+      if (toks.length === 0) return false;
+      const pool = [...(wmInv.sections || []), ...(wmInv.options || []), ...(wmInv.links || []), ...(wmInv.buttons || [])];
+      const hasLexHit = toks.some((t) => pool.some((e) => e && String(e.label || '').toLowerCase().includes(t)));
+      return !hasLexHit;
+    }
+
     _needsRichNluUnderstanding(raw, resolvedContext, preCentral, syncRule, structuredCtx, navChoiceCount = 0, wmInv = null) {
       if (this.memory && this.memory.privacy && this.memory.privacy.disablePageAnalysis) return false;
       if (this._isTrivialFastPath(raw, navChoiceCount)) return false;
@@ -2174,21 +2855,57 @@
       if (preCentral && [C.OFF_PAGE_RESEARCH, C.CONVERSATION_CONTROL, C.MULTI_STEP_TASK].includes(preCentral.category)) {
         return false;
       }
-      if (preCentral && preCentral.category === C.PAGE_SEARCH && ['apply_filter', 'search_within_page'].includes(preCentral.subAction)) {
+      if (preCentral && preCentral.category === C.PAGE_SUMMARIZATION && !/\b(?:first\s+\d+\s*min(?:ute)?s?|video|transcript|under\s+|inside\s+)\b/i.test(lower)) {
         return false;
+      }
+      if (/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:go\s+(?:back\s+)?to|return\s+to|back\s+to|scroll\s+to|jump\s+to)\s+(?:the\s+)?(?:previous|last|earlier)\s+section\b/i.test(lower) &&
+          Boolean((resolvedContext && resolvedContext.resolvedSection) || (this.memory && this.memory.state && this.memory.state.selectionState && this.memory.state.selectionState.previousSection))) {
+        return false;
+      }
+      if (preCentral && preCentral.category === C.PAGE_NAVIGATION && preCentral.subAction === 'navigate_section' && preCentral.sectionTarget &&
+          wmInv && Array.isArray(wmInv.sections) &&
+          !/\b(?:where|previous|earlier|last|explain|discussing|article|link|under|inside|first|second|third|fourth|fifth|subsection)\b/i.test(lower)) {
+        const secTok = String(preCentral.sectionTarget || '').trim().toLowerCase();
+        if (secTok && wmInv.sections.some((s) => s && s.label && s.label.toLowerCase().includes(secTok))) {
+          return false;
+        }
+      }
+      if (preCentral && preCentral.category === C.PAGE_SEARCH && (
+        ['apply_filter', 'search_within_page', 'in_website_search', 'site_search', 'global_site_search'].includes(preCentral.subAction) ||
+        (syncRule && syncRule.intent === 'SEARCH' && (syncRule.confidence || 0) >= 0.85)
+      )) {
+        if (!/\b(?:under\s+|inside\s+|in\s+the\s+table|table|subsection)\b/i.test(lower)) {
+          return false;
+        }
       }
       if (preCentral && preCentral.category === C.EXTERNAL_NAVIGATION && !/\b(?:docs|documentation)\b/i.test(lower)) {
         return false;
       }
-      if (preCentral && preCentral.category === C.FORM_ASSISTANCE && preCentral.subAction !== 'element_select') {
+      if (preCentral && preCentral.category === C.FORM_ASSISTANCE) {
+        if (preCentral.subAction === 'element_select' && this.worldModel && wmInv) {
+          const sTrim = String(raw || '').trim();
+          const scopedM = sTrim.match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:select|choose|pick|click(?:\s+on)?|open)\s+(?:the\s+)?(.+?)\s+(?:under|inside|below|in\s+the)\s+(?:the\s+)?(.+?)(?:\s+(?:section|heading|list|card))?$/i);
+          const qLbl = (scopedM ? scopedM[1] : sTrim.replace(/^(?:please\s+)?(?:select|choose|pick)\s+(?:the\s+)?/i, '')).replace(/\s+(?:option|link)$/i, '').trim().toLowerCase();
+          const qSec = scopedM ? scopedM[2].trim() : '';
+          const hasOpt = qLbl && this.worldModel.findOptionByHierarchy ? Boolean(this.worldModel.findOptionByHierarchy(qLbl, qSec)) : false;
+          const hasLink = Boolean(qLbl && Array.isArray(wmInv.links) && wmInv.links.some((l) => l && l.label && l.label.toLowerCase().includes(qLbl)));
+          if (!hasOpt && hasLink) return true;
+        }
         return false;
       }
       const focusedExt = resolvedContext && resolvedContext.resolvedListItem;
+      const isoCtx = resolvedContext && resolvedContext.isolatedEntityContext;
+      const isFeedOrVideoPick = Boolean(
+        (wmInv && wmInv.discoveryMode === 'progressive_feed') ||
+        (structuredCtx && /^youtube_(?:search|feed)$/i.test(structuredCtx.pageType || '')) ||
+        /\b(?:find|open|play|watch|select|choose)\b.*\bvideos?\b/i.test(lower)
+      );
       if (
         (resolvedContext && (resolvedContext.crossTabCompare || resolvedContext.resolvedTabMatch)) ||
-        (focusedExt && focusedExt.entityType && focusedExt.entityType !== 'video' &&
+        (!isFeedOrVideoPick && isoCtx && isoCtx.entity && (isoCtx.entity.facts.length > 0 || isoCtx.entity.fees || isoCtx.entity.deadlines || isoCtx.entity.requirements)) ||
+        (!isFeedOrVideoPick && focusedExt && focusedExt.entityType !== 'video' &&
           !/\b(?:not\s+that|i\s+meant|instead|another\s+one|like\s+this|find\s+another)\b/i.test(lower) &&
-          (focusedExt.summary || (Array.isArray(focusedExt.tabFacts) && focusedExt.tabFacts.length > 0)))
+          ((focusedExt.entityType && focusedExt.summary) || (Array.isArray(focusedExt.tabFacts) && focusedExt.tabFacts.length > 0)))
       ) {
         return false;
       }
@@ -2204,19 +2921,32 @@
       return hasRichCues;
     }
 
-    async _requestOllamaNluPlan(raw, resolvedContext, structuredCtx, wmInv = null, semanticMatches = []) {
+    async _requestOllamaNluPlan(raw, resolvedContext, structuredCtx, wmInv = null, semanticMatches = [], extraOpts = {}) {
       if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
         return null;
       }
       const digestApi = window.SleepwalkerDigest || null;
+      const sel = (this.memory && this.memory.state && this.memory.state.selectionState) || {};
+      const preferredSections = [
+        sel.activeSection,
+        sel.previousSection,
+        resolvedContext && resolvedContext.resolvedSection
+      ].filter(Boolean);
+      const learnedSkillsList = Array.isArray(extraOpts.learnedSkills) ? extraOpts.learnedSkills : [];
+      const tokenBudget = extraOpts.forcePrimary ? 760 : 480;
       const reasonerCtx = (this.worldModel && wmInv && typeof this.worldModel.buildReasonerContext === 'function')
-        ? this.worldModel.buildReasonerContext(resolvedContext?.resolvedText || raw, { inventory: wmInv, semanticMatches, maxTokens: 480 })
+        ? this.worldModel.buildReasonerContext(resolvedContext?.resolvedText || raw, {
+          inventory: wmInv,
+          semanticMatches,
+          preferredSections,
+          learnedSkills: learnedSkillsList,
+          maxTokens: tokenBudget
+        })
         : null;
       const digestText = (reasonerCtx && reasonerCtx.text)
         || ((structuredCtx && digestApi && typeof digestApi.formatStructuredContextForNlu === 'function')
-          ? digestApi.formatStructuredContextForNlu(structuredCtx, { maxTokens: 480 })
+          ? digestApi.formatStructuredContextForNlu(structuredCtx, { maxTokens: tokenBudget })
           : '');
-      const sel = (this.memory && this.memory.state && this.memory.state.selectionState) || {};
       const selSummary = [
         sel.currentSelection ? `current=${sel.currentSelection.id}:${sel.currentSelection.title}` : '',
         sel.activeVideo ? `video=${sel.activeVideo.title}` : '',
@@ -2227,14 +2957,27 @@
       const payload = {
         utterance: raw,
         resolvedText: (resolvedContext && resolvedContext.resolvedText) || raw,
+        url: (typeof window !== 'undefined' && window.location && window.location.href) || '',
+        website: (typeof window !== 'undefined' && window.location && window.location.hostname) || '',
         pageContext: structuredCtx || { title: document.title, pageType: 'general' },
         structuredDigestText: digestText,
         worldModelDigestText: reasonerCtx ? reasonerCtx.text : '',
         candidateIds: reasonerCtx ? Array.from(reasonerCtx.validIds) : [],
+        learnedSkills: learnedSkillsList.slice(0, 3).map((h) => {
+          const sk = (h && h.skill) || h || {};
+          return {
+            id: sk.id || '',
+            name: sk.name || '',
+            steps: Array.isArray(sk.steps) ? sk.steps.slice(0, 6).map((s) => `${s.action}:${s.label || s.role || ''}`) : [],
+            score: h && h.score ? h.score : 0
+          };
+        }),
+        forcePrimary: Boolean(extraOpts.forcePrimary),
         tabId: (wmInv && wmInv.tabId) || (this.memory && this.memory.tabId) || 'default',
         inventoryVersion: (wmInv && wmInv.inventoryVersion) || 0,
         navigationIdentity: (wmInv && wmInv.navigationIdentity) || '',
-        maxContextTokens: 480,
+        taskId: (this.taskLifecycle && this.taskLifecycle.activeTaskId) ? String(this.taskLifecycle.activeTaskId) : '',
+        maxContextTokens: tokenBudget,
         timeoutMs: 16500,
         selectionSummary: selSummary,
         relevantMemories: (resolvedContext && Array.isArray(resolvedContext.relevantMemories))
@@ -2247,7 +2990,7 @@
         return await new Promise((resolve) => {
           let finished = false;
           const timer = setTimeout(() => {
-            if (!finished) { finished = true; resolve({ status: 'timeout', message: 'NLU plan request timed out after 17.8s.' }); }
+            if (!finished) { finished = true; resolve({ status: 'timeout', message: 'NLU plan request timed out after 17.8s.', _sentDigestText: digestText, _sentCandidateIds: payload.candidateIds }); }
           }, 17800);
           chrome.runtime.sendMessage({ type: 'SLEEPWALKER_NLU_PLAN_REQUEST', payload }, (res) => {
             if (finished) return;
@@ -2255,12 +2998,101 @@
             clearTimeout(timer);
             const result = chrome.runtime.lastError ? { status: 'ollama_unavailable', message: chrome.runtime.lastError.message } : res;
             resolve(result && typeof result === 'object'
-              ? { ...result, candidateNavigationIdentity: payload.navigationIdentity || '' }
+              ? { ...result, candidateNavigationIdentity: payload.navigationIdentity || '', _sentDigestText: digestText, _sentCandidateIds: payload.candidateIds }
               : result);
           });
         });
       } catch (_e) {
-        return { status: 'generation_failed', message: (_e && _e.message) || 'NLU runtime call failed.' };
+        return { status: 'generation_failed', message: (_e && _e.message) || 'NLU runtime call failed.', _sentDigestText: digestText, _sentCandidateIds: payload.candidateIds };
+      }
+    }
+
+    async _escalateToOllamaPrimary(raw, qwenReply, failureInfo = {}, ctxBundle = {}) {
+      if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+        return null;
+      }
+      const wmInv = ctxBundle.wmInv || (this.worldModel ? this.worldModel.getTabInventory() : null);
+      const hierarchicalMap = (this.worldModel && wmInv && typeof this.worldModel.getHierarchicalMapSummary === 'function')
+        ? this.worldModel.getHierarchicalMapSummary(wmInv)
+        : '';
+      let worldDigest = ctxBundle.worldModelDigestText || '';
+      if (!worldDigest && this.worldModel && wmInv && typeof this.worldModel.buildReasonerContext === 'function') {
+        const rc = this.worldModel.buildReasonerContext((ctxBundle.resolvedContext && ctxBundle.resolvedContext.resolvedText) || raw, {
+          inventory: wmInv,
+          semanticMatches: ctxBundle.semanticMatches || [],
+          learnedSkills: ctxBundle.learnedSkills || [],
+          maxTokens: 900
+        });
+        worldDigest = (rc && rc.text) || '';
+        if (!Array.isArray(ctxBundle.candidateIds) || ctxBundle.candidateIds.length === 0) {
+          ctxBundle.candidateIds = rc ? Array.from(rc.validIds) : [];
+        }
+      }
+      const combinedMap = [hierarchicalMap ? `HIERARCHICAL_MAP:\n${hierarchicalMap}` : '', worldDigest].filter(Boolean).join('\n\n');
+      const candScores = (Array.isArray(ctxBundle.semanticMatches) ? ctxBundle.semanticMatches : [])
+        .slice(0, 12)
+        .map((m) => ({
+          id: m.entity && m.entity.id,
+          label: m.entity && m.entity.label,
+          type: m.entity && m.entity.type,
+          section: m.entity && m.entity.parentSection,
+          score: m.score
+        }));
+      const domA11yInfo = wmInv ? {
+        pageTitle: (typeof document !== 'undefined' && document.title) || '',
+        navCount: Array.isArray(wmInv.links) ? wmInv.links.filter((l) => l.navCategory && l.navCategory !== 'body').length : 0,
+        optionCount: Array.isArray(wmInv.options) ? wmInv.options.length : 0,
+        sectionCount: Array.isArray(wmInv.sections) ? wmInv.sections.length : 0,
+        formControls: Array.isArray(wmInv.options) ? wmInv.options.slice(0, 12).map((o) => `${o.id}:${o.parentGroupLabel || o.label}(${o.expectedInputType || o.elementType || o.role || 'ctrl'}${o.required ? ',req' : ''})`) : []
+      } : null;
+
+      const payload = {
+        utterance: raw,
+        resolvedText: (ctxBundle.resolvedContext && ctxBundle.resolvedContext.resolvedText) || raw,
+        url: (typeof window !== 'undefined' && window.location && window.location.href) || '',
+        website: (typeof window !== 'undefined' && window.location && window.location.hostname) || '',
+        pageContext: ctxBundle.structuredCtx || { title: document.title, pageType: 'general' },
+        worldModelDigestText: combinedMap,
+        structuredDigestText: worldDigest,
+        candidateIds: Array.isArray(ctxBundle.candidateIds) ? ctxBundle.candidateIds : [],
+        qwenInterpretation: (qwenReply && qwenReply.plan) || null,
+        qwenSelectedTarget: (qwenReply && qwenReply.plan && (qwenReply.plan.target_id || qwenReply.plan.target)) || '',
+        candidatesAndScores: candScores,
+        domA11yInfo,
+        previousAttempts: Array.isArray(ctxBundle.previousAttempts) ? ctxBundle.previousAttempts : [],
+        failureInfo: typeof failureInfo === 'string' ? failureInfo : JSON.stringify(failureInfo),
+        relevantMemories: (ctxBundle.resolvedContext && Array.isArray(ctxBundle.resolvedContext.relevantMemories))
+          ? ctxBundle.resolvedContext.relevantMemories.slice(0, 3).map((m) => `${m.activity?.topic || ''}: ${m.activity?.user_command || ''}`)
+          : [],
+        learnedSkills: (Array.isArray(ctxBundle.learnedSkills) ? ctxBundle.learnedSkills : []).slice(0, 3).map((h) => {
+          const sk = (h && h.skill) || h || {};
+          return {
+            name: sk.name || '',
+            steps: Array.isArray(sk.steps) ? sk.steps.slice(0, 6).map((s) => `${s.action}:${s.label || ''}`) : []
+          };
+        }),
+        maxContextTokens: 1200,
+        timeoutMs: 21000
+      };
+
+      try {
+        return await new Promise((resolve) => {
+          let finished = false;
+          const timer = setTimeout(() => {
+            if (!finished) { finished = true; resolve({ status: 'timeout', message: 'Escalated Ollama request timed out.' }); }
+          }, 22500);
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_NLU_ESCALATE_REQUEST', payload }, (res) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            const result = chrome.runtime.lastError ? { status: 'ollama_unavailable', message: chrome.runtime.lastError.message } : res;
+            resolve(result && typeof result === 'object'
+              ? { ...result, candidateNavigationIdentity: ctxBundle.navigationIdentity || '' }
+              : result);
+          });
+        });
+      } catch (err) {
+        return { status: 'generation_failed', message: (err && err.message) || 'Escalation runtime call failed.' };
       }
     }
 
@@ -2551,12 +3383,13 @@
           section = underM[2].trim();
         }
         const pref = /\bofficial\b/i.test(tgt) ? 'official' : (/\b(?:docs|documentation)\b/i.test(tgt) ? 'documentation' : 'any');
+        const safeLinkCand = (cand && cand.type === 'link' && pref === 'any') ? cand : null;
         return {
           intent: 'open_link',
           goal: `Open "${tgt}"${section ? ` under "${section}"` : ''}`,
-          target: (cand && (cand.label || cand.title)) || tgt,
-          context: { section, table: '', channel: '', duration_hint: '', link_preference: pref, reference: null, candidate_id: cand ? cand.id : null },
-          actions: [{ type: 'open_link', candidate_id: cand ? cand.id : null, target: (cand && (cand.label || cand.title)) || tgt, section, query: '', value: pref, minutes: null }],
+          target: (safeLinkCand && (safeLinkCand.label || safeLinkCand.title)) || tgt,
+          context: { section, table: '', channel: '', duration_hint: '', link_preference: pref, reference: null, candidate_id: safeLinkCand ? safeLinkCand.id : null },
+          actions: [{ type: 'open_link', candidate_id: safeLinkCand ? safeLinkCand.id : null, target: (safeLinkCand && (safeLinkCand.label || safeLinkCand.title)) || tgt, section, query: '', value: pref, minutes: null }],
           requires_clarification: false,
           clarification_question: '',
           confidence: 0.85
@@ -2566,13 +3399,57 @@
       return null;
     }
 
-    _isPlanPlausibleForUtterance(plan, raw = '') {
+    _isPlanPlausibleForUtterance(plan, raw = '', wmInv = null, structuredCtx = null) {
       if (!plan || typeof plan !== 'object') return false;
+      if (plan.requires_clarification && plan.clarification_question) return true;
       const lower = String(raw || '').toLowerCase();
+      if (plan.intent === 'find_in_table' || plan.action === 'find_table') {
+        const hasTables = Boolean((wmInv && Array.isArray(wmInv.tables) && wmInv.tables.length > 0) || (structuredCtx && Array.isArray(structuredCtx.tables) && structuredCtx.tables.length > 0));
+        if (!hasTables || (/\b(?:video|videos|watch|tutorial)\b/i.test(lower) && !/\btable\b/i.test(lower))) {
+          return false;
+        }
+      }
+      // Ungrounded search target verification: search plan targets must be semantically relevant to user's search query
+      if ((plan.intent === 'search' || (plan.actions && plan.actions.some((a) => a && a.type === 'search'))) && !plan.requires_clarification) {
+        const pTarget = String(plan.target || (plan.actions && plan.actions[0] && (plan.actions[0].query || plan.actions[0].target)) || '').trim().toLowerCase();
+        const rawQ = lower.replace(/^(?:(?:please\s+)?(?:search(?:\s+for)?|look\s+up|find)\s+)/i, '').replace(/[.;,!]+$/, '').trim();
+        if (pTarget && !lower.includes(pTarget) && (!rawQ || !pTarget.includes(rawQ))) {
+          return false;
+        }
+      }
       // Conceptual/section jump utterances must not be misrouted into clicking an unrelated UI option
       if (/\b(?:take\s+me\s+to\s+(?:where|the\s+part)|where\s+do\s+they\s+explain|find\s+where\s+they\s+discuss)\b/i.test(lower) &&
           plan.intent !== 'navigate_section') {
         return false;
+      }
+      // Explicit link / documentation / article commands or empty section targets must not stay navigate_section
+      if (plan.intent === 'navigate_section') {
+        const firstAct = (Array.isArray(plan.actions) && plan.actions[0]) || {};
+        const hasAnySecTarget = Boolean(
+          String(plan.target || '').trim() ||
+          plan.target_id ||
+          (plan.context && String(plan.context.section || '').trim()) ||
+          String(firstAct.target || '').trim() ||
+          String(firstAct.section || '').trim() ||
+          firstAct.candidate_id
+        );
+        if (!hasAnySecTarget) return false;
+        const isWatchPage = Boolean((structuredCtx && structuredCtx.pageType === 'youtube_watch') || (wmInv && wmInv.pageType === 'youtube_watch'));
+        if (isWatchPage && !/\bsection\b/i.test(lower) && /\b(?:speaker|teaching|talking\s+about|captions?|transcript|first\s+(?:\d+|one|two|three|four|five|ten)\s+minutes?|explain|summarize|summary|what\s+(?:is|does|are))\b/i.test(lower)) {
+          return false;
+        }
+        if (/\b(?:article|articles|link|links|item|items|entry|entries|docs|documentation|website|url|portal)\b/i.test(lower) &&
+            !/^(?:(?:please|can\s+you)\s+)?(?:scroll|go|jump|move)\s+(?:back\s+)?to\s+(?:the\s+)?(?:latest\s+articles|articles?|links?)\s+section\b/i.test(lower)) {
+          return false;
+        }
+      }
+      // Explicit "<verb> to the X section" commands must stay section navigation;
+      // never let a stale/confident open_link plan target a previous section's link.
+      if (/\b(?:go|move|jump|scroll|navigate|return|back|take\s+me)\s+(?:back\s+)?to\s+(?:the\s+)?(.+?)\s+section\b/i.test(lower) ||
+          /\b(?:find|show)\s+(?:the\s+)?(.+?)\s+section\b/i.test(lower)) {
+        const isSectionPlan = plan.intent === 'navigate_section'
+          || (Array.isArray(plan.actions) && plan.actions.some((a) => a && a.type === 'find_section'));
+        if (!isSectionPlan) return false;
       }
       if (plan.intent === 'select_option' || plan.action === 'select_radio') {
         const hasCtrlVerb = /\b(?:select|choose|pick|tick|check|enable|disable|toggle|switch|change|set|option|radio|checkbox|dropdown)\b/i.test(lower);
@@ -2581,6 +3458,20 @@
       if (plan.intent === 'open_link') {
         const hasNavCue = /\b(?:open|click|select|choose|pick|visit|go\s+to|find|locate|show|check|link|page|website|site|url|portal)\b/i.test(lower);
         if (!hasNavCue) return false;
+      }
+      if (plan.intent === 'media_control' || ['play_pause', 'pause', 'play', 'mute', 'unmute', 'seek'].includes(plan.action)) {
+        const hasMediaCtrlVerb = /\b(?:play|pause|stop|resume|mute|unmute|seek|skip|forward|rewind|faster|slower|speed|volume)\b/i.test(lower);
+        if (!hasMediaCtrlVerb || /\b(?:explain|summarize|summary|what\s+(?:is|does)|teach(?:ing)?)\b/i.test(lower)) {
+          return false;
+        }
+      }
+      const isFeedCtx = Boolean(
+        (wmInv && (wmInv.discoveryMode === 'progressive_feed' || wmInv.pageType === 'youtube_search' || wmInv.pageType === 'youtube_feed')) ||
+        (structuredCtx && (structuredCtx.pageType === 'youtube_search' || structuredCtx.pageType === 'youtube_feed'))
+      );
+      if (isFeedCtx && /^(?:(?:please|can\s+you|could\s+you)\s+)?(?:find|open|play|watch|select|choose|pick)\b.*\bvideos?\b/i.test(lower) &&
+          !['open_video', 'open_link', 'find_in_page', 'request_more_candidates'].includes(plan.intent)) {
+        return false;
       }
       return true;
     }
@@ -2672,10 +3563,12 @@
         ? `${watch.title || 'Video'} (First ${maxMinutes} min)`
         : (watch.title || 'Video Summary');
 
-      // Use existing Explain pipeline with grounded custom transcript chunks so Ollama llama3.2:3b explains cleanly without fabrication
+      // Grounded video explanation (Priority 3 explicit specialist video task)
       const expRes = await this.explainPage({
         mode: 'qa',
         query: maxMinutes ? `Summarize key topics taught in the first ${maxMinutes} minutes strictly from these timestamped captions: ${raw}` : raw,
+        isVideoExplain: true,
+        specialist: true,
         customChunksText: sliced.combinedText,
         customTitle: cardTitle,
         lang: this.resolveReplyLang()
@@ -2705,22 +3598,136 @@
     async _executeNluActionPlan(plan, raw, resolvedContext, structuredCtx, meta = {}) {
       if (!plan || typeof plan !== 'object') return null;
 
-      // Clarify gate: ask concise question when NLU identifies genuine ambiguity
+      // Clarify gate: ask concise question when NLU identifies genuine ambiguity, highlight DOM candidates & speak options
       if (plan.requires_clarification && plan.clarification_question) {
-        const q = plan.clarification_question;
+        let q = plan.clarification_question;
+        const clarifyTaskId = (meta && meta.taskId) || (this.taskLifecycle && this.taskLifecycle.activeTaskId) || 0;
+        const wmInvClarify = meta.wmInv || (this.worldModel ? this.worldModel.getTabInventory() : null);
+        const overlayItems = [];
+        const candIdList = Array.isArray(plan.candidate_ids) ? plan.candidate_ids : [];
+        const seenClarifyEls = new Set();
+        const pushOverlayEntity = (ent) => {
+          if (!ent || !ent.element || ent.element.isConnected === false || seenClarifyEls.has(ent.element)) return;
+          seenClarifyEls.add(ent.element);
+          overlayItems.push({
+            element: ent.element,
+            label: ent.label || ent.title || '',
+            section: ent.parentSection || ent.parentGroupLabel || '',
+            id: ent.id || ''
+          });
+        };
+        if (wmInvClarify && wmInvClarify.entities) {
+          candIdList.forEach((cid) => pushOverlayEntity(wmInvClarify.entities.get(cid)));
+          if (overlayItems.length < 2 && Array.isArray(meta.semanticMatches)) {
+            meta.semanticMatches.slice(0, 4).forEach((m) => pushOverlayEntity(m && m.entity));
+          }
+        }
+        if (overlayItems.length >= 2 && this.elementSelector && typeof this.elementSelector._getCandidateOverlay === 'function') {
+          try {
+            const ov = this.elementSelector._getCandidateOverlay(document);
+            if (ov && typeof ov.showCandidates === 'function') {
+              ov.showCandidates(overlayItems.slice(0, 5), { labelKey: 'label' });
+            }
+          } catch (_e) {}
+          if (!/\b1\./.test(q)) {
+            const optsText = overlayItems.slice(0, 5).map((item, idx) => `${idx + 1}. ${item.label}${item.section ? ` (${item.section})` : ''}`).join(', ');
+            q = `${q} ${optsText}`;
+          }
+        }
+
+        if (clarifyTaskId) {
+          this._enterWaitingForClarification(clarifyTaskId, q, async (answerText, info) => {
+            if (this.elementSelector && typeof this.elementSelector.clearCandidateOverlay === 'function') {
+              this.elementSelector.clearCandidateOverlay();
+            }
+            const ans = String(answerText || '').trim();
+            const ordMap = { first: 0, '1st': 0, '1': 0, one: 0, second: 1, '2nd': 1, '2': 1, two: 1, third: 2, '3rd': 2, '3': 2, three: 2, fourth: 3, '4th': 3, '4': 3, four: 3, fifth: 4, '5th': 4, '5': 4, five: 4 };
+            const ordClean = ans.toLowerCase().replace(/\b(?:one|option|item|number)\b/g, ' ').replace(/\s+/g, ' ').trim();
+            const pickedOverlay = (overlayItems.length > 0 && ordMap[ordClean] !== undefined && overlayItems[ordMap[ordClean]])
+              ? overlayItems[ordMap[ordClean]]
+              : null;
+
+            const combined = (() => {
+              if (!ans) return raw;
+              if (pickedOverlay && pickedOverlay.label) {
+                return `Select ${pickedOverlay.label}${pickedOverlay.section ? ` under ${pickedOverlay.section}` : ''}`;
+              }
+              if (/\b(?:open|select|go\s+to|choose|click|show|read|summarize)\b/i.test(ans)) return ans;
+              if (plan.intent === 'navigate_section' || /\bsection\b/i.test(q)) return `Go to the ${ans} section`;
+              if (plan.intent === 'select_option' || /\b(?:option|which\s+one)\b/i.test(q)) return `Select ${ans}`;
+              return `${raw} ${ans}`;
+            })();
+            return this._processUserInputInner(combined, (info && info.inputSource) || 'voice', {
+              ...((info && info.meta) || {}),
+              internalResumeTaskId: clarifyTaskId
+            });
+          });
+        }
         this.setAssistantReply(q);
         if (window.SW_UI) {
           window.SW_UI.setState('confirm');
-          window.SW_UI.showCard({ type: 'answer', title: 'Need Clarification', text: q });
+          window.SW_UI.showCard({
+            type: overlayItems.length >= 2 ? 'choices' : 'answer',
+            title: 'Need Clarification',
+            text: q,
+            choices: overlayItems.length >= 2 ? overlayItems.slice(0, 5).map((it) => it.label) : undefined
+          });
         }
         if (this.reader) this.reader.readText(q);
-        return { status: 'needs_clarification', answer: q, plan };
+        return {
+          status: 'needs_clarification',
+          answer: q,
+          plan,
+          taskId: clarifyTaskId,
+          highlightedCount: overlayItems.length
+        };
       }
 
       const mem = this.memory;
       const selState = (mem && mem.state && mem.state.selectionState) || {};
-      const act = (Array.isArray(plan.actions) && plan.actions[0]) || { type: '' };
+      let act = (Array.isArray(plan.actions) && plan.actions[0]) || { type: '' };
       let wmInv = meta.wmInv || (this.worldModel ? this.worldModel.getTabInventory() : null);
+
+      // Plan normalization: compact model may label a scoped link pick ("Select Bank card under Cards",
+      // "Open Results under Examinations.") as select_option or navigate_section.
+      // When no form control or exact section heading matches <X> but a real page link does, route through open_link.
+      const scopedLinkCmdM = String(raw || '').trim().match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click|select|choose)\s+(?:the\s+)?(.+?)\s+(?:under|in|inside|from)\s+(?:the\s+)?(.+?)\.?$/i);
+      const isNavSecMislabel = (plan.intent === 'navigate_section' || act.type === 'find_section') &&
+        Boolean(scopedLinkCmdM) &&
+        !/\b(?:section|subsection|heading|scroll|jump)\b/i.test(String(raw || ''));
+      if ((plan.intent === 'select_option' || act.type === 'select_option' || isNavSecMislabel) && this.worldModel && wmInv &&
+          !/\b(?:option|radio|checkbox|toggle|switch|dropdown|setting)\b/i.test(String(raw || ''))) {
+        const wantLabel = String((scopedLinkCmdM && scopedLinkCmdM[1]) || act.target || plan.target || '').trim().toLowerCase();
+        const wantSec = String((scopedLinkCmdM && scopedLinkCmdM[2]) || plan.parent_section || (plan.context && plan.context.section) || act.section || '').trim().toLowerCase();
+        const isActualHeading = Boolean(
+          isNavSecMislabel &&
+          Array.isArray(wmInv.sections) &&
+          wmInv.sections.some((s) => String((s && s.label) || '').trim().toLowerCase() === wantLabel)
+        );
+        const optHit = (!isActualHeading && wantLabel && typeof this.worldModel.findOptionByHierarchy === 'function')
+          ? this.worldModel.findOptionByHierarchy(wantLabel, wantSec)
+          : null;
+        if (wantLabel && !isActualHeading && !optHit && Array.isArray(wmInv.links)) {
+          const linkHit = wmInv.links.find((l) => {
+            const lbl = String((l && l.label) || '').trim().toLowerCase();
+            if (!lbl || (lbl !== wantLabel && !lbl.includes(wantLabel))) return false;
+            if (!wantSec) return true;
+            const secHay = `${l.parentSection || ''} ${l.parentMenuLabel || ''} ${l.section || ''}`.toLowerCase();
+            return secHay.includes(wantSec);
+          });
+          if (linkHit) {
+            plan = {
+              ...plan,
+              intent: 'open_link',
+              target: linkHit.label || wantLabel,
+              target_id: linkHit.id || plan.target_id || null,
+              context: { ...(plan.context || {}), section: wantSec || (plan.context && plan.context.section) || plan.parent_section || '', candidate_id: linkHit.id || null },
+              actions: [{ ...act, type: 'open_link', target: linkHit.label || wantLabel, section: wantSec || act.section || '', candidate_id: linkHit.id || null }]
+            };
+            act = plan.actions[0];
+          }
+        }
+      }
       const targetCid = plan.target_id || act.candidate_id || (plan.context && plan.context.candidate_id) || null;
       let wmCheck = null;
       if (targetCid && this.worldModel && wmInv) {
@@ -2827,19 +3834,34 @@
           const explicitOrd = this._parseVideoOrdinal(raw);
           const reqOrd = explicitOrd || (curAct.value && /^\d+$/.test(curAct.value) ? Number(curAct.value) : null);
           let resolvedVidEntity = (!explicitOrd && isVideoEntity) ? wmCheck.entity : null;
+          let droppedBatch1Guess = false;
 
-          // Progressive feed expansion when ordinal exceeds Batch 1 OR current batch lacks a strong semantic match
+          // Progressive feed expansion when ordinal exceeds Batch 1 OR current batch lacks a strong semantic/topic match
           if (this.worldModel && wmInv && wmInv.discoveryMode === 'progressive_feed') {
+            const topicTokens = String(raw || '').toLowerCase()
+              .replace(/[^a-z0-9\s]/g, ' ')
+              .split(/\s+/)
+              .filter((t) => t.length >= 3 && !/^(?:find|open|play|watch|show|select|choose|pick|the|for|from|with|about|that|this|video|videos|channel|beginner|beginners|friendly|explaining|explain|how|learn|tutorial|guide|intro|introduction|short|shorter|long|longer|another|other|same)$/.test(t));
+            const entityMatchesTopic = (ent) => {
+              if (!ent || topicTokens.length === 0) return true;
+              const hay = `${ent.title || ''} ${ent.label || ''} ${ent.description || ''} ${ent.channel || ''}`.toLowerCase();
+              return topicTokens.some((tok) => hay.includes(tok));
+            };
+            if (resolvedVidEntity && !reqOrd && !isOtherChan && (wmInv.hasMoreFeedInDom || wmInv.batchCount < 2) && !entityMatchesTopic(resolvedVidEntity)) {
+              resolvedVidEntity = null;
+              droppedBatch1Guess = true;
+            }
             if (reqOrd && reqOrd > wmInv.videos.length) {
               const exp = await this.worldModel.discoverMoreCandidates({ targetOrdinal: reqOrd });
               wmInv = exp.inventory || wmInv;
             } else if (!resolvedVidEntity && !reqOrd) {
-              const topSem = (meta.semanticMatches || []).find((m) => m.entity && m.entity.type === 'video' && m.score >= 0.56);
+              const topSem = (meta.semanticMatches || []).find((m) => m.entity && m.entity.type === 'video' && m.score >= 0.56 && entityMatchesTopic(m.entity));
               if (!topSem && (wmInv.hasMoreFeedInDom || wmInv.batchCount < 2)) {
                 const exp = await this.worldModel.discoverMoreCandidates({});
                 wmInv = exp.inventory || wmInv;
                 const reSem = await this.worldModel.retrieveRelevantCandidatesAsync(raw, { topK: 4, inventory: wmInv, timeoutMs: 1200 }).catch(() => []);
-                const hit = reSem.find((m) => m.entity && m.entity.type === 'video' && m.score >= 0.45);
+                const hit = reSem.find((m) => m.entity && m.entity.type === 'video' && m.score >= 0.45 && entityMatchesTopic(m.entity))
+                  || reSem.find((m) => m.entity && m.entity.type === 'video' && m.score >= 0.45);
                 if (hit) resolvedVidEntity = hit.entity;
               } else if (topSem) {
                 resolvedVidEntity = topSem.entity;
@@ -2855,7 +3877,7 @@
           }
 
           const vRes = await this.navigator.selectYouTubeVideo({
-            candidateId: explicitOrd
+            candidateId: (explicitOrd || droppedBatch1Guess)
               ? ((resolvedVidEntity && (resolvedVidEntity.videoId || resolvedVidEntity.id)) || null)
               : ((resolvedVidEntity && (resolvedVidEntity.videoId || resolvedVidEntity.id)) || curAct.candidate_id || ctx.candidate_id || null),
             ordinal: reqOrd,
@@ -2896,7 +3918,17 @@
       // 5. Table lookup ("Find TCP entry in the table")
       if (plan.intent === 'find_in_table' || act.type === 'find_table') {
         if (this.navigator && typeof this.navigator.queryTables === 'function') {
-          const tRes = this.navigator.queryTables(plan.target || (plan.context && plan.context.table) || raw);
+          const rawTableQ = String(raw || '').replace(/\b(?:find|show|get|look\s*up|what\s+is|the|entry|row|in\s+the\s+table|in\s+table|table|from\s+table)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+          const planTableQ = String(act.query || plan.target || (plan.context && plan.context.table) || '').trim();
+          const useTableQ = (!planTableQ || /^T\d+$/i.test(planTableQ)) ? (rawTableQ || raw) : planTableQ;
+          let tRes = this.navigator.queryTables(useTableQ);
+          const normRawQ = rawTableQ.toLowerCase();
+          if (normRawQ && (!tRes || !tRes.found || !tRes.best || !String(tRes.best.row?.rowSummary || '').toLowerCase().includes(normRawQ))) {
+            const rawRes = this.navigator.queryTables(rawTableQ);
+            if (rawRes && rawRes.found && rawRes.best && String(rawRes.best.row?.rowSummary || '').toLowerCase().includes(normRawQ)) {
+              tRes = rawRes;
+            }
+          }
           if (tRes && tRes.found && tRes.best) {
             const r = tRes.best.row;
             const tbl = tRes.best.table;
@@ -2973,7 +4005,7 @@
           if (mem && navRes && navRes.section && typeof mem.setActiveUiFocus === 'function') {
             mem.setActiveUiFocus({ section: navRes.section });
           }
-          return { ...navRes, nluSource: meta.nluSource };
+          return { ...navRes, verified: Boolean(navRes && (navRes.verified || navRes.status !== 'not_found')), nluSource: meta.nluSource };
         }
       }
 
@@ -2995,12 +4027,25 @@
         }
 
         let candFromWm = (wmCheck && wmCheck.ok && wmCheck.entity && wmCheck.entity.type === 'link') ? wmCheck.entity : null;
-        const rawUnderM = String(raw || '').match(/\b(?:under|inside|below|in\s+the)\s+(?:the\s+)?(.+?)(?:\s+(?:section|heading|list|card))?$/i);
-        const explicitSec = rawUnderM ? rawUnderM[1].trim() : '';
+        const rawUnderM = String(raw || '').match(/\b(?:under|inside|below|in\s+the)\s+(?:the\s+)?(.+?)(?:\s+(?:section|heading|list|card|menu))?[.?!]*$/i);
+        const explicitSec = rawUnderM ? rawUnderM[1].replace(/[.?!]+$/, '').trim() : '';
         if (candFromWm && explicitSec && !/^(?:previous|last|earlier|this|current)$/i.test(explicitSec)) {
-          const candSec = String(candFromWm.parentSection || '').toLowerCase();
+          const candSec = `${candFromWm.parentSection || ''} ${candFromWm.parentMenuLabel || ''} ${candFromWm.section || ''}`.toLowerCase();
           if (!candSec.includes(explicitSec.toLowerCase())) {
             candFromWm = null; // Reject LLM ID guess that crossed an explicitly named section
+          }
+        }
+        if (!candFromWm && explicitSec && this.worldModel && wmInv && Array.isArray(wmInv.links)) {
+          const rawOpenUnderM = String(raw || '').trim().match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click|select|choose|visit|go\s+to)\s+(?:the\s+)?(.+?)\s+(?:under|inside|below|in\s+the)\s+/i);
+          const wantLbl = String((rawOpenUnderM && rawOpenUnderM[1]) || plan.target || act.target || '').replace(/[.?!]+$/, '').trim().toLowerCase();
+          const wantSecLow = explicitSec.toLowerCase();
+          if (wantLbl) {
+            candFromWm = wmInv.links.find((l) => {
+              const lbl = String((l && l.label) || '').trim().toLowerCase();
+              if (!lbl || (lbl !== wantLbl && !lbl.includes(wantLbl))) return false;
+              const secHay = `${l.parentSection || ''} ${l.parentMenuLabel || ''} ${l.section || ''}`.toLowerCase();
+              return secHay.includes(wantSecLow);
+            }) || null;
           }
         }
         if (this.worldModel) {
@@ -3044,8 +4089,9 @@
             }
           }
           if (mem && sectionScope && typeof mem.setActiveUiFocus === 'function') mem.setActiveUiFocus({ section: sectionScope });
-          const verifiedOutcome = Boolean(lRes && (lRes.verified || window.location.href !== urlBefore || window.scrollY !== scrollBefore || lRes.status === 'confirming'));
-          return { ...lRes, verified: verifiedOutcome, nluSource: meta.nluSource };
+          const isConfirming = Boolean(lRes && (lRes.awaiting === true || lRes.status === 'confirming'));
+          const verifiedOutcome = Boolean(lRes && (lRes.verified || isConfirming || window.location.href !== urlBefore || window.scrollY !== scrollBefore));
+          return { ...lRes, ...(isConfirming && !lRes.status ? { status: 'confirming' } : {}), verified: verifiedOutcome, nluSource: meta.nluSource };
         }
       }
 
@@ -3113,6 +4159,9 @@
           }
           if (selRes && selRes.verified) {
             if (mem && typeof mem.setActiveUiFocus === 'function') mem.setActiveUiFocus({ section: (optEnt && optEnt.parentSection) || plan.parent_section || '' });
+            if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+              this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 80 });
+            }
             this.setAssistantReply(selRes.message);
             if (window.SW_UI) {
               window.SW_UI.setState('speaking');
@@ -3123,10 +4172,33 @@
         }
       }
 
+      // 9b. Form text/email/number input filling (never fills/logs sensitive fields)
+      if ((plan.intent === 'fill_input' || act.type === 'fill') && this.forms && typeof this.forms.handleDictateIntent === 'function') {
+        const fillRes = await this.forms.handleDictateIntent({
+          action: 'fill',
+          target: act.target || plan.target || '',
+          value: act.value || ''
+        }, raw);
+        if (fillRes && (fillRes.ok || fillRes.verified || fillRes.status === 'sensitive_skipped')) {
+          if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+            this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 80 });
+          }
+          return { ...fillRes, verified: fillRes.verified !== false && fillRes.ok !== false, nluSource: meta.nluSource };
+        }
+      }
+
+      // 9c. Form submission with required validation & mandatory user confirmation gate
+      if ((plan.intent === 'submit_form' || act.type === 'submit' || /\b(?:submit|complete\s+(?:the\s+)?(?:application|form)|send\s+application)\b/i.test(raw)) &&
+          this.forms && typeof this.forms.reviewAndActOnStepOrSubmit === 'function') {
+        const subRes = this.forms.reviewAndActOnStepOrSubmit('submit');
+        return { ...(subRes || { status: 'confirming' }), verified: true, nluSource: meta.nluSource };
+      }
+
       // 10. Search
       if (plan.intent === 'search' || act.type === 'search') {
         if (this.navigator) {
-          const sRes = await this.navigator.executeSearch(act.query || plan.target || raw, {
+          const effectiveSearchQ = (plan.context && plan.context.query) || act.query || plan.target || (meta.classified && meta.classified.args && meta.classified.args.query) || raw;
+          const sRes = await this.navigator.executeSearch(effectiveSearchQ, {
             scopeHint: (plan.context && plan.context.section) || act.section || '',
             rawCommand: raw
           });
@@ -3134,13 +4206,16 @@
         }
       }
 
-      // 11. Page / Question / Conceptual Learning explanation via existing grounded explainer
+      // 11. Page / Question / Conceptual Learning explanation via existing grounded explainer (Gemini only if specialist)
       if (plan.intent === 'explain' || plan.intent === 'summarize' || plan.intent === 'ask_question' || plan.intent === 'learn_topic') {
         const semSec = (wmCheck && wmCheck.ok && wmCheck.entity && wmCheck.entity.parentSection) || (plan.context && plan.context.section) || '';
+        const allowSpecialist = Boolean(plan.requires_gemini_specialist || meta.allowGeminiSpecialist || plan.intent === 'summarize');
         const res = await this.explainPage({
           mode: (plan.intent === 'ask_question' || plan.intent === 'learn_topic') ? 'qa' : (semSec ? 'section' : 'summary'),
           query: (resolvedContext && resolvedContext.resolvedText) || act.query || raw,
           target: semSec,
+          specialist: allowSpecialist,
+          explicitGemini: allowSpecialist,
           lang: this.resolveReplyLang(meta.classified)
         });
         return { ...(res || {}), nluSource: meta.nluSource };

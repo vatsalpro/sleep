@@ -62,19 +62,22 @@
   ];
 
   const NO_PATTERNS = [
-    'no', 'nope', 'nah', 'cancel', 'abort', 'decline', 'reject', 'deny',
-    'stop', 'stop it', 'never mind', "don't", 'do not',
+    'no', 'nope', 'nah', 'no need', 'leave it', 'forget it', 'nevermind', 'never mind',
+    'cancel', 'abort', 'decline', 'reject', 'deny',
+    'stop', 'stop it', "don't", 'do not',
     'nahi', 'nhi', 'nahin', 'mat karo', 'rehne do', 'ruko', 'band karo',
     'नहीं', 'मत करो', 'रहने दो', 'नहीं रहने दो', 'नहीं मत करो', 'रुको', 'रोको', 'बंद करो', 'कैंसल', 'रद्द करो'
   ];
 
   const NO_PREFIX_WORDS = [
-    'no', 'nope', 'nah', 'nahi', 'nhi', 'nahin', 'mat karo', 'rehne do',
+    'no', 'nope', 'nah', 'no need', 'leave it', 'forget it', 'nevermind', 'never mind',
+    'nahi', 'nhi', 'nahin', 'mat karo', 'rehne do',
     'cancel', 'abort', 'ruko', 'stop', "don't", 'do not',
     'नहीं', 'मत करो', 'रहने दो', 'रुको', 'रोको', 'कैंसल', 'रद्द करो', 'रद्द', 'बंद करो'
   ];
 
   const NO_CONTAINED_PHRASES = [
+    'no need', 'leave it', 'forget it', 'nevermind', 'never mind',
     'nahi', 'mat karo', 'rehne do', 'cancel',
     'नहीं', 'मत करो', 'रहने दो', 'रद्द करो'
   ];
@@ -194,6 +197,7 @@
         message = '',
         summary = [],
         options = null,
+        taskId = '',
         timeoutMs = this.defaultTimeoutMs,
         onConfirm = null,
         onCancel = null
@@ -214,6 +218,7 @@
 
       this.pending = {
         id,
+        taskId: String(taskId || ''),
         risk,
         confidence,
         ambiguous,

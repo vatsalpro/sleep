@@ -731,6 +731,22 @@
         };
       }
 
+      const digestTokens = (digest && digest.stats && digest.stats.totalTextTokens) || Math.ceil(String(digestPrompt || '').length / 4);
+      const qStr = String(opts.query || '').trim();
+      const isSpecialistTask = Boolean(
+        opts.specialist === true ||
+        opts.explicitGemini === true ||
+        opts.isVideoExplain === true ||
+        opts.isDocumentAnalysis === true ||
+        opts.mode === 'summary' ||
+        opts.mode === 'summarize' ||
+        opts.mode === 'action_steps' ||
+        responseStyle === 'detailed' ||
+        digestTokens > 1200 ||
+        qStr.length > 180 ||
+        /\b(?:summarize|summary|analyze|analysis|compare|comparison|explain in detail|deep dive)\b/i.test(qStr)
+      );
+
       try {
         const response = await this._sendToBackgroundCascade({
           urlClean: cleanUrl,
@@ -743,6 +759,11 @@
           target: opts.target,
           query: opts.query,
           lang,
+          specialist: isSpecialistTask,
+          geminiSpecialist: isSpecialistTask,
+          skipGemini: !isSpecialistTask,
+          isComplexDocument: digestTokens > 1200,
+          isVideoExplain: Boolean(opts.isVideoExplain),
           digestPrompt,
           chunksPrompt,
           pageText: digestPrompt,

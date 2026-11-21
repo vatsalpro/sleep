@@ -794,8 +794,8 @@
         return base('DICTATE', { specialOp: 'slider', field: sliderMatch[1].replace(/\s+(?:slider|range)$/i, '').trim(), value: sliderMatch[2].trim() }, 0.91, 'dictate_slider');
       }
 
-      // Switch / select tab: "switch to security tab", "select security tab", "go to billing tab"
-      const tabSwitchMatch = caseCleanSelection.match(/^(?:switch\s+to|open|go\s+to|select|choose)\s+(?:the\s+)?(.+?)\s+tab$/i);
+      // Switch / select tab: "switch to security tab", "select security tab", "go to billing tab", "click the analytics tab"
+      const tabSwitchMatch = caseCleanSelection.match(/^(?:switch\s+to|open|go\s+to|select|choose|click(?:\s+on)?|press|tap|activate)\s+(?:the\s+)?(.+?)\s+tab$/i);
       if (tabSwitchMatch && tabSwitchMatch[1]) {
         return base('NAVIGATE', {
           action: 'select',
@@ -967,7 +967,7 @@
             return base('NAVIGATE', { action: 'click', target: (parsedLink && parsedLink.target) || target, linkIntent: parsedLink || null }, 0.90, 'navigate_click_hi');
           }
         }
-        const enClickMatch = text.match(/^(?:open|click|press|tap|select)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+(?:link|button|btn))?$/i);
+        const enClickMatch = text.match(/^(?:open|click|press|tap|select)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+(?:link|button|btn|tab))?$/i);
         if (enClickMatch && enClickMatch[1]) {
           const target = enClickMatch[1].trim();
           if (!['this page', 'page', 'menu'].includes(target)) {

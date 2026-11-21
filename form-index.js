@@ -44,12 +44,22 @@
     return (el && typeof el.getAttribute === 'function' ? el.getAttribute(name) : '') || '';
   }
 
+  function isSleepwalkerNode(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const id = node.id || '';
+    if (id === 'sleepwalker-host' || id === 'sleepwalker-ui-host' || id === 'sleepwalker-candidate-overlay-root') {
+      return true;
+    }
+    return getAttr(node, 'data-sleepwalker-ui') === '1';
+  }
+
   function isInsideSleepwalker(el) {
     if (!el) return false;
-    if (typeof el.closest === 'function' && el.closest('#sleepwalker-host')) return true;
+    if (isSleepwalkerNode(el)) return true;
+    if (typeof el.closest === 'function' && el.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"]')) return true;
     let cur = el;
     while (cur) {
-      if (cur.id === 'sleepwalker-host') return true;
+      if (isSleepwalkerNode(cur)) return true;
       cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
     }
     return false;
@@ -58,7 +68,7 @@
   function hasHiddenAncestor(el) {
     let cur = el;
     while (cur && cur.nodeType === 1) {
-      if (cur.id === 'sleepwalker-host') return true;
+      if (isSleepwalkerNode(cur)) return true;
       if (cur.hidden || getAttr(cur, 'hidden') !== '' && cur.hasAttribute && cur.hasAttribute('hidden')) return true;
       if (getAttr(cur, 'aria-hidden') === 'true') return true;
       const win = el.ownerDocument && el.ownerDocument.defaultView ? el.ownerDocument.defaultView : (typeof window !== 'undefined' ? window : null);
@@ -353,7 +363,7 @@
     const all = typeof entryDoc.querySelectorAll === 'function' ? entryDoc.querySelectorAll('*') : [];
     for (let i = 0; i < all.length; i += 1) {
       const node = all[i];
-      if (!node || node.id === 'sleepwalker-host' || node.id === 'sleepwalker-ui-host') continue;
+      if (!node || isSleepwalkerNode(node)) continue;
       if (node.shadowRoot && !seen.has(node.shadowRoot)) {
         collectRoots(node.shadowRoot, out, seen, meta, 'shadow_dom');
       }

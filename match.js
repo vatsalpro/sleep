@@ -11,7 +11,8 @@
 
   const NOISE_WORDS = new Set([
     'click', 'open', 'press', 'tap', 'select', 'go', 'take', 'find', 'locate',
-    'link', 'links', 'button', 'btn', 'please', 'can', 'you', 'want', 'more', 'about',
+    'link', 'links', 'button', 'btn', 'tab', 'tabs', 'menu', 'menuitem', 'item', 'option',
+    'please', 'can', 'you', 'want', 'more', 'about',
     'tell', 'me', 'learn', 'here', 'it',
     'kholo', 'kholna', 'dabao', 'karo', 'jao', 'chalo', 'dhundo', 'kahan', 'hai', 'dikhao',
     'batao', 'aur', 'ke', 'baare', 'mein', 'jaankari', 'chahiye',
@@ -24,7 +25,8 @@
 
   // Used for label normalization (keep content words intact, strip UI wrapper articles/particles).
   const LABEL_STRIP_WORDS = new Set([
-    'click', 'open', 'link', 'button', 'btn', 'the', 'a', 'an', 'to', 'on', 'of', 'in', 'us',
+    'click', 'open', 'link', 'button', 'btn', 'tab', 'tabs', 'menu', 'menuitem', 'item', 'option',
+    'the', 'a', 'an', 'to', 'on', 'of', 'in', 'us',
     'kholo', 'kholna', 'dabao', 'karo', 'par', 'ko', 'ka', 'ki', 'wala', 'wali',
     'लिंक', 'बटन', 'क्लिक', 'खोलो', 'दबाओ', 'करो', 'पर', 'को', 'का', 'की'
   ]);

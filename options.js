@@ -302,6 +302,104 @@
     refreshPersonalInspector();
     if (byId('opt-save')) byId('opt-save').addEventListener('click', refreshPersonalInspector);
     if (byId('opt-load-diag')) byId('opt-load-diag').addEventListener('click', refreshPersonalInspector);
+
+    const mutateSkillsStorage = (mutator) => {
+      chrome.storage.local.get(['sleepwalker_persistent_memory_v1'], (d) => {
+        const mem = (d && d.sleepwalker_persistent_memory_v1) || {};
+        const skills = Array.isArray(mem.learnedSkills) ? mem.learnedSkills.slice() : [];
+        const nextSkills = mutator(skills);
+        const nextMem = { ...mem, learnedSkills: nextSkills };
+        chrome.storage.local.set({ sleepwalker_persistent_memory_v1: nextMem }, () => renderSkillsList());
+      });
+    };
+
+    const renderSkillsList = () => {
+      const box = byId('opt-skills-list');
+      if (!box) return;
+      const filter = String((byId('opt-skills-search') && byId('opt-skills-search').value) || '').trim().toLowerCase();
+      chrome.storage.local.get(['sleepwalker_persistent_memory_v1'], (d) => {
+        const mem = (d && d.sleepwalker_persistent_memory_v1) || {};
+        const all = Array.isArray(mem.learnedSkills) ? mem.learnedSkills : [];
+        const matched = all.filter((sk) => {
+          if (!sk) return false;
+          if (!filter) return true;
+          return `${sk.name || ''} ${sk.instruction || ''} ${sk.website || ''} ${(sk.variations || []).join(' ')}`.toLowerCase().includes(filter);
+        });
+        box.textContent = '';
+        if (matched.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'note';
+          empty.textContent = all.length === 0
+            ? 'No learned skills yet. When Sleepwalker offers "Teach Sleepwalker" after a failed action, demonstrate the steps to save a skill here.'
+            : 'No learned skills match your search filter.';
+          box.appendChild(empty);
+          return;
+        }
+        matched.forEach((sk) => {
+          const card = document.createElement('div');
+          card.style.cssText = 'padding:12px 14px;border-radius:14px;background:rgba(255,255,255,0.78);border:1px solid rgba(27,23,20,0.14);display:flex;flex-direction:column;gap:6px;';
+          card.dataset.skillId = sk.id;
+
+          const head = document.createElement('div');
+          head.style.cssText = 'display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;';
+          const title = document.createElement('strong');
+          title.textContent = `${sk.name || sk.instruction} (v${sk.version || 1})`;
+          const badge = document.createElement('span');
+          badge.className = 'note';
+          badge.style.margin = '0';
+          badge.textContent = `${sk.website || 'local'} · ${(sk.steps || []).length} step(s) · ${sk.enabled === false ? 'Disabled' : 'Auto-enabled'}`;
+          head.append(title, badge);
+
+          const meta = document.createElement('div');
+          meta.className = 'note';
+          meta.style.margin = '0';
+          const lastOk = sk.lastSuccessAt ? new Date(sk.lastSuccessAt).toLocaleString() : 'Never';
+          meta.textContent = `Instruction: "${sk.instruction}" · Last verified: ${lastOk}`;
+
+          const actions = document.createElement('div');
+          actions.className = 'row';
+          actions.style.marginTop = '4px';
+
+          const renameBtn = document.createElement('button');
+          renameBtn.type = 'button';
+          renameBtn.dataset.action = 'rename';
+          renameBtn.textContent = 'Rename';
+          renameBtn.addEventListener('click', () => {
+            const proposed = prompt('Rename learned skill:', sk.name || sk.instruction);
+            if (proposed && proposed.trim()) {
+              mutateSkillsStorage((list) => list.map((it) => (it && it.id === sk.id ? { ...it, name: proposed.trim().slice(0, 90), updatedAt: Date.now() } : it)));
+              setStatus('Skill renamed.');
+            }
+          });
+
+          const toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.dataset.action = 'toggle';
+          toggleBtn.textContent = sk.enabled === false ? 'Enable Auto-Use' : 'Disable Auto-Use';
+          toggleBtn.addEventListener('click', () => {
+            const nextEnabled = sk.enabled === false;
+            mutateSkillsStorage((list) => list.map((it) => (it && it.id === sk.id ? { ...it, enabled: nextEnabled, updatedAt: Date.now() } : it)));
+            setStatus(nextEnabled ? 'Skill enabled.' : 'Skill disabled.');
+          });
+
+          const delBtn = document.createElement('button');
+          delBtn.type = 'button';
+          delBtn.dataset.action = 'delete';
+          delBtn.textContent = 'Delete';
+          delBtn.addEventListener('click', () => {
+            mutateSkillsStorage((list) => list.filter((it) => it && it.id !== sk.id));
+            setStatus('Skill deleted.');
+          });
+
+          actions.append(renameBtn, toggleBtn, delBtn);
+          card.append(head, meta, actions);
+          box.appendChild(card);
+        });
+      });
+    };
+    renderSkillsList();
+    if (byId('opt-skills-search')) byId('opt-skills-search').addEventListener('input', renderSkillsList);
+    if (byId('opt-skills-refresh')) byId('opt-skills-refresh').addEventListener('click', renderSkillsList);
     byId('opt-clear-profile').addEventListener('click', () => {
       ['prof-name', 'prof-email', 'prof-phone', 'prof-city', 'prof-state', 'prof-pin'].forEach((id) => { byId(id).value = ''; });
       chrome.storage.local.set({ sleepwalker_profile_optin: false, sleepwalker_local_profile: {} }, () => {

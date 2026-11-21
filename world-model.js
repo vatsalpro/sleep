@@ -153,9 +153,13 @@
       this.controller = controller || null;
       this.tabInventories = new Map(); // tabId -> PageWorldInventory
       this.pageEmbedCache = new Map(); // `${urlClean}::${contentHash}` -> vector (strictly separate from conversation memory)
+      this.retrievalCache = new Map(); // `${tabId}::${invVer}::${navId}::${mode}::${q}` -> topK candidates while DOM stays clean
       this._mutationObserver = null;
       this._observedDoc = null;
       this._mutationTimer = null;
+      this._proactiveScanTimer = null;
+      this._scanning = false;
+      this.onScanStateChange = typeof options.onScanStateChange === 'function' ? options.onScanStateChange : null;
       // Candidate identities are scoped to this content-script lifetime and advance
       // independently per tab. A random epoch prevents collisions after reload or
       // content-script recreation (including while the MV3 worker is suspended).
@@ -251,12 +255,59 @@
       const urlClean = this._getUrlClean(doc);
       const navigationUrl = this._getNavigationUrl(doc);
       const existing = this.tabInventories.get(tabId);
-      if (existing && !options.force && existing.urlClean === urlClean && existing.navigationUrl === navigationUrl && (Date.now() - existing.updatedAt) < 1200) {
+      if (existing && !options.force && !existing._staleSince && existing.urlClean === urlClean && existing.navigationUrl === navigationUrl && (Date.now() - existing.updatedAt) < 15000) {
+        this._attachIncrementalObserver(doc, tabId);
         return existing;
       }
-      const inv = await this.buildPageWorldModel(doc, { ...options, tabId });
-      this._attachIncrementalObserver(doc, tabId);
-      return inv;
+      this._emitScanState(true, options.scanLabel || 'Mapping page...');
+      try {
+        const inv = await this.buildPageWorldModel(doc, { ...options, tabId });
+        this._attachIncrementalObserver(doc, tabId);
+        return inv;
+      } finally {
+        this._emitScanState(false, '');
+      }
+    }
+
+    _emitScanState(active, label = '') {
+      this._scanning = Boolean(active);
+      if (typeof this.onScanStateChange === 'function') {
+        try { this.onScanStateChange(this._scanning, label); } catch (_e) {}
+      }
+    }
+
+    /**
+     * Proactive background scan: runs asynchronously without blocking browsing,
+     * keeping the hierarchical page map fresh after page load, SPA nav, and DOM mutations.
+     */
+    scheduleProactiveScan(doc = this._getDoc(), options = {}) {
+      if (this._isPrivacyBlocked() || !doc) return;
+      if (this._proactiveScanTimer) {
+        clearTimeout(this._proactiveScanTimer);
+        this._proactiveScanTimer = null;
+      }
+      const runScan = () => {
+        this._proactiveScanTimer = null;
+        if (this._isPrivacyBlocked()) return;
+        const tabId = String(options.tabId || this._getTabId());
+        const curInv = this.tabInventories.get(tabId);
+        if (curInv && options.incremental) {
+          this._emitScanState(true, 'Updating page map...');
+          this.buildPageWorldModel(doc, { tabId, incremental: true, prevVersion: curInv.inventoryVersion })
+            .catch(() => null)
+            .finally(() => this._emitScanState(false, ''));
+        } else {
+          this.observeTab(doc, { force: Boolean(options.force), scanLabel: options.scanLabel || 'Mapping page...' }).catch(() => null);
+        }
+      };
+      const ric = root && typeof root.requestIdleCallback === 'function' ? root.requestIdleCallback : null;
+      if (ric && !options.immediate) {
+        this._proactiveScanTimer = setTimeout(() => {
+          try { ric(runScan, { timeout: 450 }); } catch (_e) { runScan(); }
+        }, Number(options.delayMs) >= 0 ? Number(options.delayMs) : 60);
+      } else {
+        this._proactiveScanTimer = setTimeout(runScan, Number(options.delayMs) >= 0 ? Number(options.delayMs) : 85);
+      }
     }
 
     _attachIncrementalObserver(doc, tabId) {
@@ -271,7 +322,13 @@
         let relevant = false;
         for (let i = 0; i < mutations.length; i++) {
           const t = mutations[i].target;
-          if (!t || (t.nodeType === 1 && (t.id === 'sleepwalker-host' || t.id === 'sleepwalker-ui-host' || (t.closest && t.closest('#sleepwalker-host, #sleepwalker-ui-host'))))) {
+          if (!t || (t.nodeType === 1 && (
+            t.id === 'sleepwalker-host' ||
+            t.id === 'sleepwalker-ui-host' ||
+            t.id === 'sleepwalker-candidate-overlay-root' ||
+            t.getAttribute?.('data-sleepwalker-ui') === '1' ||
+            (t.closest && t.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"]'))
+          ))) {
             continue;
           }
           relevant = true;
@@ -283,10 +340,12 @@
         if (this._mutationTimer) clearTimeout(this._mutationTimer);
         this._mutationTimer = setTimeout(() => {
           this._mutationTimer = null;
-          if (curInv && curInv.discoveryMode === DISCOVERY_MODES.DYNAMIC_APP) {
-            this.buildPageWorldModel(doc, { tabId, incremental: true, prevVersion: curInv.inventoryVersion }).catch(() => {});
-          }
-        }, 350);
+          if (this._isPrivacyBlocked()) return;
+          this._emitScanState(true, 'Updating page map...');
+          this.buildPageWorldModel(doc, { tabId, incremental: true, prevVersion: curInv ? curInv.inventoryVersion : 0 })
+            .catch(() => null)
+            .finally(() => this._emitScanState(false, ''));
+        }, 320);
       });
       this._mutationObserver.observe(targetRoot, {
         childList: true,
@@ -297,6 +356,10 @@
     }
 
     disconnectObserver() {
+      if (this._proactiveScanTimer) {
+        clearTimeout(this._proactiveScanTimer);
+        this._proactiveScanTimer = null;
+      }
       if (this._mutationTimer) {
         clearTimeout(this._mutationTimer);
         this._mutationTimer = null;
@@ -420,12 +483,15 @@
         if (t.element && typeof t.element.closest === 'function' && t.element.closest('.video-card, [data-video-id], ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer')) {
           continue;
         }
+        // Skip non-href tabs/menuitems from links so they remain distinct controls/options instead of fake links
+        if ((t.role === 'tab' || t.role === 'menuitem') && !t.href) continue;
         // Do not collapse distinct buttons or skip non-href buttons; distinguish buttons vs links cleanly
         const isButton = t.role === 'button' && !t.href;
         const id = isButton ? padId('B', buttons.length + 1) : padId('L', links.length + 1);
         const secTitle = t.contextHeading || t.section || '';
         const secId = resolveSectionId(secTitle, t.sectionPath);
         const spatialAria = this._inspectElementSpatialAndAria(t.element, doc);
+        const navMeta = this._classifyNavigationContext(t.element, t.area || 'page');
         const item = {
           id,
           type: isButton ? 'button' : 'link',
@@ -441,6 +507,10 @@
           destinationUrl: t.href || '',
           domain: t.domain || '',
           category: t.category || (t.flags && t.flags.category) || 'article',
+          navCategory: navMeta.navCategory,
+          parentMenuLabel: navMeta.parentMenuLabel || t.listContext || '',
+          expandable: Boolean(spatialAria.hasPopup || spatialAria.ariaExpanded !== null || navMeta.nestedMenu),
+          clickableCard: navMeta.clickableCard,
           official: Boolean((t.flags && t.flags.official) || t.official),
           external: Boolean(t.flags && t.flags.external),
           visible: spatialAria.visibilityState !== 'hidden' && (t.flags ? t.flags.inViewport !== false : true),
@@ -488,7 +558,9 @@
 
       for (let i = 0; i < rawCands.length; i++) {
         const c = rawCands[i];
-        if (!c || c.sensitive) continue;
+        const rawElType = c && c.element ? String(getAttr(c.element, 'type') || c.element.type || '').toLowerCase() : '';
+        const isPasswordCtrl = Boolean(c && (rawElType === 'password' || /\bpassword\b/i.test(c.label || '')));
+        if (!c || (c.sensitive && !isPasswordCtrl)) continue;
         if (c.elementType === 'button') {
           // Register non-duplicate buttons cleanly into B### if not already indexed above
           const alreadyB = buttons.some((b) => b.element && c.element && b.element === c.element);
@@ -496,6 +568,7 @@
             const bid = padId('B', buttons.length + 1);
             const secId = resolveSectionId(c.section || c.nearbyHeading, []);
             const bSpatial = this._inspectElementSpatialAndAria(c.element, doc);
+            const bNav = this._classifyNavigationContext(c.element, 'page');
             const bItem = {
               id: bid,
               type: 'button',
@@ -507,6 +580,8 @@
               parentSectionId: secId,
               ancestorHeadings: [c.nearbyHeading, c.section].filter(Boolean),
               nearbyText: c.parentContainer || '',
+              navCategory: bNav.navCategory,
+              expandable: Boolean(bSpatial.hasPopup || bSpatial.ariaExpanded !== null),
               visible: bSpatial.visibilityState !== 'hidden' && c.visible !== false,
               visibilityState: bSpatial.visibilityState,
               inViewport: bSpatial.inViewport,
@@ -533,7 +608,7 @@
         }
 
         const ctrlId = padId('C', controlsList.length + 1);
-        let secTitle = c.section || c.nearbyHeading || c.formContext || '';
+        let secTitle = c.parentContainer || c.section || c.nearbyHeading || c.formContext || '';
         if ((!secTitle || secTitle.toLowerCase() === String(c.label || '').toLowerCase()) && c.element && typeof c.element.closest === 'function') {
           const outerRegion = c.element.closest('section, article, aside, [role="region"]');
           if (outerRegion && typeof outerRegion.querySelector === 'function') {
@@ -546,10 +621,36 @@
         }
         const secId = resolveSectionId(secTitle, []);
         const cSpatial = this._inspectElementSpatialAndAria(c.element, doc);
+        const tagLower = String(c.tag || (c.element && c.element.tagName) || '').toLowerCase();
+        const expectedInputType = isPasswordCtrl
+          ? 'password'
+          : (tagLower === 'textarea' ? 'textarea' : (tagLower === 'select' ? 'select' : (rawElType || c.elementType || 'text')));
+        const isReq = Boolean(c.element && (c.element.required || getAttr(c.element, 'aria-required') === 'true'));
+        const valParts = [];
+        if (c.element) {
+          const pat = getAttr(c.element, 'pattern');
+          const minAttr = getAttr(c.element, 'min');
+          const maxAttr = getAttr(c.element, 'max');
+          const accAttr = getAttr(c.element, 'accept');
+          if (pat) valParts.push(`pattern:${pat.slice(0, 24)}`);
+          if (minAttr) valParts.push(`min:${minAttr}`);
+          if (maxAttr) valParts.push(`max:${maxAttr}`);
+          if (accAttr) valParts.push(`accept:${accAttr.slice(0, 24)}`);
+        }
+        const prevSelectCtrl = (['select', 'custom_dropdown', 'searchable_dropdown'].includes(c.elementType))
+          ? [...controlsList].reverse().find((pc) => pc.formKey === (c.formKey || 'page') && ['select', 'custom_dropdown', 'searchable_dropdown'].includes(pc.elementType))
+          : null;
+        const explicitDep = c.element ? cleanText(getAttr(c.element, 'data-depends-on') || getAttr(c.element, 'data-parent-field')) : '';
+        const dependentOf = explicitDep || ((prevSelectCtrl && /\b(?:state|province|city|district|course|department|university)\b/i.test(c.label || '')) ? prevSelectCtrl.label : '');
         const ctrlNode = {
           id: ctrlId,
           type: 'control',
           elementType: c.elementType,
+          expectedInputType,
+          required: isReq,
+          validationHint: valParts.join(' '),
+          dependentOf,
+          sensitive: isPasswordCtrl,
           role: cSpatial.role || c.elementType,
           label: c.label,
           accessibleName: c.accessibleName || cSpatial.accessibleName || c.label,
@@ -557,7 +658,8 @@
           parentSectionId: secId,
           ancestorHeadings: Array.from(new Set([secTitle, c.nearbyHeading, c.section, c.formContext].filter(Boolean))),
           formKey: c.formKey || 'page',
-          currentValue: c.currentValue || '',
+          currentValue: isPasswordCtrl ? '' : (c.currentValue || ''),
+          availableValues: (!isPasswordCtrl && Array.isArray(c.options)) ? c.options.slice(0, 12).map((o) => o && o.label).filter(Boolean) : [],
           enabled: !c.disabled,
           visible: cSpatial.visibilityState !== 'hidden' && c.visible !== false,
           visibilityState: cSpatial.visibilityState,
@@ -634,7 +736,7 @@
             ...ctrlNode,
             id: oid,
             type: 'option',
-            parentGroupLabel: c.section || c.label,
+            parentGroupLabel: cleanText(c.parentContainer || c.section || c.nearbyHeading || c.label || ''),
             parentControlId: ctrlId,
             optionDescriptor: null,
             controlCandidate: c
@@ -757,6 +859,7 @@
       this._navigationGenerations.set(tabId, nextNavigationGeneration);
       const navigationIdentity = `${this._navigationEpoch}:${tabId}:${nextNavigationGeneration}`;
 
+      const mediaImages = this._collectVisibleImages(doc);
       const inventory = {
         tabId,
         urlClean,
@@ -783,12 +886,14 @@
         articles,
         tables,
         videos,
+        images: mediaImages,
         iframes: iframesInfo,
         searchFields: structured.searchFields || [],
         watchVideo: watchVideo || null,
         fullSafeText: structured.fullSafeText || '',
         pageTextHash: structured.pageTextHash || hashQuick(urlClean + sectionNodes.length)
       };
+      inventory.hierarchicalMap = this.getHierarchicalMapSummary(inventory);
 
       // Every entity reference carries the page generation where it was indexed.
       // Routine re-observation of the same live DOM preserves that identity.
@@ -799,6 +904,89 @@
       this.tabInventories.set(tabId, inventory);
       this._syncTabInventorySummaryToMemory(inventory);
       return inventory;
+    }
+
+    _classifyNavigationContext(el, fallbackArea = 'page') {
+      const out = { navCategory: fallbackArea === 'nav' ? 'main_nav' : 'content', parentMenuLabel: '', nestedMenu: false, clickableCard: false };
+      if (!el || typeof el.closest !== 'function') return out;
+      const role = getAttr(el, 'role').toLowerCase();
+      if (role === 'tab' || el.closest('[role="tablist"], .tabs, [data-tabs]')) {
+        out.navCategory = 'tabs';
+      } else if (el.closest('nav[aria-label*="breadcrumb" i], .breadcrumb, .breadcrumbs, [role="navigation"][aria-label*="breadcrumb" i]')) {
+        out.navCategory = 'breadcrumb';
+      } else if (el.closest('aside, [role="complementary"], .sidebar, ytd-guide-renderer, ytd-mini-guide-renderer')) {
+        out.navCategory = 'sidebar';
+      } else if (el.closest('[role="menu"], ul ul, .dropdown-menu, .submenu')) {
+        out.navCategory = 'nested_menu';
+        out.nestedMenu = true;
+      } else if (el.closest('footer, [role="contentinfo"]')) {
+        out.navCategory = 'footer_nav';
+      } else if (el.closest('nav, header, [role="navigation"]')) {
+        out.navCategory = 'main_nav';
+      }
+      if (el.closest('[role="menu"], li')) {
+        const parentLi = el.closest('ul')?.closest('li');
+        const parentTrigger = parentLi && parentLi.querySelector ? parentLi.querySelector(':scope > a, :scope > button, :scope > [role="menuitem"]') : null;
+        if (parentTrigger && parentTrigger !== el) {
+          out.parentMenuLabel = cleanText(parentTrigger.innerText || parentTrigger.textContent || getAttr(parentTrigger, 'aria-label')).slice(0, 60);
+          out.nestedMenu = true;
+        }
+      }
+      if (el.closest('.card, [data-card], article, [role="article"]') && (el.tagName === 'DIV' || el.tagName === 'ARTICLE' || el.tagName === 'A')) {
+        out.clickableCard = Boolean(el.classList && /card/i.test(el.className || ''));
+      }
+      return out;
+    }
+
+    _collectVisibleImages(doc) {
+      const out = [];
+      if (!doc || typeof doc.querySelectorAll !== 'function') return out;
+      const imgs = doc.querySelectorAll('img[alt]');
+      for (let i = 0; i < imgs.length && out.length < 15; i++) {
+        const img = imgs[i];
+        const alt = cleanText(getAttr(img, 'alt')).slice(0, 100);
+        if (!alt || alt.length < 3 || SENSITIVE_TEXT_RE.test(alt)) continue;
+        if (img.closest && img.closest('#sleepwalker-ui-host, #sleepwalker-host')) continue;
+        out.push({ id: `IMG${out.length + 1}`, alt });
+      }
+      return out;
+    }
+
+    getHierarchicalMapSummary(inv = null) {
+      const targetInv = inv || this.getTabInventory();
+      if (!targetInv) return null;
+      const navGroups = {};
+      for (const l of [...(targetInv.links || []), ...(targetInv.buttons || [])]) {
+        const k = l.navCategory || 'content';
+        if (!navGroups[k]) navGroups[k] = [];
+        if (navGroups[k].length < 25) {
+          navGroups[k].push({ id: l.id, label: l.label, parentMenu: l.parentMenuLabel || l.parentSection || '', expandable: Boolean(l.expandable) });
+        }
+      }
+      const forms = [];
+      for (const c of (targetInv.controls || [])) {
+        forms.push({
+          id: c.id,
+          label: c.label,
+          expectedInputType: c.expectedInputType || c.elementType,
+          required: Boolean(c.required),
+          dependentOf: c.dependentOf || '',
+          currentValue: c.sensitive ? '' : (c.currentValue || ''),
+          availableValuesCount: Array.isArray(c.availableValues) ? c.availableValues.length : 0,
+          disabled: !c.enabled
+        });
+      }
+      return {
+        urlClean: targetInv.urlClean,
+        pageType: targetInv.pageType,
+        inventoryVersion: targetInv.inventoryVersion,
+        navigation: navGroups,
+        sections: (targetInv.sections || []).map((s) => ({ id: s.id, label: s.label, level: s.level, parentSection: s.parentSection })),
+        forms,
+        tablesCount: (targetInv.tables || []).length,
+        videosCount: (targetInv.videos || []).length,
+        imagesCount: (targetInv.images || []).length
+      };
     }
 
     /**
@@ -988,7 +1176,10 @@
         const nodes = searchDoc.querySelectorAll('*');
         for (let i = 0; i < nodes.length && i < 600; i++) {
           const n = nodes[i];
-          if (n && n.shadowRoot && !seenHosts.has(n)) {
+          if (!n || n.id === 'sleepwalker-host' || n.id === 'sleepwalker-ui-host' || n.id === 'sleepwalker-candidate-overlay-root' || getAttr(n, 'data-sleepwalker-ui') === '1') {
+            continue;
+          }
+          if (n.shadowRoot && !seenHosts.has(n)) {
             seenHosts.add(n);
             roots.push({ rootNode: n.shadowRoot, kind: 'shadow', label: getAttr(n, 'aria-label') || n.tagName.toLowerCase() });
           }
@@ -1261,6 +1452,16 @@
       if (!q || !inv) return [];
 
       const topK = Math.max(1, Math.min(12, Number(options.topK) || 6));
+      const rMode = options.offlineOnly ? 'offline' : 'neural';
+      const rKey = `${tabId}::${inv.inventoryVersion || 0}::${inv.navigationIdentity || ''}::${inv.urlClean || ''}::${rMode}::${topK}::${q.toLowerCase()}`;
+      if (!options.force && !inv._staleSince && this.retrievalCache && (rMode === 'offline' || this.pageEmbedCache.size > 0)) {
+        const hit = this.retrievalCache.get(rKey);
+        if (hit && (Date.now() - hit.ts) < 30000) {
+          inv.lastEmbedStatus = hit.lastEmbedStatus;
+          inv.lastEmbedModel = hit.lastEmbedModel;
+          return hit.items.slice(0, topK);
+        }
+      }
       const pool = [
         ...inv.videos,
         ...inv.options,
@@ -1363,7 +1564,20 @@
       inv.lastEmbedStatus = qEmb.model === 'nomic-embed-text' ? 'ok' : observedEmbedStatus;
       inv.lastEmbedModel = qEmb.model === 'nomic-embed-text' ? 'nomic-embed-text' : 'concept-semantic-64d';
       scored.sort((a, b) => b.score - a.score);
-      return scored.slice(0, topK);
+      const out = scored.slice(0, topK);
+      if (this.retrievalCache && !inv._staleSince) {
+        if (this.retrievalCache.size >= 120) {
+          const oldestKey = this.retrievalCache.keys().next().value;
+          if (oldestKey) this.retrievalCache.delete(oldestKey);
+        }
+        this.retrievalCache.set(rKey, {
+          items: out,
+          lastEmbedStatus: inv.lastEmbedStatus,
+          lastEmbedModel: inv.lastEmbedModel,
+          ts: Date.now()
+        });
+      }
+      return out;
     }
 
     /**
@@ -1372,7 +1586,8 @@
      */
     buildReasonerContext(query = '', options = {}) {
       const tabId = String(options.tabId || this._getTabId());
-      const inv = options.inventory || this.tabInventories.get(tabId);
+      const rawOptInv = (options.inventory && typeof options.inventory.then !== 'function') ? options.inventory : null;
+      const inv = rawOptInv || this.getTabInventory(tabId);
       if (!inv) return { text: '', validIds: new Set(), inventoryVersion: 0, tabId };
 
       const qLower = cleanText(query).toLowerCase();
@@ -1388,7 +1603,7 @@
         lines.push(`ACTIVE_VIDEO: "${w.title}" | ch:${w.channel || '-'} | dur:${w.duration || '-'} | paused:${w.paused} | captions:${w.captionsAvailable ? 'available' : 'unavailable'}`);
       }
 
-      if (inv.videos.length > 0) {
+      if (Array.isArray(inv.videos) && inv.videos.length > 0) {
         lines.push(`FEED_VIDEOS (${inv.videos.length} discovered${inv.hasMoreFeedInDom ? ', more available' : ''}):`);
         for (const v of inv.videos.slice(0, 14)) {
           validIds.add(v.id);
@@ -1408,9 +1623,14 @@
       }
 
       // Group top relevant Links, Options, and Buttons hierarchically under Sections!
+      const preferredSecs = (Array.isArray(options.preferredSections) ? options.preferredSections : [])
+        .map((s) => cleanText(s).toLowerCase())
+        .filter(Boolean);
       const scoreEntityRelevance = (e) => {
         const hay = `${e.label || ''} ${e.parentSection || ''} ${e.parentGroupLabel || ''} ${e.listContext || ''} ${e.domain || ''}`.toLowerCase();
         let s = e.visible ? 1 : 0;
+        const secLow = cleanText(e.parentSection || e.label || '').toLowerCase();
+        if (preferredSecs.some((ps) => secLow === ps || secLow.includes(ps))) s += 16;
         for (const t of qToks) {
           if (hay.includes(t)) s += 10;
           else if (CONCEPT_EXPANSIONS[t] && CONCEPT_EXPANSIONS[t].some((syn) => hay.includes(syn))) s += 4;
@@ -1418,18 +1638,32 @@
         return s;
       };
 
+      const isControlQuery = /\b(?:select|choose|pick|set|toggle|check|uncheck|enable|disable|dropdown|option|radio|theme|mode|color|size|sort|filter|switch|tab|under|button|click|press)\b/.test(qLower);
+      const isSectionOrLinkQuery = /\b(?:go\s+to|take\s+me|navigate|jump|open|section|heading|article|link|visit|previous|first|second|third|fourth|fifth|next|last)\b/.test(qLower);
+      const isVideoQuery = inv.pageType === 'youtube_search' || inv.pageType === 'youtube_feed' || /\b(?:video|watch|clip|tutorial|channel)\b/.test(qLower);
+      const isTableQuery = /\b(?:table|row|column|price|pricing|fee|deadline|date|schedule|compare|list)\b/.test(qLower);
+
       const compactBudget = (Number(options.maxTokens) || 820) <= 550;
+      const controlLimit = (isControlQuery || !isSectionOrLinkQuery)
+        ? (compactBudget ? 12 : 18)
+        : 4;
+      const linkLimit = (isSectionOrLinkQuery || !isControlQuery || isVideoQuery)
+        ? (compactBudget ? 10 : 16)
+        : 4;
+
       const topControls = [...inv.options, ...inv.buttons]
         .map((e, i) => ({ e, s: scoreEntityRelevance(e), i }))
         .sort((a, b) => (b.s !== a.s ? b.s - a.s : a.i - b.i))
-        .slice(0, compactBudget ? 12 : 18)
+        .slice(0, controlLimit)
         .map((x) => x.e);
 
-      const topLinks = inv.links
-        .map((e, i) => ({ e, s: scoreEntityRelevance(e), i }))
-        .sort((a, b) => (b.s !== a.s ? b.s - a.s : a.i - b.i))
-        .slice(0, compactBudget ? 10 : 16)
-        .map((x) => x.e);
+      const topLinks = isVideoQuery
+        ? []
+        : inv.links
+            .map((e, i) => ({ e, s: scoreEntityRelevance(e), i }))
+            .sort((a, b) => (b.s !== a.s ? b.s - a.s : a.i - b.i))
+            .slice(0, linkLimit)
+            .map((x) => x.e);
 
       const bySection = new Map();
       const pushToSec = (item) => {
@@ -1449,6 +1683,15 @@
           .map((x) => x.s);
         lines.push(`SECTIONS: ${rankedSecs.map((s) => { validIds.add(s.id); return `[${s.id}] H${s.level}:${s.label}`; }).join(' | ')}`);
       }
+      if (Array.isArray(options.learnedSkills) && options.learnedSkills.length > 0) {
+        lines.push('LEARNED_SKILLS:');
+        for (const sk of options.learnedSkills.slice(0, 3)) {
+          if (sk && sk.instruction) {
+            const stepsDesc = Array.isArray(sk.steps) ? sk.steps.slice(0, 4).map((s) => s.label || s.action).join(' > ') : '';
+            lines.push(`  [${sk.id || 'SKILL'}] "${sk.name || sk.instruction}" (${sk.instruction}) -> ${stepsDesc}`);
+          }
+        }
+      }
       if (bySection.size > 0) {
         lines.push('HIERARCHY:');
         for (const [secName, items] of bySection.entries()) {
@@ -1459,18 +1702,23 @@
             if (it.expanded === 'true') stateBits.push('expanded');
             else if (it.expanded === 'false') stateBits.push('collapsed');
             if (!it.enabled) stateBits.push('disabled');
+            if (it.required) stateBits.push('required');
+            if (it.dependentOf) stateBits.push(`dep:${it.dependentOf.slice(0, 24)}`);
             if (it.covered) stateBits.push('covered');
             else if (it.visibilityState && it.visibilityState !== 'in_viewport') stateBits.push(it.visibilityState);
             if (it.quadrant) stateBits.push(`pos:${it.quadrant}`);
             const stateTag = stateBits.length ? `,${stateBits.join(',')}` : '';
             if (it.type === 'option') {
               const grp = it.parentGroupLabel && it.parentGroupLabel !== secName ? `${it.parentGroupLabel} > ` : '';
-              lines.push(`  ${grp}[${it.id}] (${it.elementType}${stateTag}) ${it.label}`);
+              const typeLabel = it.expectedInputType && it.expectedInputType !== it.elementType ? `${it.elementType}:${it.expectedInputType}` : it.elementType;
+              lines.push(`  ${grp}[${it.id}] (${typeLabel}${stateTag}) ${it.label}`);
             } else if (it.type === 'button') {
-              lines.push(`  [${it.id}] (button${stateTag}) ${it.label}`);
+              const navTag = it.navCategory && it.navCategory !== 'content' ? `,${it.navCategory}` : '';
+              lines.push(`  [${it.id}] (button${navTag}${stateTag}) ${it.label}`);
             } else {
-              const listHint = it.listContext ? ` | list:${it.listContext.slice(0, 28)}` : '';
-              const tag = it.official ? 'official' : (it.category || it.domain || 'link');
+              const listHint = it.parentMenuLabel ? ` | menu:${it.parentMenuLabel.slice(0, 28)}` : (it.listContext ? ` | list:${it.listContext.slice(0, 28)}` : '');
+              const navTag = it.navCategory && it.navCategory !== 'content' ? `${it.navCategory}:` : '';
+              const tag = `${navTag}${it.official ? 'official' : (it.category || it.domain || 'link')}`;
               lines.push(`  [${it.id}] (${tag}${stateTag}) ${it.label}${listHint}`);
             }
           }
@@ -1480,7 +1728,7 @@
         const crossNotes = inv.iframes.filter((f) => f.crossOrigin).slice(0, 3).map((f) => `[Cross-Origin Iframe: ${f.title || f.src || 'embedded'}]`);
         lines.push(`IFRAMES: ${crossNotes.join(' ')}`);
       }
-      if (inv.tables.length > 0) {
+      if (inv.tables.length > 0 && (isTableQuery || !isControlQuery || qToks.length <= 2)) {
         for (const t of inv.tables.slice(0, 2)) {
           validIds.add(t.id);
           lines.push(`TABLE [${t.id}] (${t.parentSection}): cols=[${(t.headers || []).join(',')}] rows=${(t.rows || []).slice(0, 4).map((r) => r.rowSummary).join(' ; ')}`);
@@ -1609,7 +1857,19 @@
     }
 
     getTabInventory(tabId = this._getTabId()) {
-      return this.tabInventories.get(String(tabId)) || null;
+      const key = String(tabId);
+      const found = this.tabInventories.get(key);
+      if (found) return found;
+      if (key !== 'default' && key === this._getTabId()) {
+        const defInv = this.tabInventories.get('default');
+        if (defInv && defInv.document === this._getDoc()) {
+          defInv.tabId = key;
+          this.tabInventories.set(key, defInv);
+          this.tabInventories.delete('default');
+          return defInv;
+        }
+      }
+      return null;
     }
 
     clearTabInventory(tabId = this._getTabId()) {

@@ -544,7 +544,17 @@
             };
           };
 
-          const canCloud = !config.localOnly && (typeof llm.canCallGeminiCloud !== 'function' || llm.canCallGeminiCloud().allowed);
+          const allowSpecialistGemini = payload.geminiSpecialist !== false && !payload.skipGemini;
+          const canCloud = allowSpecialistGemini && !config.localOnly && (typeof llm.canCallGeminiCloud !== 'function' || llm.canCallGeminiCloud().allowed);
+          if (allowSpecialistGemini && (payload.specialist || payload.isVideoExplain || payload.explicitGemini || payload.isDocumentAnalysis)) {
+            if (config.localOnly) {
+              payload._degradeMessage = 'Local-Only mode is enabled; using local Ollama instead of Gemini.';
+            } else if (!config.geminiApiKey && !config.proxyUrl) {
+              payload._degradeMessage = 'Gemini API key or proxy is not configured; using local Ollama.';
+            } else if (!canCloud) {
+              payload._degradeMessage = 'Gemini quota/cooldown active; using local Ollama.';
+            }
+          }
           const wantLiveWs = Boolean(
             canCloud &&
             this.liveMod &&
@@ -626,6 +636,10 @@
               payload._degradeMessage = sseRes.degradeMessage;
             } else if (sseRes && sseRes.ok && sseHolder.cb) {
               streamResult = sseHolder.cb.finalize(sseRes.source || `Gemini (${sseRes.model})`);
+            } else if (sseRes && !sseRes.ok && !sseRes.aborted && sseRes.degradeMessage) {
+              payload._degradeMessage = sseRes.degradeMessage;
+            } else if (sseRes && !sseRes.ok && !sseRes.aborted && !payload._degradeMessage) {
+              payload._degradeMessage = 'Gemini stream unavailable; falling back to local Ollama.';
             }
           }
 
@@ -654,7 +668,17 @@
               onToken: (delta) => oCb.onToken(delta)
             });
             if (oRes && oRes.ok) {
+              if (oRes.metrics) {
+                Object.assign(metrics, {
+                  promptTokens: oRes.metrics.promptTokens || 0,
+                  outputTokens: oRes.metrics.outputTokens || 0,
+                  loadMs: oRes.metrics.loadMs || 0,
+                  evalMs: oRes.metrics.evalMs || 0
+                });
+              }
               streamResult = oCb.finalize(oRes.source || `ollama:${config.ollamaModel || 'llama3.2:3b'}`);
+            } else if (oRes && oRes.degradeMessage && !payload._degradeMessage) {
+              payload._degradeMessage = oRes.degradeMessage;
             }
           }
 

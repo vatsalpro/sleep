@@ -31,7 +31,8 @@
       this.handlers = {
         onOrbClick: typeof options.onOrbClick === 'function' ? options.onOrbClick : null,
         onSubmitText: typeof options.onSubmitText === 'function' ? options.onSubmitText : null,
-        onDismiss: typeof options.onDismiss === 'function' ? options.onDismiss : null
+        onDismiss: typeof options.onDismiss === 'function' ? options.onDismiss : null,
+        onCancelTask: typeof options.onCancelTask === 'function' ? options.onCancelTask : null
       };
       this._mount();
     }
@@ -49,7 +50,7 @@
       this.host.className = 'sleepwalker-ignore sleepwalker-exclude';
       this.host.style.cssText = 'position:fixed !important;inset:0 !important;width:0 !important;height:0 !important;overflow:visible !important;pointer-events:none !important;z-index:2147483644 !important;border:0 !important;margin:0 !important;padding:0 !important;background:transparent !important;';
       this.shadow = this.host.attachShadow({ mode: 'open' });
-      this.injectCssText('.sw-ui-root{position:fixed;inset:0;pointer-events:none;opacity:0;visibility:hidden;}.sw-ui-root[data-active="true"],.sw-ui-root.sw-dissolving{opacity:1;visibility:visible;}.sw-threads-canvas,.sw-ui-veil{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;}.sw-card[hidden],.sw-type-form[hidden],.sw-card-menu[hidden],.sw-card-controls[hidden],.sw-card-actions[hidden]{display:none;}.sw-svg{width:20px;height:20px;min-width:20px;min-height:20px;max-width:20px;max-height:20px;display:inline-block;flex-shrink:0;overflow:hidden;}.sw-sparkle .sw-svg,.sw-sparkle svg{width:16px;height:16px;min-width:16px;min-height:16px;max-width:16px;max-height:16px;}svg{flex-shrink:0;}');
+      this.injectCssText('.sw-ui-root{position:fixed;inset:0;pointer-events:none;opacity:0;visibility:hidden;}.sw-ui-root[data-active="true"],.sw-ui-root.sw-dissolving{opacity:1;visibility:visible;}.sw-threads-canvas,.sw-ui-veil,.sw-edge-aurora{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;}.sw-card[hidden],.sw-type-form[hidden],.sw-aurora-bar[hidden],.sw-edge-aurora[hidden],.sw-scan-chip[hidden],.sw-aurora-cancel[hidden],.sw-card-menu[hidden],.sw-card-controls[hidden],.sw-card-actions[hidden]{display:none;}.sw-svg{width:20px;height:20px;min-width:20px;min-height:20px;max-width:20px;max-height:20px;display:inline-block;flex-shrink:0;overflow:hidden;}.sw-sparkle .sw-svg,.sw-sparkle svg{width:16px;height:16px;min-width:16px;min-height:16px;max-width:16px;max-height:16px;}svg{flex-shrink:0;}');
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
         const link = doc.createElement('link');
         link.rel = 'stylesheet';
@@ -61,7 +62,26 @@
       wrapper.dataset.state = 'idle';
       wrapper.dataset.active = 'false';
       wrapper.innerHTML = `
+        <div id="sw-ui-edge-aurora" class="sw-edge-aurora" data-task-state="idle" hidden aria-hidden="true">
+          <div class="sw-edge-aurora-flow"></div>
+        </div>
         <div class="sw-orb-dock">
+          <div id="sw-ui-scan" class="sw-scan-chip" hidden aria-live="polite">
+            <span class="sw-scan-dot" aria-hidden="true"></span>
+            <span id="sw-ui-scan-label">Mapping page...</span>
+          </div>
+          <div id="sw-ui-aurora" class="sw-aurora-bar" data-task-state="idle" hidden aria-live="polite">
+            <div class="sw-aurora-mist" aria-hidden="true"></div>
+            <div class="sw-aurora-row">
+              <span class="sw-aurora-dot" aria-hidden="true"></span>
+              <div class="sw-aurora-text">
+                <div id="sw-ui-aurora-stage" class="sw-aurora-stage"></div>
+                <div id="sw-ui-aurora-task" class="sw-aurora-task"></div>
+              </div>
+              <button type="button" id="sw-ui-cancel-btn" class="sw-aurora-cancel" aria-label="Cancel active task" hidden>Cancel</button>
+            </div>
+            <div class="sw-aurora-thread-track" aria-hidden="true"><span class="sw-aurora-thread"></span></div>
+          </div>
           <div id="sw-ui-transcript" class="sw-transcript-chip" aria-live="polite" data-visible="false"></div>
           <form id="sw-ui-type-form" class="sw-type-form" hidden>
             <input id="sw-ui-type-input" class="sw-type-input" type="text" placeholder="Type a command or question..." aria-label="Type command">
@@ -82,6 +102,13 @@
       doc.documentElement.appendChild(this.host);
       this.rootEl = wrapper;
       this.dockEl = this.shadow.querySelector('.sw-orb-dock');
+      this.edgeAuroraEl = this.shadow.getElementById('sw-ui-edge-aurora');
+      this.scanEl = this.shadow.getElementById('sw-ui-scan');
+      this.scanLabelEl = this.shadow.getElementById('sw-ui-scan-label');
+      this.auroraEl = this.shadow.getElementById('sw-ui-aurora');
+      this.auroraStageEl = this.shadow.getElementById('sw-ui-aurora-stage');
+      this.auroraTaskEl = this.shadow.getElementById('sw-ui-aurora-task');
+      this.cancelTaskBtn = this.shadow.getElementById('sw-ui-cancel-btn');
       this.orbBtn = this.shadow.getElementById('sw-ui-orb');
       this.bars = Array.from(this.shadow.querySelectorAll('.sw-bar'));
       this.transcriptEl = this.shadow.getElementById('sw-ui-transcript');
@@ -151,6 +178,15 @@
         });
       }
 
+      if (this.cancelTaskBtn) {
+        this.cancelTaskBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (typeof this.handlers.onCancelTask === 'function') {
+            this.handlers.onCancelTask({ state: this.state });
+          }
+        });
+      }
+
       if (this.typeBtn && this.typeForm && this.typeInput) {
         this.typeBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -203,6 +239,65 @@
       if (typeof overrides.onSubmitText === 'function') this.handlers.onSubmitText = overrides.onSubmitText;
       if (typeof overrides.onDismiss === 'function') this.handlers.onDismiss = overrides.onDismiss;
       if (typeof overrides.onQuickControl === 'function') this.handlers.onQuickControl = overrides.onQuickControl;
+      if (typeof overrides.onCancelTask === 'function') this.handlers.onCancelTask = overrides.onCancelTask;
+    }
+
+    setScanning(active = false, label = 'Mapping page...') {
+      if (!this.scanEl) return;
+      const on = Boolean(active);
+      this.scanEl.hidden = !on;
+      if (this.scanLabelEl) {
+        this.scanLabelEl.textContent = on ? String(label || 'Mapping page...').slice(0, 48) : '';
+      }
+      if (this.rootEl) {
+        this.rootEl.dataset.scanning = on ? 'true' : 'false';
+      }
+    }
+
+    setTaskStatus(status = {}) {
+      if (!this.auroraEl) return;
+      const safe = status && typeof status === 'object' ? status : {};
+      const validTaskStates = new Set(['idle', 'processing', 'waiting_for_clarification', 'completed', 'cancelled', 'error']);
+      const st = validTaskStates.has(safe.state) ? safe.state : 'idle';
+      this.auroraEl.dataset.taskState = st;
+      const showEdgeAurora = st === 'processing' || st === 'waiting_for_clarification';
+      if (this.edgeAuroraEl) {
+        this.edgeAuroraEl.dataset.taskState = st;
+        this.edgeAuroraEl.hidden = !showEdgeAurora;
+        this.edgeAuroraEl.classList.toggle('sw-active', showEdgeAurora);
+      }
+      if (this.threads && typeof this.threads.setTaskProcessing === 'function') {
+        this.threads.setTaskProcessing(showEdgeAurora);
+      }
+      if (st === 'idle') {
+        this.auroraEl.hidden = true;
+        if (this.auroraStageEl) this.auroraStageEl.textContent = '';
+        if (this.auroraTaskEl) this.auroraTaskEl.textContent = '';
+        if (this.cancelTaskBtn) this.cancelTaskBtn.hidden = true;
+        this.syncLayout();
+        return;
+      }
+      this.auroraEl.hidden = false;
+      if (this.auroraStageEl) {
+        this.auroraStageEl.textContent = String(safe.stage || (
+          st === 'processing' ? 'Understanding request'
+          : (st === 'waiting_for_clarification' ? 'Waiting for clarification'
+            : (st === 'completed' ? 'Completed' : (st === 'cancelled' ? 'Cancelled' : 'Action failed')))
+        )).slice(0, 64);
+      }
+      if (this.auroraTaskEl) {
+        this.auroraTaskEl.textContent = String(safe.taskLabel || '').slice(0, 68);
+      }
+      if (this.cancelTaskBtn) {
+        const allowCancel = safe.showCancel !== undefined
+          ? Boolean(safe.showCancel)
+          : (st === 'processing' || st === 'waiting_for_clarification');
+        this.cancelTaskBtn.hidden = !allowCancel;
+      }
+      if (this.rootEl && this.rootEl.dataset.active !== 'true') {
+        this.rootEl.dataset.active = 'true';
+      }
+      this.syncLayout();
     }
 
     setState(nextState = 'idle') {
@@ -226,6 +321,7 @@
 
       if (normalized === 'idle') {
         if (this.card) this.card.hide({ restoreFocus: true });
+        this.setTaskStatus({ state: 'idle' });
         this.setLevel(0);
         this.setTranscript('');
         if (this.typeForm) this.typeForm.hidden = true;
@@ -326,6 +422,7 @@
     rootScope.__SW_ORB_INSTANCE__ = orb;
     const api = {
       setState: (s) => orb.setState(s), setLevel: (l) => orb.setLevel(l), setTranscript: (t) => orb.setTranscript(t),
+      setTaskStatus: (st) => orb.setTaskStatus(st), setScanning: (on, lbl) => orb.setScanning(on, lbl),
       showCard: (c) => orb.showCard(c), updateCard: (c) => orb.updateCard(c), highlightTopic: (i) => orb.highlightTopic(i), highlightSentence: (i) => orb.highlightSentence(i),
       notifySpeechEnd: () => orb.notifySpeechEnd(), hideCard: () => orb.hideCard(), positionForTarget: (t) => orb.positionForTarget(t),
       getCardType: () => (orb.card && orb.card.visible && orb.card.spec ? orb.card.spec.type : null),

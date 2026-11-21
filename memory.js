@@ -223,7 +223,10 @@
               lastSuggestionAt: 0,
               lastShownResumeSessionId: '',
               privacyControls: { learningEnabled: true, proactiveEnabled: true }
-            }
+            },
+        learnedSkills: [],
+        activeTeaching: null,
+        pendingSkillReplay: null
       };
     }
 
@@ -594,6 +597,7 @@
         if (!Array.isArray(this.state.conversationTurns)) this.state.conversationTurns = [];
         if (!Array.isArray(this.state.pendingActions)) this.state.pendingActions = [];
         if (!Array.isArray(this.state.recentTasks)) this.state.recentTasks = [];
+        if (!Array.isArray(this.state.learnedSkills)) this.state.learnedSkills = [];
         if (!this.state.tabContexts || typeof this.state.tabContexts !== 'object') this.state.tabContexts = {};
         if (!this.state.shortTerm || typeof this.state.shortTerm !== 'object') this.state.shortTerm = dflt.shortTerm;
         if (!this.state.longTerm || typeof this.state.longTerm !== 'object') this.state.longTerm = dflt.longTerm;
@@ -2878,17 +2882,22 @@
       }
 
       const secNavMatch = raw.match(
-        /^(?:find|locate|go\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to|show\s+me)\s+(?:the\s+)?(?:section\s+(?:about|on|for)\s+|part\s+(?:about|on)\s+)?(.+?)(?:\s+section)?[.?!]*$/i
+        /^(?:find|locate|go\s+(?:back\s+)?to|return\s+to|back\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to|show\s+me)\s+(?:the\s+)?(?:section\s+(?:about|on|for)\s+|part\s+(?:about|on)\s+)?(.+?)(?:\s+section)?[.?!]*$/i
       );
       if (
         secNavMatch &&
-        (/\bsection\b/i.test(raw) || /^(?:go\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to)\b/i.test(raw))
+        (/\bsection\b/i.test(raw) || /^(?:go\s+(?:back\s+)?to|return\s+to|back\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to)\b/i.test(raw))
       ) {
-        const targetSec = secNavMatch[1]
+        let targetSec = secNavMatch[1]
           .replace(/^(?:the\s+)?(?:section\s+(?:about|on|for)\s+)/i, '')
           .replace(/\s+section$/i, '')
           .trim();
-        if (targetSec && !/\b(?:website|site|portal|pricing\s+page|contact\s+page)\b/i.test(targetSec)) {
+        if (/^(?:previous|last|earlier)$/i.test(targetSec) && /\bsection\b/i.test(raw)) {
+          const prevSec = (resolvedContext && resolvedContext.resolvedSection) ||
+            (this.state && this.state.selectionState && this.state.selectionState.previousSection) || '';
+          if (prevSec) targetSec = prevSec;
+        }
+        if (targetSec && !/\b(?:website|site|portal|page)\b/i.test(targetSec)) {
           return {
             category: CENTRAL_INTENTS.PAGE_NAVIGATION,
             subAction: 'navigate_section',
@@ -2901,7 +2910,7 @@
       if (baseType === 'NAVIGATE' || baseType === 'OUTLINE') {
         return {
           category: CENTRAL_INTENTS.PAGE_NAVIGATION,
-          subAction: (baseIntent && baseIntent.action) || 'navigate',
+          subAction: (baseIntent && baseIntent.args && baseIntent.args.action) || (baseIntent && baseIntent.action) || 'navigate',
           resolvedQuery: resolved
         };
       }
@@ -3351,6 +3360,276 @@
           nextRecommendedAction: `Open ${recommendedUrls[0].title}`
         }
       };
+    }
+
+    /**
+     * Phase 6: Learned Workflow Skills Persistence, Semantic Retrieval & Versioning.
+     * Experience-based workflow memory (never claims model weights are retrained).
+     */
+    _extractSkillHost(rawUrlOrSite = '') {
+      const s = String(rawUrlOrSite || '').trim().toLowerCase();
+      if (!s) return '';
+      try {
+        if (/^https?:\/\//i.test(s)) return new URL(s).hostname.toLowerCase();
+      } catch (_e) {}
+      return s.replace(/^www\./, '').split('/')[0].split(':')[0];
+    }
+
+    _sanitizeSkillSteps(rawSteps = []) {
+      const steps = Array.isArray(rawSteps) ? rawSteps : [];
+      const out = [];
+      for (let i = 0; i < steps.length && i < 24; i++) {
+        const st = steps[i];
+        if (!st || typeof st !== 'object') continue;
+        const label = this.sanitizeText(String(st.label || st.accessibleName || ''), 120);
+        const val = st.value !== undefined && st.value !== null ? String(st.value) : '';
+        const safeValue = (st.sensitive || this.isSensitiveText(val) || this.isSensitiveText(label)) ? '' : this.sanitizeText(val, 100);
+        out.push({
+          sequence: out.length + 1,
+          action: String(st.action || 'click').slice(0, 32),
+          role: String(st.role || '').slice(0, 40),
+          tag: String(st.tag || '').slice(0, 24),
+          elementType: String(st.elementType || '').slice(0, 32),
+          label,
+          accessibleName: this.sanitizeText(String(st.accessibleName || label), 120),
+          parentSection: this.sanitizeText(String(st.parentSection || ''), 90),
+          ancestorHeadings: Array.isArray(st.ancestorHeadings) ? st.ancestorHeadings.slice(0, 4).map((h) => this.sanitizeText(String(h || ''), 60)).filter(Boolean) : [],
+          idAttr: String(st.idAttr || '').slice(0, 80),
+          nameAttr: String(st.nameAttr || '').slice(0, 80),
+          ariaLabel: this.sanitizeText(String(st.ariaLabel || ''), 100),
+          hrefPath: st.hrefPath ? String(this._sanitizeStoredUrl(st.hrefPath)).slice(0, 180) : '',
+          value: safeValue,
+          pageUrlClean: this._sanitizeStoredUrl(st.pageUrlClean || st.urlClean || ''),
+          resultingUrlClean: this._sanitizeStoredUrl(st.resultingUrlClean || ''),
+          expectedState: this.sanitizeText(String(st.expectedState || ''), 100),
+          fallbackRect: (st.fallbackRect && typeof st.fallbackRect === 'object')
+            ? { x: Math.round(Number(st.fallbackRect.x) || 0), y: Math.round(Number(st.fallbackRect.y) || 0) }
+            : null
+        });
+      }
+      return out;
+    }
+
+    _buildSkillCommandVariations(instruction = '', customVars = []) {
+      const base = this.sanitizeText(String(instruction || ''), 160).trim();
+      const set = new Set();
+      if (base) set.add(base);
+      const lower = base.toLowerCase();
+      if (/^(?:open|show|go\s+to|take\s+me\s+to)\s+(.+)$/i.test(lower)) {
+        const tgt = base.replace(/^(?:open|show|go\s+to|take\s+me\s+to)\s+(?:the\s+|my\s+)?/i, '').trim();
+        if (tgt) {
+          set.add(`Open ${tgt}`);
+          set.add(`Show ${tgt}`);
+          set.add(`Go to ${tgt}`);
+          set.add(`Take me to ${tgt}`);
+        }
+      }
+      for (const v of (Array.isArray(customVars) ? customVars : [])) {
+        const cleanV = this.sanitizeText(String(v || ''), 140).trim();
+        if (cleanV && !this.isSensitiveText(cleanV)) set.add(cleanV);
+      }
+      return Array.from(set).slice(0, 12);
+    }
+
+    async saveLearnedSkill(skillInput = {}) {
+      if (!skillInput || typeof skillInput !== 'object') return null;
+      if (!Array.isArray(this.state.learnedSkills)) this.state.learnedSkills = [];
+      const instruction = this.sanitizeText(String(skillInput.instruction || skillInput.name || ''), 180).trim();
+      if (!instruction || this.isSensitiveText(instruction)) return null;
+
+      const website = this._extractSkillHost(skillInput.website || skillInput.url || (typeof window !== 'undefined' && window.location ? window.location.href : 'local')) || 'local';
+      const steps = this._sanitizeSkillSteps(skillInput.steps || []);
+      if (steps.length === 0) return null;
+
+      const variations = this._buildSkillCommandVariations(instruction, skillInput.variations || []);
+      const now = Date.now();
+      const existingIdx = skillInput.id
+        ? this.state.learnedSkills.findIndex((s) => s && s.id === skillInput.id)
+        : this.state.learnedSkills.findIndex((s) => s && s.website === website && String(s.instruction || '').toLowerCase() === instruction.toLowerCase());
+      const prev = existingIdx >= 0 ? this.state.learnedSkills[existingIdx] : null;
+
+      const previousVersions = prev && Array.isArray(prev.previousVersions) ? prev.previousVersions.slice(-4) : [];
+      if (prev) {
+        previousVersions.push({
+          version: prev.version || 1,
+          name: prev.name,
+          instruction: prev.instruction,
+          steps: prev.steps,
+          updatedAt: prev.updatedAt || now
+        });
+      }
+
+      const nextName = this.sanitizeText(String(skillInput.name || (prev && prev.name) || instruction), 90).trim();
+      const embedText = `${nextName} ${instruction} ${variations.join(' ')} ${steps.map((s) => `${s.label} ${s.parentSection}`).join(' ')}`.slice(0, 420);
+      let emb = null;
+      try {
+        emb = await this.computeHybridEmbedding(embedText);
+      } catch (_e) {
+        emb = { vec: this.computeDeterministicEmbedding(embedText), model: 'deterministic' };
+      }
+
+      const record = {
+        id: (prev && prev.id) || skillInput.id || `skill_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        name: nextName,
+        website,
+        instruction,
+        variations,
+        pageContext: this.sanitizeText(String(skillInput.pageContext || ''), 120),
+        steps,
+        verification: skillInput.verification && typeof skillInput.verification === 'object'
+          ? {
+              expectedUrlIncludes: this._sanitizeStoredUrl(skillInput.verification.expectedUrlIncludes || ''),
+              expectedTitleIncludes: this.sanitizeText(String(skillInput.verification.expectedTitleIncludes || ''), 80),
+              expectedState: this.sanitizeText(String(skillInput.verification.expectedState || ''), 90)
+            }
+          : { expectedUrlIncludes: steps[steps.length - 1].resultingUrlClean || '', expectedTitleIncludes: '', expectedState: steps[steps.length - 1].expectedState || '' },
+        version: prev ? ((prev.version || 1) + 1) : 1,
+        previousVersions,
+        enabled: skillInput.enabled !== undefined ? Boolean(skillInput.enabled) : (prev ? prev.enabled !== false : true),
+        confirmedByUser: skillInput.confirmedByUser !== false,
+        lastSuccessAt: skillInput.lastSuccessAt || now,
+        failureCount: 0,
+        createdAt: prev ? (prev.createdAt || now) : now,
+        updatedAt: now,
+        embedding: Array.isArray(emb) ? emb : (emb && Array.isArray(emb.vec) ? emb.vec : null)
+      };
+
+      if (existingIdx >= 0) this.state.learnedSkills[existingIdx] = record;
+      else this.state.learnedSkills.unshift(record);
+      if (this.state.learnedSkills.length > 80) {
+        this.state.learnedSkills = this.state.learnedSkills.slice(0, 80);
+      }
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return record;
+    }
+
+    async retrieveLearnedSkillsAsync(query = '', websiteOrUrl = '', options = {}) {
+      const skills = Array.isArray(this.state && this.state.learnedSkills) ? this.state.learnedSkills : [];
+      if (skills.length === 0) return [];
+      const qClean = this.sanitizeText(String(query || ''), 180).trim();
+      if (!qClean) return [];
+      const qLow = qClean.toLowerCase();
+      const targetHost = this._extractSkillHost(websiteOrUrl || (typeof window !== 'undefined' && window.location ? window.location.href : ''));
+      const includeDisabled = Boolean(options.includeDisabled);
+      const minScore = Number.isFinite(Number(options.minScore)) ? Number(options.minScore) : 0.44;
+      const topK = Math.max(1, Number(options.topK) || 3);
+
+      let qVec = null;
+      try {
+        const qEmb = await this.computeHybridEmbedding(qClean);
+        qVec = Array.isArray(qEmb) ? qEmb : (qEmb && Array.isArray(qEmb.vec) ? qEmb.vec : this.computeDeterministicEmbedding(qClean));
+      } catch (_e) {
+        qVec = this.computeDeterministicEmbedding(qClean);
+      }
+      const qToks = new Set(qLow.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 2 && !/^(?:please|can|you|the|my|me|to|in|on|for|and)$/.test(t)));
+
+      const scored = [];
+      for (const sk of skills) {
+        if (!sk || (!includeDisabled && sk.enabled === false)) continue;
+        const skHost = this._extractSkillHost(sk.website || '');
+        if (targetHost && skHost && skHost !== 'local' && targetHost !== 'local') {
+          const hostMatch = skHost === targetHost || targetHost.endsWith(`.${skHost}`) || skHost.endsWith(`.${targetHost}`);
+          if (!hostMatch && !options.crossSite) continue;
+        }
+        const phrases = [sk.name, sk.instruction, ...(Array.isArray(sk.variations) ? sk.variations : [])]
+          .filter(Boolean)
+          .map((p) => String(p).toLowerCase().trim());
+
+        let exactBonus = 0;
+        let bestLex = 0;
+        for (const p of phrases) {
+          if (p === qLow) exactBonus = Math.max(exactBonus, 0.45);
+          else if (qLow.includes(p) || p.includes(qLow)) exactBonus = Math.max(exactBonus, 0.25);
+          const pToks = p.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 2 && !/^(?:please|can|you|the|my|me|to|in|on|for|and)$/.test(t));
+          if (pToks.length > 0 && qToks.size > 0) {
+            let inter = 0;
+            for (const pt of pToks) if (qToks.has(pt)) inter += 1;
+            const union = new Set([...pToks, ...qToks]).size;
+            bestLex = Math.max(bestLex, union > 0 ? (inter / union) : 0);
+          }
+        }
+        let embSim = 0;
+        if (qVec && Array.isArray(sk.embedding) && sk.embedding.length === qVec.length) {
+          embSim = Math.max(0, this.cosineSimilarity(qVec, sk.embedding));
+        } else {
+          const skVec = this.computeDeterministicEmbedding(phrases.join(' '));
+          embSim = (qVec && skVec.length === qVec.length) ? Math.max(0, this.cosineSimilarity(qVec, skVec)) : 0;
+        }
+        const score = Math.round(Math.min(1, 0.58 * embSim + 0.42 * bestLex + exactBonus) * 1000) / 1000;
+        if (score >= minScore) {
+          scored.push({ skill: sk, score, lexicalScore: bestLex, semanticScore: embSim });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      return scored.slice(0, topK);
+    }
+
+    searchLearnedSkills(filterText = '', website = '') {
+      const skills = Array.isArray(this.state && this.state.learnedSkills) ? this.state.learnedSkills : [];
+      const fLow = String(filterText || '').trim().toLowerCase();
+      const wLow = this._extractSkillHost(website || '');
+      return skills.filter((sk) => {
+        if (!sk) return false;
+        if (wLow && this._extractSkillHost(sk.website) !== wLow) return false;
+        if (!fLow) return true;
+        const hay = `${sk.name} ${sk.instruction} ${sk.website} ${(sk.variations || []).join(' ')}`.toLowerCase();
+        return hay.includes(fLow);
+      });
+    }
+
+    async renameLearnedSkill(skillId, nextName) {
+      const clean = this.sanitizeText(String(nextName || ''), 90).trim();
+      if (!clean || !Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      sk.name = clean;
+      sk.updatedAt = Date.now();
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
+    }
+
+    async setLearnedSkillEnabled(skillId, enabled) {
+      if (!Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      sk.enabled = Boolean(enabled);
+      sk.updatedAt = Date.now();
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
+    }
+
+    async deleteLearnedSkill(skillId) {
+      if (!Array.isArray(this.state.learnedSkills)) return false;
+      const before = this.state.learnedSkills.length;
+      this.state.learnedSkills = this.state.learnedSkills.filter((s) => s && s.id !== skillId);
+      if (this.state.learnedSkills.length === before) return false;
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return true;
+    }
+
+    async recordLearnedSkillOutcome(skillId, { ok = true } = {}) {
+      if (!Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      if (ok) {
+        sk.lastSuccessAt = Date.now();
+        sk.failureCount = 0;
+      } else {
+        sk.failureCount = (sk.failureCount || 0) + 1;
+        sk.lastFailureAt = Date.now();
+      }
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
     }
   }
 

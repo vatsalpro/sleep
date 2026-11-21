@@ -107,6 +107,9 @@ async function syncEnvIntoStorage(forceReload = false) {
         if (envObj.OLLAMA_MODEL && (forceReload || !data.sleepwalker_ollama_model || !data.sleepwalker_gemini_manual_override)) {
           nextValues.sleepwalker_ollama_model = envObj.OLLAMA_MODEL;
         }
+        if (envObj.OLLAMA_FAST_MODEL) {
+          nextValues.sleepwalker_ollama_fast_model = envObj.OLLAMA_FAST_MODEL;
+        }
         if (envObj.CLOUD_PROXY_URL !== undefined && (forceReload || !data.sleepwalker_proxy_url)) {
           nextValues.sleepwalker_proxy_url = envObj.CLOUD_PROXY_URL;
         }
@@ -520,12 +523,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         });
         const oldMem = existingData && existingData.sleepwalker_persistent_memory_v1;
-        if (oldMem && oldMem.tabContexts && typeof oldMem.tabContexts === 'object') {
-          const mergedTabs = { ...oldMem.tabContexts };
+        if (oldMem && typeof oldMem === 'object') {
+          const mergedTabs = { ...(oldMem.tabContexts || {}) };
           if (incoming.tabContexts && incoming.tabContexts[message.tabKey]) {
             mergedTabs[message.tabKey] = incoming.tabContexts[message.tabKey];
           }
-          stateToSave = { ...incoming, tabContexts: mergedTabs };
+          let mergedSkills = Array.isArray(incoming.learnedSkills) ? incoming.learnedSkills : [];
+          if (Array.isArray(oldMem.learnedSkills) && oldMem.learnedSkills.length > 0 && mergedSkills.length === 0 && !incoming._skillsModifiedExplicitly) {
+            mergedSkills = oldMem.learnedSkills;
+          }
+          stateToSave = { ...incoming, tabContexts: mergedTabs, learnedSkills: mergedSkills };
         }
       }
 
@@ -768,11 +775,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'SLEEPWALKER_CANCEL_ACTIVE_LLM') {
+    try {
+      const taskId = message.taskId || (message.payload && message.payload.taskId) || '';
+      const sessionId = (sender && sender.tab && sender.tab.id != null) ? `tab:${sender.tab.id}` : 'default';
+      if (typeof cancelActiveLlmRequests === 'function') {
+        cancelActiveLlmRequests(taskId ? { taskId } : {});
+      }
+      if (typeof SLEEPWALKER_AI_COMM !== 'undefined' && SLEEPWALKER_AI_COMM && typeof SLEEPWALKER_AI_COMM.cancelSession === 'function') {
+        SLEEPWALKER_AI_COMM.cancelSession(sessionId, 'task_cancelled');
+      }
+      sendResponse({ ok: true, cancelled: true });
+    } catch (err) {
+      sendResponse({ ok: false, error: (err && err.message) || 'Cancel error' });
+    }
+    return true;
+  }
+
   if (message.type === 'SLEEPWALKER_NLU_PLAN_REQUEST') {
     envReadyPromise
       .then(() => handleNluPlanRequest(message.payload || message))
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ status: 'generation_failed', message: (err && err.message) || 'NLU request error.' }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_NLU_ESCALATE_REQUEST') {
+    envReadyPromise
+      .then(() => handleNluEscalationRequest(message.payload || message))
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ status: 'generation_failed', message: (err && err.message) || 'NLU escalation error.' }));
     return true;
   }
 

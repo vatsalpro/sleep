@@ -74,6 +74,7 @@
         "threads.js",
         "card.js",
         "orb.js",
+        "teach.js",
         "content.js"
       ],
       "run_at": "document_idle"

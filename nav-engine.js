@@ -356,7 +356,7 @@
       }
       const switchTabNameM = stripped.match(/^(?:switch(?:\s+tab)?\s+to|go\s+to)\s+(?:the\s+|my\s+)?(.+?)\s+tab$/i)
         || stripped.match(/^switch\s+tab\s+(?:to\s+)?(?:the\s+)?(.+)$/i);
-      if (switchTabNameM && switchTabNameM[1]) {
+      if (switchTabNameM && switchTabNameM[1] && !options.hasPageTabMatch) {
         const targetTabQuery = cleanText(switchTabNameM[1].replace(/\btab$/i, ''));
         if (targetTabQuery) {
           return { path: 'A', fastAction: { type: 'tab_switch', query: targetTabQuery }, confidence: 0.97, reason: 'fast_tab_switch_name' };
@@ -924,8 +924,12 @@
         if (el && el.style) {
           cand._prevOutline = el.style.outline || '';
           cand._prevOutlineOffset = el.style.outlineOffset || '';
-          el.style.outline = '2.5px solid #3b82f6';
+          cand._prevBoxShadow = el.style.boxShadow || '';
+          cand._prevBorderRadius = el.style.borderRadius || '';
+          el.style.outline = '3px solid #f59e0b';
           el.style.outlineOffset = '3px';
+          el.style.boxShadow = '0 0 0 3px rgba(37, 99, 235, 0.38), 0 0 18px rgba(245, 158, 11, 0.62)';
+          if (typeof el.setAttribute === 'function') el.setAttribute('data-sw-candidate-highlighted', '1');
         }
 
         const badge = doc.createElement('div');
@@ -1006,6 +1010,8 @@
           try {
             el.style.outline = cand._prevOutline || '';
             el.style.outlineOffset = cand._prevOutlineOffset || '';
+            el.style.boxShadow = cand._prevBoxShadow || '';
+            if (typeof el.removeAttribute === 'function') el.removeAttribute('data-sw-candidate-highlighted');
           } catch (_e) {}
         }
       }

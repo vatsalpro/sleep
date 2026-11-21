@@ -85,6 +85,7 @@
       this.onLifecycleChange = null; // (state, detail) => {}
       this.onActivity = null;   // ({ type }) => {}
       this.onPauseChange = null;// (isPaused) => {}
+      this.shouldAcceptCommand = null; // (cleanText, meta) => boolean | { accept, reason }
 
       if (this.isSupported) {
         this.initRecognition(SpeechRecognition);
@@ -343,6 +344,15 @@
       const clean = this.stripWakePrefix(rawText);
       if (!clean) return false;
       const norm = clean.toLowerCase().replace(/[.,!?;:]+$/g, '').replace(/\s+/g, ' ').trim();
+      if (typeof this.shouldAcceptCommand === 'function') {
+        try {
+          const gate = this.shouldAcceptCommand(clean, { ...meta, norm });
+          if (gate === false || (gate && typeof gate === 'object' && gate.accept === false)) {
+            this._diag('command_locked_or_dup', { reason: (gate && gate.reason) || 'active_task_lock' });
+            return false;
+          }
+        } catch (_e) {}
+      }
       const now = Date.now();
       if (
         this._lastCommandFingerprint &&

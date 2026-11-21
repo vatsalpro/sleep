@@ -18,6 +18,7 @@
       this.shadow = shadowRoot;
       this.rootEl = rootEl;
       this.mode = 'idle'; // 'idle'|'silent'|'listening'|'thinking'|'speaking'|'confirm'|'error'
+      this.taskProcessing = false;
       this.level = 0.25;
       this.perimMix = 0; // 0 = bottom-edge ribbons, 1 = full screen perimeter
       this.dissolving = false;
@@ -90,8 +91,16 @@
     setMode(nextMode = 'idle') {
       this.mode = nextMode;
       if (nextMode !== 'idle') { this.dissolving = false; this.dissolveProgress = 0; this._dissolveDoneCb = null; }
-      if (nextMode === 'idle' && !this.dissolving) { this.stop(); return; }
+      if (nextMode === 'idle' && !this.dissolving && !this.taskProcessing) { this.stop(); return; }
       this._syncMotionMode();
+    }
+    setTaskProcessing(active = false) {
+      this.taskProcessing = Boolean(active);
+      if (this.taskProcessing && this.enabled) {
+        this._syncMotionMode();
+      } else if (this.mode === 'idle' && !this.dissolving) {
+        this.stop();
+      }
     }
     setLevel(lvl = 0.25) { this.level = Math.max(0, Math.min(1, Number(lvl) || 0)); }
     setEnabled(flag = true) {
@@ -140,7 +149,7 @@
     }
 
     _syncMotionMode() {
-      if (!this.enabled || (this.mode === 'idle' && !this.dissolving)) { this.stop(); return; }
+      if (!this.enabled || (this.mode === 'idle' && !this.dissolving && !this.taskProcessing)) { this.stop(); return; }
       if (this.reducedMotion) {
         if (this._rafId && typeof rootScope.cancelAnimationFrame === 'function') rootScope.cancelAnimationFrame(this._rafId);
         this._rafId = 0; this.particles = [];
@@ -180,9 +189,9 @@
         }
       }
 
-      const targetPerim = this.mode === 'thinking' ? 1 : 0;
-      this.perimMix += (targetPerim - this.perimMix) * Math.min(1, dt * 4.5);
-      this._phase += dt * (this.mode === 'thinking' ? 2.1 : (this.mode === 'speaking' ? 1.65 : 1.05));
+      const targetPerim = (this.taskProcessing || this.mode === 'thinking') ? 1 : 0;
+      this.perimMix += (targetPerim - this.perimMix) * Math.min(1, dt * 5.2);
+      this._phase += dt * ((this.taskProcessing || this.mode === 'thinking') ? 2.25 : (this.mode === 'speaking' ? 1.65 : 1.05));
 
       ctx.clearRect(0, 0, w, h);
       this._drawBottomCurves(ctx, w, h, fade);
@@ -194,13 +203,13 @@
     }
 
     _drawBottomCurves(ctx, w, h, alphaScale) {
-      // 4 flowing translucent golden curves hugging the bottom edge like the mockup
-      const ampBase = 10 + this.level * 18;
+      // 4 subtle thin flowing golden-thread & aurora-mist curves hugging the bottom edge
+      const ampBase = 8 + this.level * 15;
       const configs = [
-        { yOff: 34, amp: ampBase * 1.15, freq: 1.0, phase: 0, width: 2.2, alpha: 0.68, color: '#ffe59c' },
-        { yOff: 44, amp: ampBase * 0.9, freq: 1.35, phase: 1.7, width: 1.5, alpha: 0.48, color: '#f3be52' },
-        { yOff: 26, amp: ampBase * 0.7, freq: 0.85, phase: 3.1, width: 1.3, alpha: 0.42, color: '#d7c3ff' },
-        { yOff: 52, amp: ampBase * 1.05, freq: 1.55, phase: 4.4, width: 1.1, alpha: 0.34, color: '#fff3cb' }
+        { yOff: 34, amp: ampBase * 1.12, freq: 1.0, phase: 0, width: 1.65, alpha: 0.72, color: '#ffe59c' },
+        { yOff: 44, amp: ampBase * 0.88, freq: 1.35, phase: 1.7, width: 1.2, alpha: 0.50, color: '#f3be52' },
+        { yOff: 26, amp: ampBase * 0.68, freq: 0.85, phase: 3.1, width: 1.05, alpha: 0.44, color: '#d7c3ff' },
+        { yOff: 52, amp: ampBase * 1.02, freq: 1.55, phase: 4.4, width: 0.85, alpha: 0.36, color: '#fff3cb' }
       ];
       ctx.save();
       for (const c of configs) {
@@ -227,21 +236,24 @@
     }
 
     _drawPerimeterCurves(ctx, w, h, alphaScale) {
-      const m = 14;
+      const m = 6;
       ctx.save();
+      // Full-viewport soft outer-edge golden aurora ribbons along top, right, bottom, and left boundaries
       for (let k = 0; k < 3; k++) {
-        const inset = m + k * 7;
-        const wiggle = Math.sin(this._phase + k * 1.8) * 6;
+        const inset = m + k * 6;
+        const wiggle = Math.sin(this._phase + k * 1.6) * 5;
         ctx.beginPath();
-        ctx.moveTo(inset, h - inset - 40);
-        ctx.bezierCurveTo(inset + wiggle, h * 0.5, inset - wiggle, h * 0.25, inset + 36, inset);
-        ctx.quadraticCurveTo(w * 0.5, inset + wiggle, w - inset - 36, inset);
-        ctx.bezierCurveTo(w - inset + wiggle, h * 0.3, w - inset - wiggle, h * 0.65, w - inset, h - inset - 40);
-        ctx.strokeStyle = k === 1 ? '#d7c3ff' : '#ffe296';
-        ctx.globalAlpha = (0.52 - k * 0.12) * alphaScale;
-        ctx.lineWidth = 2.0 - k * 0.35;
-        ctx.shadowColor = 'rgba(246, 200, 96, 0.65)';
-        ctx.shadowBlur = 12;
+        ctx.moveTo(inset, h - inset);
+        ctx.bezierCurveTo(inset + wiggle, h * 0.65, inset - wiggle, h * 0.35, inset, inset);
+        ctx.bezierCurveTo(w * 0.35, inset + wiggle, w * 0.65, inset - wiggle, w - inset, inset);
+        ctx.bezierCurveTo(w - inset - wiggle, h * 0.35, w - inset + wiggle, h * 0.65, w - inset, h - inset);
+        ctx.bezierCurveTo(w * 0.65, h - inset - wiggle, w * 0.35, h - inset + wiggle, inset, h - inset);
+        ctx.closePath();
+        ctx.strokeStyle = k === 1 ? '#d7c3ff' : (k === 0 ? '#ffe59c' : '#f3be52');
+        ctx.globalAlpha = (0.58 - k * 0.14) * alphaScale;
+        ctx.lineWidth = 2.2 - k * 0.45;
+        ctx.shadowColor = 'rgba(246, 200, 96, 0.72)';
+        ctx.shadowBlur = 16;
         ctx.stroke();
       }
       ctx.restore();
@@ -259,6 +271,13 @@
       grad.addColorStop(1, 'rgba(255, 226, 150, 0)');
       ctx.fillStyle = grad;
       ctx.fillRect(0, h - 220, w, 220);
+      if (this.taskProcessing || this.mode === 'thinking') {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(243, 190, 82, 0.65)';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(4, 4, w - 8, h - 8);
+        ctx.restore();
+      }
     }
 
     _stepParticles(dt, w, h) {

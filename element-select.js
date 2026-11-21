@@ -199,7 +199,7 @@
       // Clean trailing punctuation & verb prefixes
       const stripVerbAndChrome = (txt) => cleanText(txt)
         .replace(/[.?!]+$/, '')
-        .replace(/^(?:tick|check|untick|uncheck|select|choose|pick|deselect|unselect|enable|disable|toggle|activate|switch\s+to|open|go\s+to)\s+/i, '')
+        .replace(/^(?:tick|check|untick|uncheck|select|choose|pick|deselect|unselect|enable|disable|toggle|activate|switch\s+to|open|go\s+to|click(?:\s+on)?|press|tap)\s+/i, '')
         .replace(/^(?:the|an|a)\s+/i, '')
         .trim();
 
@@ -483,8 +483,20 @@
         ));
         for (const node of customDropNodes) {
           if (consumed.has(node) || !visCheck(node)) continue;
+          const ctrlId = getAttr(node, 'aria-controls');
+          const ctrlEl = ctrlId && rDoc.getElementById ? rDoc.getElementById(ctrlId) : null;
+          const siblingGroup = node.closest && node.closest('[data-menu-group], .has-submenu, .nav-dropdown, li.menu-item');
+          const menuTarget = ctrlEl || (siblingGroup && siblingGroup.querySelector && siblingGroup.querySelector('[role="menu"], .submenu, .dropdown-menu, ul'));
+          const hasNavItems = Boolean(menuTarget && menuTarget.querySelector && menuTarget.querySelector('[role="menuitem"], a[href], .submenu-item, [data-submenu-item]'));
+          const inNavArea = Boolean(node.closest && node.closest('nav, [role="navigation"], [data-menu-group], .has-submenu'));
+          if ((getAttr(node, 'aria-haspopup') === 'menu' && hasNavItems) || (inNavArea && hasNavItems)) {
+            continue;
+          }
           consumed.add(node);
-          const lbl = (fi && fi.resolveFieldLabel ? fi.resolveFieldLabel(node) : '') || cleanText(node.innerText || node.textContent) || 'Dropdown';
+          const idFallback = node.id ? cleanText(String(node.id).replace(/[_-]+/g, ' ')) : '';
+          const fiLabel = fi && fi.resolveFieldLabel ? fi.resolveFieldLabel(node) : '';
+          const btnText = cleanText(node.innerText || node.textContent || '');
+          const lbl = (fiLabel && fiLabel !== idFallback ? fiLabel : '') || btnText || fiLabel || 'Dropdown';
           const opts = fi && fi.resolveListboxOptions ? fi.resolveListboxOptions(node, rDoc, { includeDisabled: true }) : [];
           const wrap = node.closest && node.closest('[data-dropdown], .dropdown, .custom-select, .searchable-select');
           const hasSearchInput = Boolean(wrap && wrap.querySelector && wrap.querySelector('input[type="search"], input[type="text"], input:not([type])'));
@@ -513,7 +525,7 @@
         }
 
         // Tabs ([role="tab"])
-        const tabNodes = Array.from(rDoc.querySelectorAll('[role="tab"]'));
+        const tabNodes = Array.from(rDoc.querySelectorAll('[role="tab"], .tab[data-tab], .nav-tab[data-tab]'));
         for (const tNode of tabNodes) {
           if (consumed.has(tNode) || !visCheck(tNode)) continue;
           consumed.add(tNode);
@@ -537,22 +549,36 @@
           if (consumed.has(mNode)) continue;
           const isVis = visCheck(mNode);
           let parentTrigger = null;
-          if (!isVis && typeof mNode.closest === 'function') {
-            const parentMenuHost = mNode.closest('[data-menu-group], .has-submenu, li.menu-item, [role="menu"]')?.parentElement;
-            if (parentMenuHost) {
-              const candTrig = parentMenuHost.querySelector('button, [role="menuitem"], a[href], [aria-haspopup]');
-              if (candTrig && candTrig !== mNode && visCheck(candTrig)) parentTrigger = candTrig;
+          let resolvedTrig = null;
+          if (typeof mNode.closest === 'function') {
+            const submenuEl = mNode.closest('[role="menu"], .submenu, .dropdown-menu, ul');
+            const groupContainer = mNode.closest('[data-menu-group], .has-submenu, .nav-dropdown, .dropdown, li.menu-item')
+              || (submenuEl && submenuEl.parentElement);
+            if (groupContainer && typeof groupContainer.querySelectorAll === 'function') {
+              const trigCandidates = Array.from(groupContainer.querySelectorAll('button, [aria-haspopup], [aria-expanded], .menu-trigger, a[href]'));
+              const candTrig = trigCandidates.find((t) =>
+                t !== mNode && !t.contains(mNode) && (!submenuEl || !submenuEl.contains(t)) && visCheck(t)
+              ) || null;
+              if (candTrig) {
+                resolvedTrig = candTrig;
+                if (!isVis) parentTrigger = candTrig;
+              }
             }
           }
           if (!isVis && !parentTrigger) continue;
           const lbl = cleanText(mNode.innerText || mNode.textContent || getAttr(mNode, 'aria-label'));
           if (!lbl) continue;
           consumed.add(mNode);
+          const trigLabel = resolvedTrig
+            ? cleanText(getAttr(resolvedTrig, 'aria-label') || resolvedTrig.innerText || resolvedTrig.textContent)
+            : '';
           addCandidate({
             elementType: 'menu_item',
             role: getAttr(mNode, 'role') || 'menuitem',
             label: lbl,
-            parentContainer: parentTrigger ? cleanText(parentTrigger.innerText || parentTrigger.textContent) : 'Menu',
+            group: trigLabel || undefined,
+            section: trigLabel || undefined,
+            parentContainer: trigLabel || 'Menu',
             disabled: Boolean(mNode.disabled || getAttr(mNode, 'aria-disabled') === 'true'),
             rootType: rType,
             element: mNode,
@@ -781,16 +807,27 @@
         }
 
         // Control label match ("Terms and Conditions checkbox", "Notification option", explicit fieldHint)
-        const targetForLabel = qField || (['checkbox', 'switch', 'tab', 'menu_item', 'button', 'range'].includes(c.elementType) ? qOpt : '');
+        const isStandaloneItem = ['checkbox', 'switch', 'tab', 'menu_item', 'button', 'range'].includes(c.elementType);
+        const targetForLabel = isStandaloneItem ? (qOpt || qField) : (qField || qOpt);
         const targetLblLower = targetForLabel.toLowerCase();
+        let labelScore = 0;
         if (targetLblLower) {
-          if (cLabelLower === targetLblLower) score += 110;
-          else if (cLabelLower.includes(targetLblLower) || targetLblLower.includes(cLabelLower) && cLabelLower.length >= 3) score += 82;
+          if (cLabelLower === targetLblLower) labelScore = 110;
+          else if (cLabelLower.includes(targetLblLower) || (targetLblLower.includes(cLabelLower) && cLabelLower.length >= 3)) labelScore = 82;
           else {
             const tks = tokenize(targetLblLower);
             const hits = tks.filter((t) => cContextHay.includes(t)).length;
-            if (hits > 0) score += Math.round((hits / Math.max(tks.length, 1)) * 68);
+            if (hits > 0) labelScore = Math.round((hits / Math.max(tks.length, 1)) * 68);
           }
+          score += labelScore;
+        }
+        // Container affinity for standalone items scoped by parent/menu/group ("Select X under Y")
+        const qFieldLower = qField.toLowerCase();
+        if (isStandaloneItem && qOpt && qFieldLower && qOpt.toLowerCase() !== qFieldLower && labelScore > 0) {
+          const containerHay = `${c.parentContainer || ''} ${c.section || ''} ${c.nearbyHeading || ''} ${c.formContext || ''}`.toLowerCase();
+          if (containerHay.includes(qFieldLower)) score += 55;
+          else if (fieldTokens.length && fieldTokens.every((t) => containerHay.includes(t))) score += 40;
+          else score -= 25;
         }
         // Weak partial credit when selecting a standalone option directly by option text matching control
         if (score === 0 && optTokens.length > 0) {
@@ -992,46 +1029,91 @@
         }
       }
 
-      // Invoke Ollama AI candidate ranking when multiple candidates exist and deterministic certainty isn't overwhelming OR lazy/searchable dropdown needs semantic routing
+      // Invoke Ollama AI candidate ranking only when deterministic evidence isn't already an unambiguous exact control match
       const hasLazyCustomOrSearchable = candidates.some((c) => ['custom_dropdown', 'searchable_dropdown', 'autocomplete'].includes(c.elementType) && (!c.options || c.options.length === 0));
+      const normStr = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const explicitHintNorm = normStr(parsedCmd.sectionHint || parsedCmd.fieldHint || '');
+      const topMatchesExplicitHint = Boolean(
+        explicitHintNorm && top && top.candidate && (
+          normStr(top.candidate.label || '').includes(explicitHintNorm) ||
+          normStr(top.candidate.section || '').includes(explicitHintNorm) ||
+          normStr(top.candidate.parentContainer || '').includes(explicitHintNorm) ||
+          explicitHintNorm.includes(normStr(top.candidate.label || ''))
+        )
+      );
+      const strongExactControlMatch = Boolean(
+        top &&
+        top.score >= 105 &&
+        (!['custom_dropdown', 'searchable_dropdown', 'autocomplete'].includes(top.candidate.elementType) || topMatchesExplicitHint) &&
+        (!second || (top.score - second.score) > 18)
+      );
       const aiEnabled = options.aiSearchEnabled !== undefined ? Boolean(options.aiSearchEnabled) : this.aiSearchEnabled;
       const shouldConsultAi = aiEnabled && candidates.length > 1 && (
         options.forceAiRanking ||
-        (!top) ||
-        (top && top.score < 95) ||
-        (hasLazyCustomOrSearchable && (!top || !top.matchedOpt))
+        (!strongExactControlMatch && (
+          (!top) ||
+          (top && top.score < 95) ||
+          (hasLazyCustomOrSearchable && (!top || (!top.matchedOpt && !topMatchesExplicitHint)))
+        ))
       );
 
       let aiDecision = null;
+      let aiLastTier = '';
       if (shouldConsultAi) {
-        const aiPayload = this.buildOllamaPayload(rawText, candidates, interactionCtx, doc);
+        const prioritizedSet = new Set();
+        const prioritizedCandidates = [];
+        for (const s of scored) {
+          if (s && s.candidate && !prioritizedSet.has(s.candidate.id)) {
+            prioritizedSet.add(s.candidate.id);
+            prioritizedCandidates.push(s.candidate);
+          }
+        }
+        for (const c of candidates) {
+          if (c && !prioritizedSet.has(c.id)) {
+            prioritizedSet.add(c.id);
+            prioritizedCandidates.push(c);
+          }
+        }
+        const aiPayload = this.buildOllamaPayload(rawText, prioritizedCandidates, interactionCtx, doc);
+        if (options.forcePrimary) aiPayload.forcePrimary = true;
+        if (options.qwenFailedAttempt) aiPayload.qwenFailedAttempt = options.qwenFailedAttempt;
+        if (options.failureReason) aiPayload.failureReason = options.failureReason;
         const aiRes = await this._requestOllamaRank(aiPayload);
+        aiLastTier = (aiRes && aiRes.tier) || '';
         if (aiRes && aiRes.status === 'ok' && aiRes.selection) {
           aiDecision = aiRes.selection;
           if (aiDecision.needs_clarification || aiDecision.intended_action === 'clarify') {
-            return {
-              action: 'clarify',
-              needsClarification: true,
-              source: 'ollama',
-              clarificationCandidates: scored.slice(0, 4).map((s) => s.candidate),
-              message: aiDecision.clarification_question || 'Multiple controls match your request. Which one did you mean?'
-            };
+            if (!strongExactControlMatch) {
+              return {
+                action: 'clarify',
+                needsClarification: true,
+                source: 'ollama',
+                modelTier: aiRes.tier || 'compact',
+                clarificationCandidates: scored.slice(0, 4).map((s) => s.candidate),
+                message: aiDecision.clarification_question || 'Multiple controls match your request. Which one did you mean?'
+              };
+            }
           }
           if (aiDecision.selected_candidate_id && aiDecision.confidence >= 0.6) {
             const aiCand = candidates.find((c) => c.id === aiDecision.selected_candidate_id);
-            if (aiCand) {
+            const preventHintOverride = Boolean(topMatchesExplicitHint && top && aiCand && aiCand.id !== top.candidate.id);
+            if (aiCand && !preventHintOverride) {
               if (aiCand.disabled) {
-                return { action: 'disabled', candidate: aiCand, source: 'ollama', message: `"${aiCand.label}" is currently disabled and cannot be changed.` };
+                return { action: 'disabled', candidate: aiCand, source: 'ollama', modelTier: aiRes.tier || 'compact', message: `"${aiCand.label}" is currently disabled and cannot be changed.` };
               }
+              const aiOpt = String(aiDecision.target_option || '').trim();
+              const keepParsedOpt = parsedCmd.targetOption && (!aiOpt || !normStr(rawText).includes(normStr(aiOpt)));
               return {
                 action: 'select',
                 candidate: aiCand,
                 intendedAction: aiDecision.intended_action,
-                targetOption: aiDecision.target_option || parsedCmd.targetOption,
+                targetOption: keepParsedOpt ? parsedCmd.targetOption : (aiOpt || parsedCmd.targetOption),
                 multiValues: (Array.isArray(aiDecision.multi_options) && aiDecision.multi_options.length > 0) ? aiDecision.multi_options : parsedCmd.multiValues,
                 confidence: aiDecision.confidence,
                 reason: aiDecision.reason || 'Selected by Ollama context ranking',
-                source: 'ollama'
+                source: 'ollama',
+                modelTier: aiRes.tier || 'compact',
+                model: aiRes.model || ''
               };
             }
           }
@@ -1053,6 +1135,8 @@
         }
         return {
           action: 'not_found',
+          source: aiLastTier ? 'ollama' : 'deterministic',
+          modelTier: aiLastTier || '',
           message: `Could not find "${parsedCmd.targetOption || rawText}" on this page.`
         };
       }
@@ -1329,10 +1413,36 @@
             message: `${desired ? 'Checked' : 'Unchecked'} ${doneLabels.join(', ')} in ${cand.label}.`
           };
         } else if (type === 'tab') {
-          if (typeof el.click === 'function') el.click();
-          if (ff) ff.dispatchControlEvents(el, { includeClick: false });
-          await new Promise((r) => setTimeout(r, 25));
-          const verified = getAttr(el, 'aria-selected') === 'true' || (el.classList && (el.classList.contains('active') || el.classList.contains('selected')));
+          // Genuine user interaction sequence: focus, pointer events, click, and space/enter keydown if needed
+          if (typeof el.focus === 'function') {
+            try { el.focus(); } catch (_e) {}
+          }
+          if (ff && typeof ff.dispatchControlEvents === 'function') {
+            ff.dispatchControlEvents(el, { includeClick: true, includeBlur: false, includeKeyboard: false });
+          }
+          if (typeof el.click === 'function') {
+            try { el.click(); } catch (_e) {}
+          }
+          await new Promise((r) => setTimeout(r, 60));
+
+          // Check for associated panel state change (aria-controls, data-target, href target)
+          const controlsId = getAttr(el, 'aria-controls') || getAttr(el, 'data-target') || '';
+          let panelActive = false;
+          if (controlsId) {
+            const cleanId = controlsId.replace(/^#/, '');
+            const panel = doc.getElementById ? doc.getElementById(cleanId) : (doc.querySelector ? doc.querySelector(`#${cleanId}, [id="${cleanId}"]`) : null);
+            if (panel) {
+              const panelAriaHidden = getAttr(panel, 'aria-hidden');
+              const panelHidden = panel.hidden || panel.classList?.contains('hidden') || panelAriaHidden === 'true';
+              panelActive = !panelHidden || panel.classList?.contains('active') || panel.classList?.contains('show');
+            }
+          }
+
+          // Genuine verification: verify tab itself reports selected/active state or associated panel became active
+          const verified = getAttr(el, 'aria-selected') === 'true' ||
+            (el.classList && (el.classList.contains('active') || el.classList.contains('selected'))) ||
+            panelActive;
+
           execResult = {
             ok: verified,
             verified,
@@ -1340,21 +1450,60 @@
             message: verified ? `Switched to "${cand.label}" tab.` : `Tab "${cand.label}" did not report active state after click.`
           };
         } else if (type === 'menu_item') {
-          if (cand.parentMenuTrigger) {
-            const trig = cand.parentMenuTrigger;
-            if (typeof trig.dispatchEvent === 'function') ff.dispatchControlEvents(trig, { includeClick: true, includeBlur: false });
-            if (typeof trig.click === 'function') trig.click();
-            await ff.waitForDynamicDomChange(doc.body || doc, () => (fi.isElementVisuallyVisible(el) ? el : null), 500);
+          const win = doc && doc.defaultView ? doc.defaultView : (typeof window !== 'undefined' ? window : null);
+          const urlBefore = win && win.location ? win.location.href : '';
+          const hashBefore = win && win.location ? win.location.hash : '';
+          const textBefore = cleanText(doc && doc.body ? doc.body.innerText : '').slice(0, 600);
+          const ariaSelectedBefore = getAttr(el, 'aria-selected');
+          const ariaCheckedBefore = getAttr(el, 'aria-checked');
+          const ariaExpandedBefore = getAttr(el, 'aria-expanded');
+          const ariaCurrentBefore = getAttr(el, 'aria-current');
+          let clickObserved = typeof el.addEventListener !== 'function';
+          const onObservedClick = () => { clickObserved = true; };
+          try { if (typeof el.addEventListener === 'function') el.addEventListener('click', onObservedClick, { once: true }); } catch (_e) {}
+          try {
+            if (cand.parentMenuTrigger) {
+              const trig = cand.parentMenuTrigger;
+              const needOpen = (fi && typeof fi.isElementVisuallyVisible === 'function' && !fi.isElementVisuallyVisible(el)) || getAttr(trig, 'aria-expanded') === 'false';
+              if (needOpen) {
+                if (typeof trig.click === 'function') trig.click();
+                else if (ff) ff.dispatchControlEvents(trig, { includeClick: true, includeBlur: false });
+                if (ff && typeof ff.waitForDynamicDomChange === 'function') {
+                  await ff.waitForDynamicDomChange(doc.body || doc, () => (fi && fi.isElementVisuallyVisible(el) ? el : null), 500);
+                } else {
+                  await new Promise((r) => setTimeout(r, 80));
+                }
+              }
+            }
+            const becameVisible = !cand.parentMenuTrigger || !fi || fi.isElementVisuallyVisible(el);
+            if (typeof el.focus === 'function') {
+              try { el.focus(); } catch (_e) {}
+            }
+            if (typeof el.click === 'function') el.click();
+            else if (ff) ff.dispatchControlEvents(el, { includeClick: true, includeBlur: false });
+            if (ff) ff.dispatchControlEvents(el, { includeClick: false });
+            await new Promise((r) => setTimeout(r, 90));
+            const urlAfter = win && win.location ? win.location.href : '';
+            const hashAfter = win && win.location ? win.location.hash : '';
+            const textAfter = cleanText(doc && doc.body ? doc.body.innerText : '').slice(0, 600);
+            const stateChanged =
+              urlAfter !== urlBefore ||
+              hashAfter !== hashBefore ||
+              textAfter !== textBefore ||
+              getAttr(el, 'aria-selected') !== ariaSelectedBefore ||
+              getAttr(el, 'aria-checked') !== ariaCheckedBefore ||
+              getAttr(el, 'aria-expanded') !== ariaExpandedBefore ||
+              getAttr(el, 'aria-current') !== ariaCurrentBefore;
+            const verified = Boolean(becameVisible && (stateChanged || clickObserved));
+            execResult = {
+              ok: verified,
+              verified,
+              appliedValue: cand.label,
+              message: verified ? `Selected menu item "${cand.label}".` : `Menu item "${cand.label}" did not open or activate.`
+            };
+          } finally {
+            try { if (typeof el.removeEventListener === 'function') el.removeEventListener('click', onObservedClick); } catch (_e) {}
           }
-          if (typeof el.click === 'function') el.click();
-          if (ff) ff.dispatchControlEvents(el, { includeClick: false });
-          await new Promise((r) => setTimeout(r, 25));
-          execResult = {
-            ok: true,
-            verified: true,
-            appliedValue: cand.label,
-            message: `Selected menu item "${cand.label}".`
-          };
         } else if (type === 'range') {
           execResult = ff.setRangeValue(el, targetOption);
           if (execResult.ok) execResult.message = `Set "${cand.label}" to ${execResult.appliedValue}.`;
@@ -1370,8 +1519,29 @@
             message: verified ? `Set "${cand.label}" to ${el.value}.` : `Date field kept "${el.value || 'empty'}".`
           };
         } else if (type === 'button') {
-          if (typeof el.click === 'function') el.click();
-          execResult = { ok: true, verified: true, appliedValue: cand.label, message: `Selected "${cand.label}".` };
+          const win = doc && doc.defaultView ? doc.defaultView : (typeof window !== 'undefined' ? window : null);
+          const urlBefore = win && win.location ? win.location.href : '';
+          const hashBefore = win && win.location ? win.location.hash : '';
+          let btnClickObserved = typeof el.addEventListener !== 'function';
+          const onBtnClick = () => { btnClickObserved = true; };
+          try { if (typeof el.addEventListener === 'function') el.addEventListener('click', onBtnClick, { once: true }); } catch (_e) {}
+          try {
+            if (typeof el.click === 'function') el.click();
+            else if (ff) ff.dispatchControlEvents(el, { includeClick: true, includeBlur: false });
+          } finally {
+            try { if (typeof el.removeEventListener === 'function') el.removeEventListener('click', onBtnClick); } catch (_e) {}
+          }
+          await new Promise((r) => setTimeout(r, 40));
+          const btnVerified = Boolean(
+            btnClickObserved ||
+            (win && win.location && (win.location.href !== urlBefore || win.location.hash !== hashBefore))
+          );
+          execResult = {
+            ok: btnVerified,
+            verified: btnVerified,
+            appliedValue: cand.label,
+            message: btnVerified ? `Selected "${cand.label}".` : `Button "${cand.label}" did not activate.`
+          };
         }
       } catch (err) {
         execResult = { ok: false, verified: false, error: err && err.message };
@@ -1468,6 +1638,21 @@
         return { ok: false, status: 'disabled', verified: false, message: decision.message };
       }
 
+      if (decision.source === 'ollama' && decision.modelTier === 'compact' && !options._alreadyEscalated &&
+          (decision.action === 'clarify' || decision.needsClarification || decision.action === 'not_found')) {
+        const escalated = await this.handleCommand(rawText, {
+          ...options,
+          _alreadyEscalated: true,
+          forceAiRanking: true,
+          forcePrimary: true,
+          skipCache: true,
+          failureReason: `Compact model returned ${decision.action}`
+        });
+        if (escalated && (escalated.verified || escalated.ok)) {
+          return { ...escalated, escalated: true };
+        }
+      }
+
       if (decision.action === 'not_found') {
         this._notifyStatus(decision.message, { state: 'idle', title: 'Option Not Found', openCard: true, cardType: 'error' });
         return { ok: false, status: 'not_found', verified: false, message: decision.message };
@@ -1524,7 +1709,30 @@
         };
       }
 
-      return this.executeAndVerifyCandidate(decision, parsedCmd, options);
+      let execRes = await this.executeAndVerifyCandidate(decision, parsedCmd, options);
+      if ((!execRes || !execRes.verified) && decision && decision.source === 'ollama' &&
+          decision.modelTier === 'compact' && !options._alreadyEscalated && decision.candidate) {
+        const escalatedRes = await this.handleCommand(rawText, {
+          ...options,
+          _alreadyEscalated: true,
+          forceAiRanking: true,
+          forcePrimary: true,
+          skipCache: true,
+          qwenFailedAttempt: {
+            selected_candidate_id: decision.candidate.id,
+            label: decision.candidate.label,
+            intended_action: decision.intendedAction || parsedCmd.action
+          },
+          failureReason: (execRes && execRes.message) || 'Execution/verification failed'
+        });
+        if (escalatedRes && (escalatedRes.verified || escalatedRes.status === 'needs_clarification')) {
+          execRes = { ...escalatedRes, escalated: true };
+        }
+      }
+      if (execRes && execRes.verified && this.widget && this.widget.worldModel && typeof this.widget.worldModel.scheduleProactiveScan === 'function') {
+        this.widget.worldModel.scheduleProactiveScan(doc, { force: true, reason: 'post_control_change' });
+      }
+      return execRes;
     }
   }
 
