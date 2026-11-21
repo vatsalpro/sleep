@@ -1477,6 +1477,103 @@
       };
     }
 
+    scroll(direction = 'down', options = {}) {
+      // 1. Observe baseline scroll position
+      const dir = String(direction || 'down').toLowerCase();
+      const beforeY = window.scrollY;
+      const vh = window.innerHeight || 800;
+      const maxScroll = Math.max(0, (document.documentElement.scrollHeight || document.body.scrollHeight || 0) - vh);
+      const step = options.amount === 'half' ? Math.round(vh * 0.45) : Math.round(vh * 0.8);
+
+      // 2. Execute
+      if (dir === 'top') {
+        window.scrollTo({ top: 0, behavior: options.behavior || 'instant' });
+      } else if (dir === 'bottom') {
+        window.scrollTo({ top: maxScroll, behavior: options.behavior || 'instant' });
+      } else if (dir === 'up') {
+        window.scrollBy({ top: -step, behavior: options.behavior || 'instant' });
+      } else {
+        window.scrollBy({ top: step, behavior: options.behavior || 'instant' });
+      }
+      this.invalidateCache();
+
+      // 3. Re-observe & Verify
+      const afterY = window.scrollY;
+      const atBoundary = (dir === 'up' || dir === 'top') ? beforeY <= 1 : beforeY >= (maxScroll - 2);
+      const verified = Math.abs(afterY - beforeY) > 0 || atBoundary || maxScroll === 0;
+      this.observe(options.root || document, { force: true });
+
+      return {
+        status: verified ? 'SUCCESS' : 'FAILED',
+        verified,
+        action: 'scroll',
+        direction: dir,
+        beforeY: Math.round(beforeY),
+        afterY: Math.round(afterY),
+        atBoundary
+      };
+    }
+
+    async goToSection(sectionQuery, options = {}) {
+      const qRaw = String(sectionQuery || '').replace(/\b(?:section|subsection|heading)\b/gi, '').replace(/[.,!?;:]+$/g, '').trim();
+      const qLow = qRaw.toLowerCase();
+      if (!qLow) {
+        return { status: 'FAILED', verified: false, reason: 'empty_section_query' };
+      }
+
+      // 1. Observe & 2. Resolve headings and landmarks
+      const root = options.root || document;
+      const candidates = Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], section[aria-label], nav[aria-label], main[aria-label], article[aria-label]'));
+      const scored = [];
+      for (const el of candidates) {
+        if (!this.observer.isVisible(el)) continue;
+        const label = sanitizeUntrustedLabel(
+          el.getAttribute('aria-label') || this.observer._getCleanText(el),
+          120
+        );
+        if (!label) continue;
+        const lLow = label.toLowerCase();
+        let score = 0;
+        if (lLow === qLow) score += 100;
+        else if (lLow.includes(qLow)) score += 75;
+        else if (qLow.includes(lLow) && lLow.length >= 3) score += 60;
+        const qToks = qLow.split(/\s+/).filter(Boolean);
+        const matched = qToks.filter(t => lLow.includes(t));
+        if (qToks.length > 0) score += (matched.length / qToks.length) * 35;
+        if (/^H[1-6]$/.test(el.tagName)) score += 10;
+        if (score >= 45) scored.push({ el, label, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      if (scored.length === 0) {
+        return { status: 'FAILED', verified: false, reason: 'section_not_found' };
+      }
+
+      const target = scored[0];
+      const beforeY = window.scrollY;
+
+      // 3. Validate & 4. Execute scroll
+      const rect = target.el.getBoundingClientRect();
+      const destY = Math.max(0, window.scrollY + rect.top - 80);
+      window.scrollTo({ top: destY, behavior: options.behavior || 'instant' });
+      this.invalidateCache();
+
+      // 5. Re-observe & Verify
+      const afterRect = target.el.getBoundingClientRect();
+      const inViewport = afterRect.top >= -40 && afterRect.top <= (window.innerHeight || 800);
+      const verified = inViewport || Math.abs(window.scrollY - beforeY) > 0;
+      this.observe(root, { force: true });
+
+      return {
+        status: verified ? 'SUCCESS' : 'FAILED',
+        verified,
+        action: 'go_to_section',
+        section: target.label,
+        element: target.el,
+        beforeY: Math.round(beforeY),
+        afterY: Math.round(window.scrollY)
+      };
+    }
+
     async executeSearch(query, options = {}) {
       const cleanQ = String(query || '').trim();
       if (!cleanQ) {

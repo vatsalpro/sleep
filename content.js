@@ -1925,7 +1925,7 @@
             (this.memory && this.memory.state && this.memory.state.selectionState && this.memory.state.selectionState.previousSection) || '';
           if (prevSec) {
             this._setStatusChip(`Returning to "${prevSec}" section...`);
-            const navRes = await this.navigator.goToSection(prevSec, { readAfter: false });
+            const navRes = await this._executeGoToSectionWithEngine(prevSec, { readAfter: false });
             if (this.memory && navRes && navRes.section && typeof this.memory.setActiveUiFocus === 'function') {
               this.memory.setActiveUiFocus({ section: navRes.section });
             }
@@ -1944,21 +1944,21 @@
         if (linkHit && linkHit.element && typeof this.navigator.previewAndAct === 'function') {
           return this.navigator.previewAndAct(linkHit, { confidence: 0.92, matches: [linkHit] });
         }
-        const secRes = await this.navigator.goToSection(central.targetKind, { readAfter: true });
+        const secRes = await this._executeGoToSectionWithEngine(central.targetKind, { readAfter: true });
         if (secRes && secRes.status === 'not_found' && this.taskPlanner) {
           await this.taskPlanner.recordFailure(`Find ${central.targetKind}`, `No ${central.targetKind} link or section found on ${document.title}`, window.location.href);
         }
         return secRes;
       }
 
-      if (cat === C.PAGE_NAVIGATION && central.subAction === 'navigate_section' && central.sectionTarget && this.navigator) {
+      if (cat === C.PAGE_NAVIGATION && central.subAction === 'navigate_section' && central.sectionTarget && (this.navigator || this.browserEngine)) {
         let secTarget = central.sectionTarget;
         if (/^(?:the\s+)?(?:previous|last|earlier)(?:\s+section)?$/i.test(String(secTarget).trim())) {
           secTarget = (resolvedContext && resolvedContext.resolvedSection) ||
             (this.memory && this.memory.state && this.memory.state.selectionState && this.memory.state.selectionState.previousSection) || secTarget;
         }
         this._setStatusChip(`Executing: finding "${secTarget}" section...`);
-        const navRes = await this.navigator.goToSection(secTarget, { readAfter: false });
+        const navRes = await this._executeGoToSectionWithEngine(secTarget, { readAfter: false });
         if (this.memory && navRes && navRes.section && typeof this.memory.setActiveUiFocus === 'function') {
           this.memory.setActiveUiFocus({ section: navRes.section });
         }
@@ -2746,14 +2746,22 @@
       let res = null;
       const doc = document;
 
-      if (fastAction.type === 'scroll' && this.navigator) {
-        const before = this.actionVerifier ? this.actionVerifier.captureState(doc) : null;
-        this.navigator.scroll(fastAction.dir || 'down', 0.99, { amount: fastAction.amount || 'page', skipConfirm: true, behavior: 'auto' });
-        // `behavior: auto` completes the viewport scroll synchronously, so capture
-        // the post-action state only after the browser has applied that operation.
-        const after = this.actionVerifier ? this.actionVerifier.captureState(doc) : null;
-        const ver = this.actionVerifier ? this.actionVerifier.verify('scroll', before, after, null, { dir: fastAction.dir }) : { verified: true };
-        res = { status: 'fast_scrolled', dir: fastAction.dir, verified: ver.verified, path: 'A', usedLlm: false, changeReport: ver.changeReport || null };
+      if (fastAction.type === 'scroll' && (this.navigator || this.browserEngine)) {
+        if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.scroll === 'function') {
+          const sT0 = performance.now();
+          const beScroll = this.browserEngine.scroll(fastAction.dir || 'down', { amount: fastAction.amount || 'page', behavior: 'instant' });
+          this._recordRolloutEvent({ action: 'scroll', engine: 'rebuilt_browser_engine', outcome: beScroll.verified ? 'success' : 'fallback', latencyMs: performance.now() - sT0 });
+          if (beScroll && beScroll.verified) {
+            res = { status: 'fast_scrolled', dir: fastAction.dir, verified: true, engine: 'rebuilt_browser_engine', path: 'A', usedLlm: false, beforeY: beScroll.beforeY, afterY: beScroll.afterY };
+          }
+        }
+        if (!res && this.navigator) {
+          const before = this.actionVerifier ? this.actionVerifier.captureState(doc) : null;
+          this.navigator.scroll(fastAction.dir || 'down', 0.99, { amount: fastAction.amount || 'page', skipConfirm: true, behavior: 'auto' });
+          const after = this.actionVerifier ? this.actionVerifier.captureState(doc) : null;
+          const ver = this.actionVerifier ? this.actionVerifier.verify('scroll', before, after, null, { dir: fastAction.dir }) : { verified: true };
+          res = { status: 'fast_scrolled', dir: fastAction.dir, verified: ver.verified, path: 'A', usedLlm: false, changeReport: ver.changeReport || null };
+        }
       } else if (fastAction.type === 'history' && this.navigator) {
         await this.navigator.historyAction(fastAction.dir || 'back', 0.99, { fastPath: true, skipConfirm: true });
         res = { status: `fast_history_${fastAction.dir}`, dir: fastAction.dir, verified: true, path: 'A', usedLlm: false };
@@ -4056,7 +4064,7 @@
             }
             navTarget = prevResolved;
           }
-          const navRes = await this.navigator.goToSection(navTarget, { readAfter: !(/\b(?:scroll\s+to|take\s+me\s+to|jump\s+to)\b/i.test(raw) && /\b(?:discussing|explaining|where\s+they)\b/i.test(raw)) });
+          const navRes = await this._executeGoToSectionWithEngine(navTarget, { readAfter: !(/\b(?:scroll\s+to|take\s+me\s+to|jump\s+to)\b/i.test(raw) && /\b(?:discussing|explaining|where\s+they)\b/i.test(raw)) });
           if (mem && navRes && navRes.section && typeof mem.setActiveUiFocus === 'function') {
             mem.setActiveUiFocus({ section: navRes.section });
           }
@@ -4330,6 +4338,46 @@
       }
 
       return null;
+    }
+
+    async _executeGoToSectionWithEngine(secTarget, opts = {}) {
+      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.goToSection === 'function') {
+        const t0 = performance.now();
+        try {
+          const beRes = await this.browserEngine.goToSection(secTarget, opts);
+          const ms = performance.now() - t0;
+          if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
+            this._recordRolloutEvent({ action: 'go_to_section', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            if (beRes.element && this.navigator && typeof this.navigator.previewElement === 'function') {
+              this.navigator.previewElement(beRes.element);
+            }
+            if (opts.readAfter && beRes.element && this.reader && typeof this.reader.readHeadingSection === 'function') {
+              this.reader.setLang(this.getEffectiveSpeechLang(this.lang));
+              this.reader.readHeadingSection(beRes.element);
+            }
+            const msg = `Moved to "${beRes.section}" section.`;
+            this.setAssistantReply(msg);
+            if (window.SW_UI) {
+              window.SW_UI.showCard({ type: 'answer', title: 'Section Navigation', text: msg });
+            }
+            return {
+              status: 'moved',
+              ok: true,
+              verified: true,
+              engine: 'rebuilt_browser_engine',
+              section: beRes.section,
+              message: msg
+            };
+          }
+          this._recordRolloutEvent({ action: 'go_to_section', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (beRes && beRes.reason) || 'not_found', latencyMs: ms });
+        } catch (err) {
+          this._recordRolloutEvent({ action: 'go_to_section', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
+        }
+      }
+      if (this.navigator && typeof this.navigator.goToSection === 'function') {
+        return this.navigator.goToSection(secTarget, opts);
+      }
+      return { status: 'not_found', ok: false, verified: false };
     }
 
     async _executeSearchWithEngine(query, opts = {}) {
