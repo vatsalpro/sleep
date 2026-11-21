@@ -1075,7 +1075,11 @@
     async type(targetOrQuery, text, options = {}) {
       let targetEl = null;
 
-      if (typeof targetOrQuery === 'string') {
+      if (typeof targetOrQuery === 'string' && SENSITIVE_FIELD_RE.test(targetOrQuery) && !options.allowPassword) {
+        return { status: 'SENSITIVE_SKIPPED', verified: false, reason: 'sensitive_field_privacy_gate' };
+      }
+
+      if (typeof targetOrQuery === 'string' && targetOrQuery.trim()) {
         const located = this.locate(targetOrQuery, Object.assign({ isInput: true }, options));
         if (located.status === 'AMBIGUOUS') {
           return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
@@ -1086,6 +1090,16 @@
         targetEl = located.target;
       } else if (targetOrQuery instanceof Element) {
         targetEl = targetOrQuery;
+      } else if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        targetEl = document.activeElement;
+      }
+
+      if (!targetEl || !targetEl.isConnected) {
+        return { status: 'FAILED', verified: false, reason: 'input_field_not_found' };
+      }
+
+      if (isSensitiveElement(targetEl) && !options.allowPassword) {
+        return { status: 'SENSITIVE_SKIPPED', verified: false, reason: 'sensitive_field_privacy_gate' };
       }
 
       const baseline = this.verifier.captureBaseline(targetEl);
@@ -1112,7 +1126,12 @@
         return navRes;
       }
 
-      return this.verifier.verifyInputFill(baseline, targetEl, text);
+      const verifyRes = await this.verifier.verifyInputFill(baseline, targetEl, text);
+      this.observe(options.root || document, { force: true });
+      return {
+        ...verifyRes,
+        targetLabel: sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetEl), 80)
+      };
     }
 
     async select(targetOrQuery, optionText, options = {}) {

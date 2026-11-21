@@ -4253,8 +4253,8 @@
       }
 
       // 9b. Form text/email/number input filling (never fills/logs sensitive fields)
-      if ((plan.intent === 'fill_input' || act.type === 'fill') && this.forms && typeof this.forms.handleDictateIntent === 'function') {
-        const fillRes = await this.forms.handleDictateIntent({
+      if ((plan.intent === 'fill_input' || act.type === 'fill') && (this.forms || this.browserEngine)) {
+        const fillRes = await this._executeFillInputWithEngine({
           action: 'fill',
           target: act.target || plan.target || '',
           value: act.value || ''
@@ -4336,6 +4336,56 @@
       return { status: 'not_found', ok: false, verified: false, reason: 'no_search_engine' };
     }
 
+    async _executeFillInputWithEngine(args = {}, rawText = '') {
+      const target = String(args.target || args.field || '').trim();
+      const value = args.value !== undefined ? String(args.value) : String(args.text || '').trim();
+      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.type === 'function' && value) {
+        const t0 = performance.now();
+        try {
+          const beRes = await this.browserEngine.type(target, value, { clear: args.action !== 'append' });
+          const ms = performance.now() - t0;
+          if (beRes && beRes.status === 'SENSITIVE_SKIPPED') {
+            this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'success', reason: 'sensitive_skipped', latencyMs: ms });
+            if (this.forms && typeof this.forms.handleDictateIntent === 'function') {
+              return this.forms.handleDictateIntent(args, rawText);
+            }
+            return { status: 'sensitive_skipped', ok: false, verified: false, engine: 'rebuilt_browser_engine', reason: beRes.reason };
+          }
+          if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
+            this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            this.lastUndoableType = 'forms';
+            const msg = `Entered "${value}" into ${beRes.targetLabel || target || 'field'}.`;
+            this.setAssistantReply(msg);
+            if (window.SW_UI) {
+              window.SW_UI.setState('speaking');
+              window.SW_UI.showCard({ type: 'answer', title: 'Field Updated', text: msg });
+            }
+            return {
+              status: 'filled',
+              ok: true,
+              verified: true,
+              engine: 'rebuilt_browser_engine',
+              field: beRes.targetLabel || target,
+              value,
+              message: msg
+            };
+          }
+          if (beRes && beRes.status === 'AMBIGUOUS') {
+            this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_inputs', latencyMs: ms });
+          } else {
+            this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (beRes && (beRes.reason || beRes.status)) || 'not_verified', latencyMs: ms });
+          }
+        } catch (err) {
+          this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
+        }
+      }
+      if (this.forms && typeof this.forms.handleDictateIntent === 'function') {
+        this.lastUndoableType = 'forms';
+        return this.forms.handleDictateIntent(args, rawText);
+      }
+      return { status: 'not_found', ok: false, verified: false };
+    }
+
     async dispatchIntent(c, rawText = '', resolvedContext = null) {
       const intent = (c && c.intent) || 'HELP';
       const args = (c && c.args) || {};
@@ -4372,7 +4422,7 @@
       }
       if (intent === 'NAVIGATE' && this.navigator) return this.navigator.handleNavigationIntent(args, conf, rawText);
       if (intent === 'FILL_GUIDED' && this.forms) return this.forms.startGuidedFill();
-      if (intent === 'DICTATE' && this.forms) { this.lastUndoableType = 'forms'; return this.forms.handleDictateIntent(args, rawText); }
+      if (intent === 'DICTATE' && (this.forms || this.browserEngine)) { this.lastUndoableType = 'forms'; return this._executeFillInputWithEngine(args, rawText); }
       if (intent === 'FILL_PROFILE' && this.forms) { this.lastUndoableType = 'forms'; return this.forms.fillFromProfile(); }
       if (intent === 'UPLOAD') return (args.mode === 'camera' && this.camera) ? this.camera.requestCapture(args.target || rawText) : (this.upload && this.upload.requestUpload(args.target || rawText));
       if (intent === 'UNDO') return (this.lastUndoableType === 'upload' && this.upload && this.upload.uploadUndoStack.length) ? this.upload.undoLastUpload() : (this.forms && this.forms.undoLast());
