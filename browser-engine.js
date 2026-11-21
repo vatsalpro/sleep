@@ -1363,6 +1363,120 @@
       return clickRes;
     }
 
+    async toggleControl(targetOrQuery, options = {}) {
+      // 1. Observe
+      const obs = this.observe(options.root || document);
+      let targetEl = null;
+      let targetItem = null;
+
+      // 2. Resolve
+      if (targetOrQuery instanceof Element) {
+        targetEl = targetOrQuery;
+        targetItem = obs.elements.find(e => e.domNode === targetEl) || null;
+      } else if (typeof targetOrQuery === 'string' && targetOrQuery.trim()) {
+        const qLow = targetOrQuery.toLowerCase().replace(/[.,!?;:]+$/g, '').trim();
+        const qTokens = qLow.split(/\s+/).filter(Boolean);
+        let pool = obs.elements.filter(e =>
+          e.states.visible && !e.states.disabled &&
+          (e.role === 'checkbox' || e.role === 'radio' || e.role === 'switch')
+        );
+        if (options.section) {
+          const secLow = String(options.section).toLowerCase();
+          const secPool = pool.filter(e =>
+            `${e.parentSection || ''} ${(e.domNode && e.domNode.name) || ''}`.toLowerCase().includes(secLow)
+          );
+          if (secPool.length > 0) pool = secPool;
+        }
+        const scored = [];
+        for (const item of pool) {
+          let score = 0;
+          const nLow = (item.name || '').toLowerCase();
+          if (nLow === qLow) score += 100;
+          else if (nLow.includes(qLow)) score += 75;
+          else if (qLow.includes(nLow) && nLow.length >= 3) score += 60;
+          const matched = qTokens.filter(t => nLow.includes(t));
+          if (qTokens.length > 0) score += (matched.length / qTokens.length) * 35;
+          if (options.section && (item.parentSection || '').toLowerCase().includes(String(options.section).toLowerCase())) {
+            score += 25;
+          }
+          if (score >= 45) scored.push({ item, score, element: item.domNode });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        if (scored.length === 0) {
+          return { status: 'FAILED', verified: false, reason: 'checkbox_or_radio_not_found' };
+        }
+        const topScore = scored[0].score;
+        const competing = scored.filter(s => (topScore - s.score) <= 10);
+        if (competing.length >= 2) {
+          return {
+            status: 'AMBIGUOUS',
+            verified: false,
+            candidates: competing.map(c => ({
+              id: c.item.id,
+              name: c.item.name,
+              label: c.item.name,
+              role: c.item.role,
+              section: c.item.parentSection,
+              element: c.element
+            })),
+            prompt: `Multiple options match "${targetOrQuery}". Which one should I select?`
+          };
+        }
+        targetEl = scored[0].element;
+        targetItem = scored[0].item;
+      }
+
+      if (!targetEl || !targetEl.isConnected) {
+        return { status: 'FAILED', verified: false, reason: 'checkbox_or_radio_not_found' };
+      }
+
+      const getChecked = (el) => {
+        if (el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type)) {
+          return Boolean(el.checked);
+        }
+        return el.getAttribute('aria-checked') === 'true';
+      };
+
+      const beforeChecked = getChecked(targetEl);
+      const desired = options.desiredChecked;
+      const label = (targetItem && targetItem.name) || sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetEl), 80);
+      const role = (targetItem && targetItem.role) || this.observer.computeRole(targetEl);
+
+      if (desired !== undefined && desired !== null && beforeChecked === Boolean(desired)) {
+        return {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'toggle_control',
+          role,
+          targetLabel: label,
+          checked: beforeChecked,
+          alreadyInState: true
+        };
+      }
+
+      // 3. Validate -> 4. Execute
+      const execRes = await this.executor.click(targetEl);
+      this.invalidateCache();
+      if (!execRes.ok) {
+        return { status: 'FAILED', verified: false, reason: execRes.reason };
+      }
+
+      // 5. Re-observe & Verify
+      const afterChecked = getChecked(targetEl);
+      const verified = role === 'radio' ? afterChecked === true : afterChecked !== beforeChecked;
+      this.observe(options.root || document, { force: true });
+
+      return {
+        status: verified ? 'SUCCESS' : 'FAILED',
+        verified,
+        action: 'toggle_control',
+        role,
+        targetLabel: label,
+        checked: afterChecked,
+        reason: verified ? '' : 'state_did_not_change'
+      };
+    }
+
     async executeSearch(query, options = {}) {
       const cleanQ = String(query || '').trim();
       if (!cleanQ) {

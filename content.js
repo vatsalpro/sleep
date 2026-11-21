@@ -4421,11 +4421,12 @@
         return null;
       }
       const clean = String(rawText || '').trim().replace(/[.,!?;:]+$/, '');
-      if (/\b(?:checkbox|radio)\b/i.test(clean)) return null;
+      const isExplicitToggle = /^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:check|uncheck|tick|untick|toggle|enable|disable)\b/i.test(clean) || /\b(?:checkbox|radio)\b/i.test(clean);
+      const wantsUncheck = /\b(?:uncheck|untick|disable)\b/i.test(clean);
 
       // Milestone 4: Tab switch command ("Switch to Analytics tab", "Select the Overview tab", "Click Analytics tab")
       const tabCmdM = clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:switch\s+to|select|choose|click(?:\s+on)?|open|go\s+to)\s+(?:the\s+)?(.+?)(?:\s+tab)?$/i);
-      if (tabCmdM && (/\btab\b/i.test(clean) || document.querySelector('[role="tab"]')) && typeof this.browserEngine.switchTab === 'function') {
+      if (!isExplicitToggle && tabCmdM && (/\btab\b/i.test(clean) || document.querySelector('[role="tab"]')) && typeof this.browserEngine.switchTab === 'function') {
         const tabName = tabCmdM[1].replace(/\s+tab$/i, '').trim();
         const obs = this.browserEngine.observe(document);
         const hasMatchingTab = obs.elements.some(e => e.role === 'tab' && e.name.toLowerCase().includes(tabName.toLowerCase()));
@@ -4453,8 +4454,8 @@
       let optionText = opts.optionText || '';
       let groupHint = opts.groupHint || '';
       if (!optionText) {
-        const scopedM = clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick)\s+(?:the\s+)?(.+?)(?:\s+option)?\s+(?:from|in|under|inside|for)\s+(?:the\s+)?(.+?)(?:\s+(?:dropdown|menu|select|list|field))?$/i);
-        const simpleM = !scopedM ? clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick)\s+(?:the\s+)?(.+?)(?:\s+option)?$/i) : null;
+        const scopedM = clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick|check|uncheck|tick|untick|toggle|enable|disable)\s+(?:the\s+)?(.+?)(?:\s+(?:option|checkbox|radio(?:\s+button)?))?\s+(?:from|in|under|inside|for)\s+(?:the\s+)?(.+?)(?:\s+(?:dropdown|menu|select|list|field|group|section))?$/i);
+        const simpleM = !scopedM ? clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:select|choose|pick|check|uncheck|tick|untick|toggle|enable|disable)\s+(?:the\s+)?(.+?)(?:\s+(?:option|checkbox|radio(?:\s+button)?))?$/i) : null;
         if (scopedM) {
           optionText = scopedM[1].trim();
           groupHint = scopedM[2].trim();
@@ -4464,37 +4465,80 @@
       }
       if (!optionText) return null;
 
-      const t0 = performance.now();
-      try {
-        const beRes = await this.browserEngine.select(groupHint || '', optionText, { section: groupHint || '' });
-        const ms = performance.now() - t0;
-        if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
-          this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
-          if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
-            this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 60 });
+      // Try Dropdown selection first unless explicitly a checkbox/radio toggle
+      if (!isExplicitToggle) {
+        const t0 = performance.now();
+        try {
+          const beRes = await this.browserEngine.select(groupHint || '', optionText, { section: groupHint || '' });
+          const ms = performance.now() - t0;
+          if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
+            this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+              this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 60 });
+            }
+            const msg = `Selected "${beRes.selectedText || optionText}"${beRes.targetLabel ? ` in ${beRes.targetLabel}` : ''}.`;
+            this.setAssistantReply(msg);
+            if (window.SW_UI) {
+              window.SW_UI.setState('speaking');
+              window.SW_UI.showCard({ type: 'answer', title: 'Updated Control', text: msg });
+            }
+            return {
+              status: 'selected',
+              ok: true,
+              verified: true,
+              engine: 'rebuilt_browser_engine',
+              selectedOption: beRes.selectedText || optionText,
+              selectedValue: beRes.selectedValue,
+              field: beRes.targetLabel || groupHint || 'Dropdown',
+              message: msg
+            };
           }
-          const msg = `Selected "${beRes.selectedText || optionText}"${beRes.targetLabel ? ` in ${beRes.targetLabel}` : ''}.`;
-          this.setAssistantReply(msg);
-          if (window.SW_UI) {
-            window.SW_UI.setState('speaking');
-            window.SW_UI.showCard({ type: 'answer', title: 'Updated Control', text: msg });
+          if (beRes && beRes.status === 'AMBIGUOUS') {
+            this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_dropdowns', latencyMs: ms });
+            return null;
           }
-          return {
-            status: 'selected',
-            ok: true,
-            verified: true,
-            engine: 'rebuilt_browser_engine',
-            selectedOption: beRes.selectedText || optionText,
-            selectedValue: beRes.selectedValue,
-            field: beRes.targetLabel || groupHint || 'Dropdown',
-            message: msg
-          };
+        } catch (err) {
+          this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
         }
-        if (beRes && beRes.status === 'AMBIGUOUS') {
-          this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_dropdowns', latencyMs: ms });
+      }
+
+      // Milestone 5: Checkbox / Radio button selection
+      if (typeof this.browserEngine.toggleControl === 'function') {
+        const t0 = performance.now();
+        try {
+          const togRes = await this.browserEngine.toggleControl(optionText, {
+            section: groupHint || '',
+            desiredChecked: /\btoggle\b/i.test(clean) ? null : !wantsUncheck
+          });
+          const ms = performance.now() - t0;
+          if (togRes && (togRes.status === 'SUCCESS' || togRes.verified)) {
+            this._recordRolloutEvent({ action: 'toggle_checkbox_radio', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function') {
+              this.worldModel.scheduleProactiveScan(document, { force: true, delayMs: 60 });
+            }
+            const msg = `${togRes.checked ? 'Selected' : 'Unchecked'} "${togRes.targetLabel || optionText}".`;
+            this.setAssistantReply(msg);
+            if (window.SW_UI) {
+              window.SW_UI.setState('speaking');
+              window.SW_UI.showCard({ type: 'answer', title: 'Updated Control', text: msg });
+            }
+            return {
+              status: 'selected',
+              ok: true,
+              verified: true,
+              engine: 'rebuilt_browser_engine',
+              selectedOption: togRes.targetLabel || optionText,
+              checked: togRes.checked,
+              field: togRes.role || 'Control',
+              message: msg
+            };
+          }
+          if (togRes && togRes.status === 'AMBIGUOUS') {
+            this._recordRolloutEvent({ action: 'toggle_checkbox_radio', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_controls', latencyMs: ms });
+          }
+        } catch (err) {
+          this._recordRolloutEvent({ action: 'toggle_checkbox_radio', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
         }
-      } catch (err) {
-        this._recordRolloutEvent({ action: 'select_dropdown', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
       }
       return null;
     }
