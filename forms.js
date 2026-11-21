@@ -1529,11 +1529,27 @@
       const summary = ff ? ff.buildNonSensitiveSummary(fields) : { totalCount: fields.length, filledCount: 0, requiredMissing: [], lines: [] };
       const btns = fi ? fi.detectFormActionButtons(doc) : { nextButtons: [], submitButtons: [] };
 
-      const targetBtn = explicitButton || (kind === 'next_step'
+      const nonSearchSubmit = (btns.submitButtons || []).find(b => b && !/^search$/i.test(String(b.label || '').trim())) || (btns.submitButtons && btns.submitButtons[0]);
+      let targetBtn = explicitButton || (kind === 'next_step'
         ? (btns.nextButtons[0] && btns.nextButtons[0].element)
-        : (btns.submitButtons[0] && btns.submitButtons[0].element));
-      const targetLabel = (explicitButton && (explicitButton.innerText || explicitButton.value)) ||
-        (kind === 'next_step' ? ((btns.nextButtons[0] && btns.nextButtons[0].label) || 'Next') : ((btns.submitButtons[0] && btns.submitButtons[0].label) || 'Submit'));
+        : (nonSearchSubmit && nonSearchSubmit.element));
+      let targetLabel = (explicitButton && (explicitButton.innerText || explicitButton.value)) ||
+        (kind === 'next_step' ? ((btns.nextButtons[0] && btns.nextButtons[0].label) || 'Next') : ((nonSearchSubmit && nonSearchSubmit.label) || 'Submit'));
+
+      if (!targetBtn && this.widget && this.widget.browserEngine && this.widget.useRebuiltBrowserEngine) {
+        const obs = this.widget.browserEngine.observe(doc);
+        const cand = obs.elements.find(e =>
+          e.states.visible && !e.states.disabled && e.role === 'button' && e.domNode &&
+          !/^search$/i.test((e.name || '').trim()) &&
+          (kind === 'next_step'
+            ? /\b(?:next|continue|proceed)\b/i.test(e.name)
+            : ((e.domNode.getAttribute && (e.domNode.getAttribute('type') || '').toLowerCase() === 'submit') || /\b(?:submit|apply|send|register|complete|finish)\b/i.test(e.name)))
+        );
+        if (cand) {
+          targetBtn = cand.domNode;
+          targetLabel = cand.name || targetLabel;
+        }
+      }
 
       if (!targetBtn) {
         const msg = `No "${kind === 'next_step' ? 'Next' : 'Submit'}" button found on this form.`;
@@ -1576,6 +1592,7 @@
               action: 'submit_form',
               engine: 'rebuilt_browser_engine',
               outcome: subRes && subRes.verified ? 'success' : 'failed',
+              reason: (subRes && subRes.reason) || (subRes && subRes.targetLabel) || '',
               latencyMs: performance.now() - t0
             });
           }

@@ -406,7 +406,12 @@
         const hit = document.elementFromPoint(centerX, centerY);
         if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
           const hitStyle = window.getComputedStyle(hit);
-          if (hitStyle.pointerEvents !== 'none' && !hit.id?.includes('sleepwalker')) {
+          const isSwUi = Boolean(
+            (hit.id && /sleepwalker|^sw-/i.test(hit.id)) ||
+            (typeof hit.className === 'string' && /sleepwalker|\bsw-/i.test(hit.className)) ||
+            (hit.closest && hit.closest('#sleepwalker-ui-host, #sleepwalker-host, [data-sleepwalker-ui="1"]'))
+          );
+          if (hitStyle.pointerEvents !== 'none' && !isSwUi) {
             return { ok: false, reason: 'hit_test_obstructed_by_' + hit.tagName.toLowerCase() };
           }
         }
@@ -466,9 +471,10 @@
 
       el.dispatchEvent(new PointerEvent('pointerup', eventInit));
       el.dispatchEvent(new MouseEvent('mouseup', eventInit));
-      el.dispatchEvent(new MouseEvent('click', eventInit));
       if (typeof el.click === 'function') {
-        try { el.click(); } catch (_e) {}
+        try { el.click(); } catch (_e) { el.dispatchEvent(new MouseEvent('click', eventInit)); }
+      } else {
+        el.dispatchEvent(new MouseEvent('click', eventInit));
       }
     }
 
@@ -588,7 +594,7 @@
         childEl = findChildItem();
       } else if (typeof findChildItem === 'string') {
         const root = parentTrigger.getRootNode ? parentTrigger.getRootNode() : document;
-        const allItems = Array.from(root.querySelectorAll('a, button, [role="menuitem"], [role="treeitem"], li'));
+        const allItems = Array.from(root.querySelectorAll('a, button, [role="menuitem"], [role="treeitem"]'));
         const normChild = findChildItem.toLowerCase().trim();
         childEl = allItems.find(it => {
           const style = window.getComputedStyle(it);
@@ -1323,15 +1329,17 @@
       let targetLabel = '';
 
       if (!targetBtn) {
-        const submitCand = obs.elements.find(e =>
+        const submitCands = obs.elements.filter(e =>
           e.states.visible && !e.states.disabled &&
           e.role === 'button' && e.domNode &&
+          !/^search$/i.test((e.name || '').trim()) &&
           ((e.domNode.getAttribute && (e.domNode.getAttribute('type') || '').toLowerCase() === 'submit') ||
            /\b(?:submit|send|apply|register|complete|finish|place\s+order|pay)\b/i.test(e.name))
         );
-        if (submitCand) {
-          targetBtn = submitCand.domNode;
-          targetLabel = submitCand.name;
+        const explicitSubmit = submitCands.find(e => /\b(?:submit|apply|send|register|complete|finish)\b/i.test(e.name)) || submitCands[0];
+        if (explicitSubmit) {
+          targetBtn = explicitSubmit.domNode;
+          targetLabel = explicitSubmit.name;
         }
       }
 

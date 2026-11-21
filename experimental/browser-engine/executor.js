@@ -145,9 +145,10 @@
 
       el.dispatchEvent(new PointerEvent('pointerup', eventInit));
       el.dispatchEvent(new MouseEvent('mouseup', eventInit));
-      el.dispatchEvent(new MouseEvent('click', eventInit));
       if (typeof el.click === 'function') {
-        try { el.click(); } catch (_e) {}
+        try { el.click(); } catch (_e) { el.dispatchEvent(new MouseEvent('click', eventInit)); }
+      } else {
+        el.dispatchEvent(new MouseEvent('click', eventInit));
       }
     }
 
