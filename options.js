@@ -28,7 +28,8 @@
       'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
       'sleepwalker_lang', 'sleepwalker_rate', 'sleepwalker_font_size',
       'sleepwalker_glow_enabled', 'sleepwalker_barge_in', 'sleepwalker_translit',
-      'sleepwalker_profile_optin', 'sleepwalker_local_profile'
+      'sleepwalker_profile_optin', 'sleepwalker_local_profile',
+      'sleepwalker_use_rebuilt_browser_engine'
     ];
     chrome.storage.local.get(keys, (d) => {
       byId('opt-proxy-url').value = d.sleepwalker_proxy_url || '';
@@ -55,6 +56,9 @@
         byId('opt-proactive-enabled').checked = d.sleepwalker_proactive_enabled !== false;
       }
       byId('opt-local-only').checked = Boolean(d.sleepwalker_local_only);
+      if (byId('opt-rebuilt-browser-engine')) {
+        byId('opt-rebuilt-browser-engine').checked = Boolean(d.sleepwalker_use_rebuilt_browser_engine === true);
+      }
       byId('opt-lang').value = d.sleepwalker_lang || 'auto';
       byId('opt-rate').value = String(d.sleepwalker_rate || 1);
       byId('opt-font-size').value = String(d.sleepwalker_font_size || 18);
@@ -92,6 +96,7 @@
       sleepwalker_adaptive_learning_enabled: byId('opt-learning-enabled') ? byId('opt-learning-enabled').checked : true,
       sleepwalker_proactive_enabled: byId('opt-proactive-enabled') ? byId('opt-proactive-enabled').checked : true,
       sleepwalker_local_only: byId('opt-local-only').checked,
+      sleepwalker_use_rebuilt_browser_engine: byId('opt-rebuilt-browser-engine') ? Boolean(byId('opt-rebuilt-browser-engine').checked) : false,
       sleepwalker_lang: byId('opt-lang').value || 'auto',
       sleepwalker_rate: Number(byId('opt-rate').value) || 1.0,
       sleepwalker_font_size: Number(byId('opt-font-size').value) || 18,

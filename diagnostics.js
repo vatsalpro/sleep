@@ -32,6 +32,8 @@
       .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED_API_KEY]')
       .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?\b/g, '[REDACTED_JWT]')
       .replace(/\b(?:sk|pk|ghp|gho|ghu|ghs)[_-][0-9A-Za-z_-]{16,}\b/g, '[REDACTED_KEY]')
+      .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]')
+      .replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[REDACTED_SSN]')
       .replace(/\bauth_tokens\/[0-9A-Za-z_-]+\b/g, 'auth_tokens/[REDACTED]')
       .replace(/\b(?:\d[ -]*?){13,19}\b/g, '[REDACTED_CARD]')
       .replace(/\b\d{4}\s+\d{4}\s+\d{4}\b/g, '[REDACTED_ID]')

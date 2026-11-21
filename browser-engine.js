@@ -14,6 +14,52 @@
 (function (global) {
   'use strict';
 
+  const SENSITIVE_FIELD_RE = /\b(?:password|passwd|pwd|passcode|otp|one[- ]?time|pin\b(?!code)|cvv|cvc|card[-_ ]?num|credit[-_ ]?card|debit[-_ ]?card|ssn|social[-_ ]?security|aadhaar|aadhar|pan\b|api[-_ ]?key|secret|token|auth|bearer|bank[-_ ]?account|routing|ifsc)\b/i;
+  const SENSITIVE_AUTOCOMPLETE_RE = /\b(?:current-password|new-password|one-time-code|cc-number|cc-csc|cc-exp)\b/i;
+  const PROMPT_INJECTION_RE = /\b(?:ignore\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions?|rules?|prompts?)|disregard\s+(?:all\s+)?(?:previous|system)\s+instructions?|you\s+are\s+now\s+|override\s+(?:safety|security|confirmation|rules?)|bypass\s+confirmation|auto[- ]?confirm|system\s*prompt|new\s+system\s+instruction)\b/gi;
+  const CONSEQUENTIAL_ACTION_RE = /\b(?:submit\s+(?:order|payment|application|form)|pay\s+now|place\s+order|complete\s+(?:purchase|payment|order|checkout)|checkout|buy\s+now|delete\s+(?:account|all|permanently|profile|project|repo)|remove\s+account|erase\s+all|deactivate\s+account|close\s+account|wire\s+transfer|send\s+money|confirm\s+payment|authorize\s+payment)\b/i;
+
+  function sanitizeUntrustedLabel(raw, maxLen = 120) {
+    let s = String(raw || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!s) return '';
+    s = s.replace(PROMPT_INJECTION_RE, '[FILTERED_DIRECTIVE]');
+    s = s.replace(/\b(?:AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?|(?:sk|pk|ghp|gho|ghu|ghs)[_-][0-9A-Za-z_-]{16,}|AKIA[0-9A-Z]{16})\b/g, '[REDACTED_SECRET]');
+    return s.slice(0, maxLen).trim();
+  }
+
+  function isSensitiveElement(node) {
+    if (!node) return false;
+    const type = String(node.type || (node.getAttribute && node.getAttribute('type')) || '').toLowerCase();
+    if (type === 'password') return true;
+    const ac = String((node.getAttribute && node.getAttribute('autocomplete')) || '').toLowerCase();
+    if (ac && SENSITIVE_AUTOCOMPLETE_RE.test(ac)) return true;
+    const meta = [
+      node.name || '',
+      node.id || '',
+      (node.getAttribute && node.getAttribute('aria-label')) || '',
+      (node.getAttribute && node.getAttribute('placeholder')) || ''
+    ].join(' ');
+    return SENSITIVE_FIELD_RE.test(meta);
+  }
+
+  function isConsequentialElement(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || '').toUpperCase();
+    const type = String((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
+    const text = [
+      el.textContent || '',
+      (el.getAttribute && el.getAttribute('aria-label')) || '',
+      (el.getAttribute && el.getAttribute('title')) || '',
+      (el.getAttribute && el.getAttribute('value')) || '',
+      (el.getAttribute && el.getAttribute('name')) || ''
+    ].join(' ').replace(/\s+/g, ' ').trim();
+    if (CONSEQUENTIAL_ACTION_RE.test(text)) return true;
+    if ((tag === 'BUTTON' || tag === 'INPUT') && type === 'submit' && /\b(?:pay|checkout|delete|remove|transfer|purchase|buy|confirm|submit)\b/i.test(text)) {
+      return true;
+    }
+    return false;
+  }
+
   // ===========================================================================
   // 1. StagehandObserver
   // ===========================================================================
@@ -226,20 +272,22 @@
         const visible = this.isVisible(node);
         if (!visible && !this.options.includeInvisible) return;
 
-        const name = this.computeAccessibleName(node);
+        const name = sanitizeUntrustedLabel(this.computeAccessibleName(node), 120);
         const rect = node.getBoundingClientRect();
-        const parentSec = this.computeParentSection(node);
+        const parentSec = sanitizeUntrustedLabel(this.computeParentSection(node), 80);
+        const sensitiveField = isSensitiveElement(node);
 
         const states = {
           visible,
           disabled: Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true'),
+          sensitive: sensitiveField,
           expanded: node.hasAttribute('aria-expanded') ? node.getAttribute('aria-expanded') === 'true' : undefined,
           selected: node.hasAttribute('aria-selected') ? node.getAttribute('aria-selected') === 'true' : undefined,
           checked: node.hasAttribute('aria-checked')
             ? node.getAttribute('aria-checked') === 'true'
             : (node instanceof HTMLInputElement && ['checkbox', 'radio'].includes(node.type) ? node.checked : undefined),
           value: (node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)
-            ? (node.type === 'password' ? '[REDACTED]' : node.value)
+            ? (sensitiveField ? '[REDACTED]' : sanitizeUntrustedLabel(node.value, 120))
             : undefined
         };
 
@@ -290,8 +338,15 @@
     _getCleanText(el) {
       if (!el) return '';
       const clone = el.cloneNode(true);
-      const toRemove = clone.querySelectorAll('script, style, noscript, [aria-hidden="true"], #sleepwalker-ui-host');
+      const toRemove = clone.querySelectorAll('script, style, noscript, [hidden], [aria-hidden="true"], #sleepwalker-ui-host');
       toRemove.forEach(r => r.remove());
+      const styled = clone.querySelectorAll('[style]');
+      styled.forEach(s => {
+        const st = String(s.getAttribute('style') || '').toLowerCase();
+        if (/display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?(?:\s*;|$)|font-size\s*:\s*0(?:px|em|rem)?(?:\s*;|$)/.test(st)) {
+          s.remove();
+        }
+      });
       return (clone.textContent || '').replace(/\s+/g, ' ').trim();
     }
   }
@@ -835,17 +890,45 @@
     constructor(options = {}) {
       this.options = Object.assign({
         ambiguityThreshold: 2,
-        minMatchScore: 40
+        minMatchScore: 40,
+        cacheTtlMs: 1200
       }, options);
 
       this.observer = new StagehandObserver(options.observer);
       this.executor = new PlaywrightExecutor(options.executor);
       this.verifier = new StateVerifier(options.verifier);
       this.visual = new VisualFallback(options.visual);
+      this._obsCache = null;
     }
 
-    observe(root = document) {
-      return this.observer.observe(root);
+    invalidateCache() {
+      this._obsCache = null;
+    }
+
+    observe(root = document, opts = {}) {
+      const now = Date.now();
+      const curUrl = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+      const childSig = (root && root.body ? root.body.childElementCount : (root ? root.childElementCount : 0)) || 0;
+      if (
+        !opts.force &&
+        this._obsCache &&
+        this._obsCache.root === root &&
+        this._obsCache.url === curUrl &&
+        this._obsCache.childSig === childSig &&
+        (now - this._obsCache.ts) < this.options.cacheTtlMs
+      ) {
+        const sample = this._obsCache.result.elements;
+        const sampleValid = sample.length === 0 || (
+          sample[0].domNode && sample[0].domNode.isConnected &&
+          sample[sample.length - 1].domNode && sample[sample.length - 1].domNode.isConnected
+        );
+        if (sampleValid) {
+          return this._obsCache.result;
+        }
+      }
+      const result = this.observer.observe(root);
+      this._obsCache = { root, url: curUrl, childSig, ts: now, result };
+      return result;
     }
 
     locate(query, options = {}) {
@@ -951,9 +1034,21 @@
         return { status: 'FAILED', verified: false, reason: 'invalid_target_element' };
       }
 
+      // Code-level consequential action permission gate (cannot be bypassed by model prompts or injected labels)
+      if (isConsequentialElement(targetEl) && options.userConfirmed !== true) {
+        return {
+          status: 'CONFIRMATION_REQUIRED',
+          verified: false,
+          consequential: true,
+          reason: 'consequential_action_requires_explicit_user_confirmation',
+          targetLabel: sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetEl), 80)
+        };
+      }
+
       const baseline = this.verifier.captureBaseline(targetEl);
 
       const execResult = await this.executor.click(targetEl);
+      this.invalidateCache();
       if (!execResult.ok) {
         baseline.stopObserver();
         return { status: 'FAILED', verified: false, reason: execResult.reason };

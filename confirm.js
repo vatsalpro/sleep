@@ -315,7 +315,11 @@
         four: 3, fourth: 3, char: 3, chaar: 3, chautha: 3, 'चार': 3, 'चौथा': 3,
         five: 4, fifth: 4, paanch: 4, panch: 4, paanchva: 4, 'पांच': 4, 'पाँच': 4
       };
-      const stripped = normalized.replace(/^(?:option|choice|number|no\.?|विकल्प|ऑप्शन)\s+/, '');
+      const stripped = normalized
+        .replace(/^(?:the\s+)?(?:option|choice|number|no\.?|विकल्प|ऑप्शन)\s+/, '')
+        .replace(/^the\s+/, '')
+        .replace(/\s+(?:one|option|choice|item|field|box|result|link|button)$/, '')
+        .trim();
       if (Object.prototype.hasOwnProperty.call(wordMap, stripped)) return wordMap[stripped];
       let matchApi = (typeof globalThis !== 'undefined' && globalThis.SleepwalkerMatch) || null;
       if (!matchApi && typeof require === 'function') {

@@ -85,7 +85,16 @@
       this.linkIntent = window.SleepwalkerLinkIntent ? new window.SleepwalkerLinkIntent() : null;
       this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
       this.browserEngine = window.BrowserEngine ? new window.BrowserEngine() : null;
-      this.useRebuiltBrowserEngine = true; // Feature flag for Phase 7 rebuilt engine integration
+      this.useRebuiltBrowserEngine = Boolean(typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true); // Disabled by default for production safety; opt-in via Dev setting or config flag
+      this.rolloutTelemetry = {
+        successfulActions: 0,
+        failedActions: 0,
+        falseCompletions: 0,
+        fallbackCount: 0,
+        clarificationCount: 0,
+        latenciesMs: [],
+        events: []
+      };
       this.forms = window.SleepwalkerForms ? new window.SleepwalkerForms(this) : null;
       this.elementSelector = window.SleepwalkerElementSelector ? new window.SleepwalkerElementSelector(this) : null;
       this.worldModel = window.SleepwalkerWorldModel
@@ -1267,7 +1276,7 @@
         const res = this.confirm.handleResponse({ raw });
         if (res.handled) {
           if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'confirm_handled' });
-          return res.result;
+          return { ...(res.result || {}), verified: Boolean(res.result && res.result.status === 'confirmed') };
         }
       }
       if (this.forms && this.forms.isDictatingLongText && this.forms.isDictatingLongText()) { this.forms.handleLongDictationInput(raw); if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'long_dictation' }); return { status: 'long_dictation' }; }
@@ -1445,7 +1454,46 @@
         }
       }
 
-      const useRichNlu = !earlySkillDispatch && (Boolean(failedLearnedSkill) || this._needsRichNluUnderstanding(raw, resolvedContext, preCentral, syncRule, structuredCtx, navChoiceCount, wmInv));
+      // Phase 8 Latency Optimization: Deterministic unambiguous scoped-link fast path (<50ms, 0 LLM calls)
+      if (!earlySkillDispatch && !failedLearnedSkill && !(meta && meta.forcePrimary) && wmInv && Array.isArray(wmInv.links)) {
+        const cleanFast = String(raw || '').trim().replace(/[.,!?;:]+$/, '');
+        const scopedFastM = cleanFast.match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click(?:\s+on)?|select|choose)\s+(?:the\s+)?(.+?)\s+(?:under|in|inside|from)\s+(?:the\s+)?(.+?)$/i);
+        if (scopedFastM && !/\b(?:option|radio|checkbox|toggle|switch|dropdown|setting|video|tab)\b/i.test(cleanFast)) {
+          const wantLbl = scopedFastM[1].trim().toLowerCase();
+          const wantSec = scopedFastM[2].trim().toLowerCase();
+          const optHit = this.worldModel && typeof this.worldModel.findOptionByHierarchy === 'function'
+            ? this.worldModel.findOptionByHierarchy(wantLbl, wantSec)
+            : null;
+          const optTag = String((optHit && optHit.element && optHit.element.tagName) || '').toUpperCase();
+          const hasFormOpt = Boolean(optHit && ['INPUT', 'SELECT', 'TEXTAREA', 'OPTION'].includes(optTag));
+          if (!hasFormOpt && wantLbl && wantSec) {
+            const exactScoped = wmInv.links.filter((l) => {
+              const lbl = String((l && l.label) || '').trim().toLowerCase();
+              if (!lbl || lbl !== wantLbl) return false;
+              const anc = Array.isArray(l.ancestorHeadings) ? l.ancestorHeadings.join(' ') : '';
+              const domSec = (l.element && this.browserEngine && this.browserEngine.observer && typeof this.browserEngine.observer.computeParentSection === 'function')
+                ? this.browserEngine.observer.computeParentSection(l.element)
+                : '';
+              const secHay = `${l.parentSection || ''} ${l.parentMenuLabel || ''} ${l.section || ''} ${anc} ${domSec}`.toLowerCase();
+              return secHay.includes(wantSec);
+            });
+            if (exactScoped.length === 1) {
+              const hit = exactScoped[0];
+              nluPlan = {
+                intent: 'open_link',
+                target: hit.label || wantLbl,
+                target_id: hit.id || null,
+                confidence: 0.96,
+                context: { section: hit.parentSection || hit.section || scopedFastM[2].trim(), candidate_id: hit.id || null },
+                actions: [{ type: 'open_link', target: hit.label || wantLbl, section: hit.parentSection || hit.section || scopedFastM[2].trim(), candidate_id: hit.id || null }]
+              };
+              nluSource = 'deterministic_scoped_fastpath';
+            }
+          }
+        }
+      }
+
+      const useRichNlu = !earlySkillDispatch && !nluPlan && (Boolean(failedLearnedSkill) || this._needsRichNluUnderstanding(raw, resolvedContext, preCentral, syncRule, structuredCtx, navChoiceCount, wmInv));
       if (useRichNlu) {
         if (this.worldModel && wmInv) {
           if (this.agentFsm) this.agentFsm.transition('RETRIEVING', { requestId, reason: 'semantic_retrieval' });
@@ -4073,18 +4121,31 @@
           : '';
         const linkPref = ctx.link_preference || act.value || 'any';
 
-        // Narrow interface for rebuilt browser engine with fallback to existing navigator
+        // Narrow interface for rebuilt browser engine with telemetry, consequential-action gate, and fallback to existing navigator
         if (this.browserEngine && this.useRebuiltBrowserEngine) {
+          const beT0 = performance.now();
           try {
-            this.browserEngine.observe(document);
             const beLoc = this.browserEngine.locate(targetLabel, { section: sectionScope });
             if (beLoc.status === 'FOUND' && beLoc.target) {
               const beRes = await this.browserEngine.click(beLoc.target, { isNavigation: true });
-              if (beRes.status === 'SUCCESS' || beRes.verified) {
-                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, details: beRes.details };
+              const beMs = performance.now() - beT0;
+              if (beRes.status === 'CONFIRMATION_REQUIRED') {
+                // Never silently retry or fall back on consequential actions
+                this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: beRes.reason, latencyMs: beMs });
+                return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', target: targetLabel, reason: beRes.reason };
               }
+              if (beRes.status === 'SUCCESS' || beRes.verified) {
+                this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
+                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, details: beRes.details, nluSource: meta.nluSource };
+              }
+              this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: beRes.reason || beRes.status, latencyMs: beMs });
+            } else if (beLoc.status === 'AMBIGUOUS') {
+              this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_candidates', latencyMs: performance.now() - beT0 });
+            } else {
+              this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: beLoc.reason || beLoc.status, latencyMs: performance.now() - beT0 });
             }
           } catch (beErr) {
+            this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (beErr && beErr.message) || 'exception', latencyMs: performance.now() - beT0 });
             console.warn('[Sleepwalker] Rebuilt browser engine error, falling back to navigator:', beErr);
           }
         }
@@ -4651,7 +4712,8 @@
         'sleepwalker_lang', 'sleepwalker_font_size', 'sleepwalker_rate', 'sleepwalker_barge_in',
         'sleepwalker_ai_search_enabled', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model',
         'sleepwalker_memory_paused', 'sleepwalker_disable_page_analysis',
-        'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled'
+        'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
+        'sleepwalker_use_rebuilt_browser_engine'
       ], (d) => {
         if (d.sleepwalker_lang) this.setLanguage(d.sleepwalker_lang);
         if (d.sleepwalker_rate) this.setRate(d.sleepwalker_rate);
@@ -4660,6 +4722,10 @@
         this.aiSearchEnabled = d.sleepwalker_ai_search_enabled !== false;
         this.ollamaUrl = d.sleepwalker_ollama_url || 'http://localhost:11434';
         this.ollamaModel = d.sleepwalker_ollama_model || 'llama3.2:3b';
+        this.useRebuiltBrowserEngine = Boolean(
+          d.sleepwalker_use_rebuilt_browser_engine === true ||
+          (typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true)
+        );
         if (this.memory) {
           this.memory.privacy.memoryPaused = Boolean(d.sleepwalker_memory_paused);
           this.memory.privacy.disablePageAnalysis = Boolean(d.sleepwalker_disable_page_analysis);
@@ -4679,7 +4745,11 @@
       if (!this._storagePrivacyWatched && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
         this._storagePrivacyWatched = true;
         chrome.storage.onChanged.addListener((changes, area) => {
-          if (area !== 'local' || !this.memory) return;
+          if (area !== 'local') return;
+          if (changes.sleepwalker_use_rebuilt_browser_engine) {
+            this.useRebuiltBrowserEngine = Boolean(changes.sleepwalker_use_rebuilt_browser_engine.newValue === true);
+          }
+          if (!this.memory) return;
           if (changes.sleepwalker_memory_paused) this.memory.privacy.memoryPaused = Boolean(changes.sleepwalker_memory_paused.newValue);
           if (changes.sleepwalker_disable_page_analysis) this.memory.privacy.disablePageAnalysis = Boolean(changes.sleepwalker_disable_page_analysis.newValue);
           if (changes.sleepwalker_adaptive_learning_enabled) {
@@ -4709,6 +4779,37 @@
           }
         });
       }
+    }
+
+    setRebuiltBrowserEngineEnabled(enabled, persist = false) {
+      this.useRebuiltBrowserEngine = Boolean(enabled);
+      if (persist && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ sleepwalker_use_rebuilt_browser_engine: this.useRebuiltBrowserEngine });
+      }
+      return this.useRebuiltBrowserEngine;
+    }
+
+    _recordRolloutEvent(evt = {}) {
+      if (!this.rolloutTelemetry) return;
+      const t = this.rolloutTelemetry;
+      if (evt.outcome === 'success') t.successfulActions += 1;
+      else if (evt.outcome === 'failed') t.failedActions += 1;
+      else if (evt.outcome === 'fallback') t.fallbackCount += 1;
+      else if (evt.outcome === 'clarification') t.clarificationCount += 1;
+      if (evt.falseCompletion) t.falseCompletions += 1;
+      if (typeof evt.latencyMs === 'number' && Number.isFinite(evt.latencyMs)) {
+        t.latenciesMs.push(Math.round(evt.latencyMs));
+        if (t.latenciesMs.length > 200) t.latenciesMs.shift();
+      }
+      t.events.push({
+        ts: Date.now(),
+        action: String(evt.action || ''),
+        engine: String(evt.engine || ''),
+        outcome: String(evt.outcome || ''),
+        reason: String(evt.reason || '').slice(0, 120),
+        latencyMs: typeof evt.latencyMs === 'number' ? Math.round(evt.latencyMs) : null
+      });
+      if (t.events.length > 100) t.events.shift();
     }
 
     savePreferences() {
