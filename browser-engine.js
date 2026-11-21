@@ -1316,6 +1316,67 @@
       return { status: 'SUCCESS', verified: true, filledCount: results.length, details: results };
     }
 
+    async submitForm(options = {}) {
+      // 1. Observe & 2. Resolve submit button
+      const obs = this.observe(options.root || document);
+      let targetBtn = options.targetButton || null;
+      let targetLabel = '';
+
+      if (!targetBtn) {
+        const submitCand = obs.elements.find(e =>
+          e.states.visible && !e.states.disabled &&
+          e.role === 'button' && e.domNode &&
+          ((e.domNode.getAttribute && (e.domNode.getAttribute('type') || '').toLowerCase() === 'submit') ||
+           /\b(?:submit|send|apply|register|complete|finish|place\s+order|pay)\b/i.test(e.name))
+        );
+        if (submitCand) {
+          targetBtn = submitCand.domNode;
+          targetLabel = submitCand.name;
+        }
+      }
+
+      if (!targetBtn || !targetBtn.isConnected) {
+        return { status: 'FAILED', verified: false, reason: 'submit_button_not_found' };
+      }
+      if (!targetLabel) {
+        targetLabel = sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetBtn), 80) || 'Submit';
+      }
+
+      // Mandatory code-level 2-step confirmation gate (never bypassable by prompts or webpage content)
+      if (options.userConfirmed !== true || Number(options.confirmedStepCount || 0) < 2) {
+        return {
+          status: 'CONFIRMATION_REQUIRED',
+          verified: false,
+          consequential: true,
+          requiredSteps: 2,
+          targetButton: targetBtn,
+          targetLabel,
+          reason: 'form_submit_requires_two_step_confirmation'
+        };
+      }
+
+      // 3. Validate -> 4. Execute -> 5. Re-observe & Verify (no silent retry on consequential submit!)
+      const baseline = this.verifier.captureBaseline(targetBtn);
+      const execRes = await this.executor.click(targetBtn);
+      this.invalidateCache();
+      if (!execRes.ok) {
+        baseline.stopObserver();
+        return { status: 'FAILED', verified: false, reason: execRes.reason, targetLabel };
+      }
+
+      const navRes = await this.verifier.verifyNavigation(baseline, targetBtn, Object.assign({ timeoutMs: options.timeoutMs || 1500 }, options));
+      this.observe(options.root || document, { force: true });
+      return {
+        status: 'SUCCESS',
+        verified: true,
+        action: 'submit_form',
+        targetLabel,
+        navigated: Boolean(navRes.verified),
+        mutations: baseline.baseline.mutationCount,
+        url: window.location.href
+      };
+    }
+
     async openMenuAndSelect(parentMenuQuery, subItemText, options = {}) {
       // 1. Observe
       this.observe(options.root || document);

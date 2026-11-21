@@ -1551,7 +1551,7 @@
         return { ok: false, awaitingConfirm: true, summary };
       }
 
-      const doClick = async () => {
+      const doClick = async ({ stepCount } = {}) => {
         if (kind === 'next_step') {
           await this.saveMultiStepSession({
             stepNumber: ((this.guidedState && this.guidedState.stepNumber) || 1) + 1,
@@ -1564,7 +1564,24 @@
             await this.widget.navigator.clearSessionState();
           }
         }
-        targetBtn.click();
+        if (this.widget && this.widget.browserEngine && this.widget.useRebuiltBrowserEngine && typeof this.widget.browserEngine.submitForm === 'function') {
+          const t0 = performance.now();
+          const subRes = await this.widget.browserEngine.submitForm({
+            targetButton: targetBtn,
+            userConfirmed: true,
+            confirmedStepCount: stepCount || 2
+          });
+          if (typeof this.widget._recordRolloutEvent === 'function') {
+            this.widget._recordRolloutEvent({
+              action: 'submit_form',
+              engine: 'rebuilt_browser_engine',
+              outcome: subRes && subRes.verified ? 'success' : 'failed',
+              latencyMs: performance.now() - t0
+            });
+          }
+        } else {
+          targetBtn.click();
+        }
         this._announce(kind === 'next_step' ? `Moving to next step via "${targetLabel}".` : `Submitted via "${targetLabel}".`, { openBubble: true, state: 'idle' });
       };
 
