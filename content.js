@@ -4131,18 +4131,34 @@
           try {
             const beLoc = this.browserEngine.locate(targetLabel, { section: sectionScope });
             if (beLoc.status === 'FOUND' && beLoc.target) {
-              const beRes = await this.browserEngine.click(beLoc.target, { isNavigation: true });
+              const isTabItem = Boolean((beLoc.item && beLoc.item.role === 'tab') || /\btab\b/i.test(raw));
+              const beRes = isTabItem
+                ? await this.browserEngine.switchTab(beLoc.target)
+                : await this.browserEngine.click(beLoc.target, { isNavigation: true });
               const beMs = performance.now() - beT0;
               if (beRes.status === 'CONFIRMATION_REQUIRED') {
                 // Never silently retry or fall back on consequential actions
-                this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: beRes.reason, latencyMs: beMs });
+                this._recordRolloutEvent({ action: isTabItem ? 'switch_tab' : 'open_link', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: beRes.reason, latencyMs: beMs });
                 return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', target: targetLabel, reason: beRes.reason };
               }
               if (beRes.status === 'SUCCESS' || beRes.verified) {
-                this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
-                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, details: beRes.details, nluSource: meta.nluSource };
+                this._recordRolloutEvent({ action: isTabItem ? 'switch_tab' : 'open_link', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
+                return { status: isTabItem ? 'selected' : 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, details: beRes.details, nluSource: meta.nluSource };
               }
-              this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: beRes.reason || beRes.status, latencyMs: beMs });
+              this._recordRolloutEvent({ action: isTabItem ? 'switch_tab' : 'open_link', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: beRes.reason || beRes.status, latencyMs: beMs });
+            } else if (beLoc.status === 'NOT_FOUND' && sectionScope && typeof this.browserEngine.openMenuAndSelect === 'function') {
+              // Expandable / initially hidden nested submenu under sectionScope
+              const menuRes = await this.browserEngine.openMenuAndSelect(sectionScope, targetLabel);
+              const beMs = performance.now() - beT0;
+              if (menuRes && menuRes.status === 'CONFIRMATION_REQUIRED') {
+                this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: menuRes.reason, latencyMs: beMs });
+                return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', target: targetLabel, reason: menuRes.reason };
+              }
+              if (menuRes && (menuRes.status === 'SUCCESS' || menuRes.verified)) {
+                this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
+                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, parentMenu: sectionScope, nluSource: meta.nluSource };
+              }
+              this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (menuRes && menuRes.reason) || 'menu_not_verified', latencyMs: beMs });
             } else if (beLoc.status === 'AMBIGUOUS') {
               this._recordRolloutEvent({ action: 'open_link', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_candidates', latencyMs: performance.now() - beT0 });
             } else {
@@ -4405,7 +4421,34 @@
         return null;
       }
       const clean = String(rawText || '').trim().replace(/[.,!?;:]+$/, '');
-      if (/\b(?:checkbox|radio|tab)\b/i.test(clean)) return null;
+      if (/\b(?:checkbox|radio)\b/i.test(clean)) return null;
+
+      // Milestone 4: Tab switch command ("Switch to Analytics tab", "Select the Overview tab", "Click Analytics tab")
+      const tabCmdM = clean.match(/^(?:(?:please|can\s+you|could\s+you|now)\s+)?(?:switch\s+to|select|choose|click(?:\s+on)?|open|go\s+to)\s+(?:the\s+)?(.+?)(?:\s+tab)?$/i);
+      if (tabCmdM && (/\btab\b/i.test(clean) || document.querySelector('[role="tab"]')) && typeof this.browserEngine.switchTab === 'function') {
+        const tabName = tabCmdM[1].replace(/\s+tab$/i, '').trim();
+        const obs = this.browserEngine.observe(document);
+        const hasMatchingTab = obs.elements.some(e => e.role === 'tab' && e.name.toLowerCase().includes(tabName.toLowerCase()));
+        if (hasMatchingTab) {
+          const t0 = performance.now();
+          try {
+            const tabRes = await this.browserEngine.switchTab(tabName);
+            const ms = performance.now() - t0;
+            if (tabRes && (tabRes.status === 'SUCCESS' || tabRes.verified)) {
+              this._recordRolloutEvent({ action: 'switch_tab', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+              const msg = `Switched to "${tabName}" tab.`;
+              this.setAssistantReply(msg);
+              if (window.SW_UI) {
+                window.SW_UI.setState('speaking');
+                window.SW_UI.showCard({ type: 'answer', title: 'Tab Switched', text: msg });
+              }
+              return { status: 'selected', ok: true, verified: true, engine: 'rebuilt_browser_engine', selectedOption: tabName, field: 'Tab', message: msg };
+            }
+          } catch (err) {
+            this._recordRolloutEvent({ action: 'switch_tab', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
+          }
+        }
+      }
 
       let optionText = opts.optionText || '';
       let groupHint = opts.groupHint || '';

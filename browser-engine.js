@@ -1287,30 +1287,80 @@
       return { status: 'SUCCESS', verified: true, filledCount: results.length, details: results };
     }
 
-    async openMenuAndSelect(parentMenuQuery, subItemText) {
+    async openMenuAndSelect(parentMenuQuery, subItemText, options = {}) {
+      // 1. Observe
+      this.observe(options.root || document);
+
+      // Fast check: if submenu item is already visible under parentMenuQuery, click directly
+      if (typeof parentMenuQuery === 'string' && typeof subItemText === 'string') {
+        const directLoc = this.locate(subItemText, { section: parentMenuQuery });
+        if (directLoc.status === 'FOUND' && directLoc.target) {
+          return this.click(directLoc.target, Object.assign({ isNavigation: true }, options));
+        }
+      }
+
+      // 2. Resolve expandable parent menu trigger
       let parentEl = null;
       if (typeof parentMenuQuery === 'string') {
         const loc = this.locate(parentMenuQuery);
-        if (loc.status !== 'FOUND') return { status: 'FAILED', verified: false, reason: 'parent_menu_not_found' };
+        if (loc.status === 'AMBIGUOUS') {
+          return { status: 'AMBIGUOUS', verified: false, candidates: loc.candidates, prompt: loc.prompt };
+        }
+        if (loc.status !== 'FOUND' || !loc.target) {
+          return { status: 'FAILED', verified: false, reason: 'parent_menu_not_found' };
+        }
         parentEl = loc.target;
       } else {
         parentEl = parentMenuQuery;
       }
 
+      if (isConsequentialElement(parentEl) && options.userConfirmed !== true) {
+        return { status: 'CONFIRMATION_REQUIRED', verified: false, consequential: true, reason: 'consequential_action_requires_explicit_user_confirmation' };
+      }
+
+      // 3. Validate -> 4. Execute -> 5. Re-observe & Verify
       const baseline = this.verifier.captureBaseline(parentEl);
       const res = await this.executor.openMenuAndSelect(parentEl, subItemText);
+      this.invalidateCache();
       baseline.stopObserver();
+      this.observe(options.root || document, { force: true });
 
       return {
         status: res.ok ? 'SUCCESS' : 'FAILED',
-        verified: res.ok,
+        verified: Boolean(res.ok),
         action: 'open_menu_and_select',
+        parentMenu: typeof parentMenuQuery === 'string' ? parentMenuQuery : '',
+        selectedItem: subItemText,
         reason: res.reason
       };
     }
 
     async switchTab(tabQuery, options = {}) {
-      return this.click(tabQuery, Object.assign({ isTab: true }, options));
+      this.observe(options.root || document);
+      if (typeof tabQuery === 'string') {
+        let loc = this.locate(tabQuery, Object.assign({ role: 'tab' }, options));
+        if (loc.status === 'NOT_FOUND') {
+          const domTabs = Array.from((options.root || document).querySelectorAll('[role="tab"], .tab, .nav-tab, [data-tab]'));
+          const qLow = tabQuery.toLowerCase().replace(/\s+tab$/i, '').trim();
+          const hit = domTabs.find(t => ((t.textContent || '').trim().toLowerCase() === qLow || (t.textContent || '').trim().toLowerCase().includes(qLow)));
+          if (hit) {
+            const clickRes = await this.click(hit, Object.assign({ isTab: true }, options));
+            this.observe(options.root || document, { force: true });
+            return clickRes;
+          }
+        }
+        if (loc.status === 'AMBIGUOUS') {
+          return { status: 'AMBIGUOUS', verified: false, candidates: loc.candidates, prompt: loc.prompt };
+        }
+        if (loc.status === 'FOUND' && loc.target) {
+          const clickRes = await this.click(loc.target, Object.assign({ isTab: true }, options));
+          this.observe(options.root || document, { force: true });
+          return clickRes;
+        }
+      }
+      const clickRes = await this.click(tabQuery, Object.assign({ isTab: true }, options));
+      this.observe(options.root || document, { force: true });
+      return clickRes;
     }
 
     async executeSearch(query, options = {}) {
