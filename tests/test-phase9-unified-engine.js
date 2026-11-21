@@ -402,8 +402,12 @@ async function runPhase9UnifiedTests() {
       const step2 = await evalJs(`
         return await window.__SLEEPWALKER_INSTANCE__.handleUserInput('Yes.', 'voice');
       `, extCtx);
-      await new Promise(r => setTimeout(r, 400));
-      const subCount = await evalJs(`return window.__formSubmittedCount || 0;`);
+      let subCount = 0;
+      for (let i = 0; i < 20; i++) {
+        subCount = await evalJs(`return window.__formSubmittedCount || 0;`);
+        if (subCount >= 1) break;
+        await new Promise(r => setTimeout(r, 150));
+      }
       assert.strictEqual(step2.status, 'confirmed', 'Second Yes must complete 2-step confirmation');
       assert.strictEqual(subCount, 1, 'Form must be submitted exactly once after 2-step confirmation');
       return { engine: 'rebuilt_browser_engine', verified: true, detail: `directBlock=${directBlock.status}, steps=2, submittedCount=${subCount}` };
