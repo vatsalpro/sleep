@@ -1090,13 +1090,26 @@
 
       const baseline = this.verifier.captureBaseline(targetEl);
       const execResult = await this.executor.type(targetEl, text, options);
+      this.invalidateCache();
       if (!execResult.ok) {
         baseline.stopObserver();
         return { status: 'FAILED', verified: false, reason: execResult.reason };
       }
 
       if (options.submit) {
-        return this.verifier.verifyNavigation(baseline, targetEl, options);
+        const navRes = await this.verifier.verifyNavigation(baseline, targetEl, Object.assign({ timeoutMs: options.timeoutMs || 1800 }, options));
+        if (navRes.verified || String(targetEl.value || '') === String(text || '')) {
+          return {
+            status: 'SUCCESS',
+            verified: true,
+            action: 'type_and_submit',
+            value: String(targetEl.value || text || ''),
+            navigated: Boolean(navRes.verified),
+            url: window.location.href,
+            details: navRes.verified ? navRes.details : 'Input value committed and submitted.'
+          };
+        }
+        return navRes;
       }
 
       return this.verifier.verifyInputFill(baseline, targetEl, text);
@@ -1202,14 +1215,92 @@
     }
 
     async executeSearch(query, options = {}) {
-      const searchBox = document.querySelector('input[type="search"], input[name*="search" i], input[id*="search" i], [role="searchbox"]') ||
-                        this.locate('Search', { isInput: true }).target;
-
-      if (!searchBox) {
-        return { status: 'FAILED', verified: false, reason: 'no_searchbox_found' };
+      const cleanQ = String(query || '').trim();
+      if (!cleanQ) {
+        return { status: 'FAILED', verified: false, reason: 'empty_search_query' };
       }
 
-      return this.type(searchBox, query, Object.assign({ submit: true, clear: true }, options));
+      // 1. Observe
+      const obs = this.observe(options.root || document);
+
+      // 2. Resolve
+      let targetEl = (options.chosenCandidate && options.chosenCandidate.element) || options.targetElement || null;
+      let targetLabel = (options.chosenCandidate && options.chosenCandidate.label) || '';
+
+      if (!targetEl) {
+        const searchItems = obs.elements.filter((e) => {
+          if (!e.states.visible || e.states.disabled || e.states.sensitive) return false;
+          if (e.role === 'searchbox') return true;
+          if (e.role === 'textbox' && e.domNode) {
+            const meta = [
+              e.name || '',
+              e.parentSection || '',
+              e.domNode.id || '',
+              e.domNode.name || '',
+              e.domNode.placeholder || '',
+              (e.domNode.getAttribute && e.domNode.getAttribute('aria-label')) || ''
+            ].join(' ');
+            return /\b(?:search|find|query|filter|lookup|explore)\b/i.test(meta);
+          }
+          return false;
+        });
+
+        if (searchItems.length === 0) {
+          return { status: 'FAILED', verified: false, reason: 'no_searchbox_found' };
+        }
+
+        if (searchItems.length === 1) {
+          targetEl = searchItems[0].domNode;
+          targetLabel = searchItems[0].name || searchItems[0].parentSection || 'Search';
+        } else {
+          // Score multiple search fields against scopeHint / fieldHint / rawCommand
+          const hint = [options.scopeHint || '', options.fieldHint || '', options.siteHint || '', options.rawCommand || ''].join(' ').toLowerCase();
+          const scored = searchItems.map((item) => {
+            let score = item.role === 'searchbox' ? 50 : 35;
+            const hay = `${item.name} ${item.parentSection} ${item.domNode.id || ''} ${item.domNode.name || ''} ${item.domNode.placeholder || ''}`.toLowerCase();
+            const tokens = item.name.toLowerCase().split(/\s+/).filter(t => t.length >= 3 && t !== 'search');
+            for (const tok of tokens) {
+              if (hint.includes(tok)) score += 35;
+            }
+            if (options.scopeHint && hay.includes(String(options.scopeHint).toLowerCase())) {
+              score += 45;
+            }
+            return { item, score, element: item.domNode };
+          }).sort((a, b) => b.score - a.score);
+
+          const topScore = scored[0].score;
+          const competing = scored.filter(s => (topScore - s.score) <= 15);
+          if (competing.length >= 2) {
+            return {
+              status: 'AMBIGUOUS',
+              verified: false,
+              query: cleanQ,
+              candidates: competing.map(c => ({
+                id: c.item.id,
+                name: c.item.name || c.item.parentSection || 'Search',
+                label: c.item.name || c.item.parentSection || 'Search',
+                role: c.item.role,
+                section: c.item.parentSection,
+                element: c.element
+              })),
+              prompt: `Multiple search fields found (${competing.map(c => c.item.name || c.item.parentSection).join(', ')}). Which one should I use?`
+            };
+          }
+          targetEl = scored[0].element;
+          targetLabel = scored[0].item.name || scored[0].item.parentSection || 'Search';
+        }
+      }
+
+      // 3. Validate -> 4. Execute -> 5. Re-observe & Verify
+      const typeRes = await this.type(targetEl, cleanQ, Object.assign({ submit: true, clear: true }, options));
+      const postObs = this.observe(options.root || document, { force: true });
+      return {
+        ...typeRes,
+        action: 'search',
+        query: cleanQ,
+        targetLabel,
+        postElementCount: postObs.elementCount
+      };
     }
   }
 

@@ -1649,7 +1649,7 @@
         if (!res) return true;
         if (res.awaiting === true) return false;
         const st = String(res.status || '');
-        if (['disabled', 'option_disabled', 'sensitive_skipped', 'needs_clarification', 'ambiguous', 'ambiguous_video', 'confirming', 'moved', 'scrolled', 'acted', 'navigated', 'clicked', 'selected', 'selected_video', 'found_in_table', 'found', 'section_found', 'filter_applied', 'media_controlled', 'cancelled', 'user_denied', 'task_cancelled', 'aborted_stale_turn', 'captions_unavailable', 'waiting_for_user', 'explained_video', 'explained_paragraph', 'explained', 'skill_executed', 'skill_step_navigating'].includes(st)) {
+        if (['disabled', 'option_disabled', 'sensitive_skipped', 'needs_clarification', 'ambiguous', 'ambiguous_video', 'confirming', 'moved', 'scrolled', 'acted', 'navigated', 'clicked', 'selected', 'selected_video', 'found_in_table', 'found', 'section_found', 'filter_applied', 'media_controlled', 'cancelled', 'user_denied', 'task_cancelled', 'aborted_stale_turn', 'captions_unavailable', 'waiting_for_user', 'explained_video', 'explained_paragraph', 'explained', 'skill_executed', 'skill_step_navigating', 'opened', 'searched', 'filled', 'toggled', 'read_section', 'reading_page'].includes(st)) {
           return false;
         }
         if (res.verified === true || res.ok === true) return false;
@@ -4276,14 +4276,12 @@
 
       // 10. Search
       if (plan.intent === 'search' || act.type === 'search') {
-        if (this.navigator) {
-          const effectiveSearchQ = (plan.context && plan.context.query) || act.query || plan.target || (meta.classified && meta.classified.args && meta.classified.args.query) || raw;
-          const sRes = await this.navigator.executeSearch(effectiveSearchQ, {
-            scopeHint: (plan.context && plan.context.section) || act.section || '',
-            rawCommand: raw
-          });
-          return { ...sRes, nluSource: meta.nluSource };
-        }
+        const effectiveSearchQ = (plan.context && plan.context.query) || act.query || plan.target || (meta.classified && meta.classified.args && meta.classified.args.query) || raw;
+        const sRes = await this._executeSearchWithEngine(effectiveSearchQ, {
+          scopeHint: (plan.context && plan.context.section) || act.section || '',
+          rawCommand: raw
+        });
+        if (sRes) return { ...sRes, nluSource: meta.nluSource };
       }
 
       // 11. Page / Question / Conceptual Learning explanation via existing grounded explainer (Gemini only if specialist)
@@ -4304,6 +4302,40 @@
       return null;
     }
 
+    async _executeSearchWithEngine(query, opts = {}) {
+      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.executeSearch === 'function') {
+        const t0 = performance.now();
+        try {
+          const beRes = await this.browserEngine.executeSearch(query, opts);
+          const ms = performance.now() - t0;
+          if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
+            this._recordRolloutEvent({ action: 'search', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            return {
+              status: 'searched',
+              ok: true,
+              verified: true,
+              engine: 'rebuilt_browser_engine',
+              query,
+              target: beRes.targetLabel || 'Search',
+              url: beRes.url || window.location.href,
+              details: beRes.details
+            };
+          }
+          if (beRes && beRes.status === 'AMBIGUOUS') {
+            this._recordRolloutEvent({ action: 'search', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_search_fields', latencyMs: ms });
+          } else {
+            this._recordRolloutEvent({ action: 'search', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (beRes && (beRes.reason || beRes.status)) || 'not_verified', latencyMs: ms });
+          }
+        } catch (err) {
+          this._recordRolloutEvent({ action: 'search', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (err && err.message) || 'exception', latencyMs: performance.now() - t0 });
+        }
+      }
+      if (this.navigator && typeof this.navigator.executeSearch === 'function') {
+        return this.navigator.executeSearch(query, opts);
+      }
+      return { status: 'not_found', ok: false, verified: false, reason: 'no_search_engine' };
+    }
+
     async dispatchIntent(c, rawText = '', resolvedContext = null) {
       const intent = (c && c.intent) || 'HELP';
       const args = (c && c.args) || {};
@@ -4311,9 +4343,9 @@
       const cmdId = (c && c.cmdId) || `sw-${Date.now().toString(36)}`;
       this._setStatusChip(`Executing: ${intent.toLowerCase().replace(/_/g, ' ')}...`);
 
-      if ((intent === 'SEARCH' || (intent === 'NAVIGATE' && args.action === 'search')) && this.navigator) {
+      if ((intent === 'SEARCH' || (intent === 'NAVIGATE' && args.action === 'search')) && (this.navigator || this.browserEngine)) {
         const query = args.query || args.target || rawText;
-        return this.navigator.executeSearch(query, {
+        return this._executeSearchWithEngine(query, {
           siteHint: args.siteHint || '',
           scopeHint: args.scopeHint || '',
           rawQuery: args.rawQuery || query,
