@@ -4147,6 +4147,24 @@
         if (this.browserEngine && this.useRebuiltBrowserEngine) {
           const beT0 = performance.now();
           try {
+            const isHierarchical = Boolean(
+              (sectionScope && (sectionScope.includes('>') || sectionScope.includes('->') || sectionScope.includes('/'))) ||
+              (raw && (raw.includes('>') || raw.includes('->') || raw.includes('/')))
+            );
+            if (isHierarchical && typeof this.browserEngine.openMenuPath === 'function') {
+              const menuRes = await this.browserEngine.openMenuPath(sectionScope ? [sectionScope, targetLabel] : raw);
+              const beMs = performance.now() - beT0;
+              if (menuRes && menuRes.status === 'CONFIRMATION_REQUIRED') {
+                this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: menuRes.reason, latencyMs: beMs });
+                return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', target: targetLabel, reason: menuRes.reason };
+              }
+              if (menuRes && (menuRes.status === 'SUCCESS' || menuRes.verified)) {
+                this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
+                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, parentMenu: sectionScope, nluSource: meta.nluSource };
+              }
+              this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (menuRes && menuRes.reason) || 'menu_not_verified', latencyMs: beMs });
+            }
+
             const beLoc = this.browserEngine.locate(targetLabel, { section: sectionScope });
             if (beLoc.status === 'FOUND' && beLoc.target) {
               const isTabItem = Boolean((beLoc.item && beLoc.item.role === 'tab') || /\btab\b/i.test(raw));

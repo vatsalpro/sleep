@@ -215,6 +215,18 @@
           if (hText) return hText;
         }
 
+        // Check enclosing submenu / dropdown parent trigger
+        if (cur.matches && cur.matches('[role="menu"], [role="menubar"], ul.submenu, .dropdown-menu, .submenu, .menu-group, [class*="dropdown-menu"]')) {
+          const parentItem = cur.closest('li, .nav-item, .dropdown, [role="menuitem"], [role="none"]') || cur.parentElement;
+          if (parentItem) {
+            const trigger = parentItem.querySelector(':scope > a, :scope > button, :scope > [role="button"], :scope > [role="menuitem"], :scope > summary');
+            if (trigger && trigger !== el && !trigger.contains(el)) {
+              const tText = this._getCleanText(trigger);
+              if (tText) return tText;
+            }
+          }
+        }
+
         const role = cur.getAttribute('role');
         if (role && ['navigation', 'main', 'region', 'form', 'banner', 'complementary'].includes(role)) {
           return cur.getAttribute('aria-label') || cur.id || role;
@@ -412,7 +424,7 @@
             (hit.closest && hit.closest('#sleepwalker-ui-host, #sleepwalker-host, [data-sleepwalker-ui="1"]'))
           );
           if (hitStyle.pointerEvents !== 'none' && !isSwUi) {
-            return { ok: false, reason: 'hit_test_obstructed_by_' + hit.tagName.toLowerCase() };
+            return { ok: false, reason: 'hit_test_obstructed_by_' + hit.tagName.toLowerCase(), obstructedBy: (hit.id ? '#' + hit.id : hit.tagName) + ' ' + (hit.textContent || '').slice(0, 40) };
           }
         }
       }
@@ -487,6 +499,119 @@
 
       this.dispatchGestureTrain(el);
       await new Promise(r => setTimeout(r, this.options.settleDelayMs));
+      return { ok: true };
+    }
+
+    async hover(el, options = {}) {
+      if (!el || !el.isConnected) return { ok: false, reason: 'element_null' };
+      await this.scrollIntoViewIfNeeded(el);
+
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+        screenX: clientX,
+        screenY: clientY,
+        buttons: 0
+      };
+
+      el.dispatchEvent(new PointerEvent('pointerover', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseover', eventInit));
+      el.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, eventInit, { bubbles: false })));
+      el.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, eventInit, { bubbles: false })));
+      el.dispatchEvent(new PointerEvent('pointermove', eventInit));
+      el.dispatchEvent(new MouseEvent('mousemove', eventInit));
+
+      const parentContainer = el.closest('li, .nav-item, .dropdown, [role="menuitem"], [role="none"]');
+      if (parentContainer && parentContainer !== el) {
+        parentContainer.dispatchEvent(new PointerEvent('pointerover', eventInit));
+        parentContainer.dispatchEvent(new MouseEvent('mouseover', eventInit));
+        parentContainer.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, eventInit, { bubbles: false })));
+        parentContainer.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, eventInit, { bubbles: false })));
+      }
+
+      try {
+        el.classList.add('is-hovered', 'sw-hovered');
+        if (parentContainer) parentContainer.classList.add('is-hovered', 'sw-hovered', 'open');
+      } catch (_e) {}
+
+      if (typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_hover === 'function') {
+        try { await window.__sleepwalker_cdp_hover(clientX, clientY); } catch (_e) {}
+      }
+
+      await new Promise(r => setTimeout(r, options.settleDelayMs || this.options.settleDelayMs || 60));
+      return { ok: true, clientX, clientY };
+    }
+
+    async keyboardActivate(el, key = 'Enter', options = {}) {
+      if (!el || !el.isConnected) return { ok: false, reason: 'element_null' };
+      await this.scrollIntoViewIfNeeded(el);
+      if (typeof el.focus === 'function') {
+        try { el.focus({ preventScroll: true }); } catch (_e) {}
+      }
+
+      const keyCode = key === 'Enter' ? 13 : (key === 'ArrowDown' ? 40 : (key === ' ' || key === 'Space' ? 32 : (key === 'ArrowRight' ? 39 : 0)));
+      const keyInit = {
+        key,
+        code: key === ' ' ? 'Space' : key,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+
+      el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+      el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+      el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+
+      await new Promise(r => setTimeout(r, options.settleDelayMs || this.options.settleDelayMs || 60));
+      return { ok: true, key };
+    }
+
+    async unhover(el, options = {}) {
+      if (!el || !el.isConnected) return { ok: false, reason: 'element_null' };
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+        screenX: clientX,
+        screenY: clientY,
+        buttons: 0
+      };
+
+      el.dispatchEvent(new PointerEvent('pointerout', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseout', eventInit));
+      el.dispatchEvent(new PointerEvent('pointerleave', Object.assign({}, eventInit, { bubbles: false })));
+      el.dispatchEvent(new MouseEvent('mouseleave', Object.assign({}, eventInit, { bubbles: false })));
+
+      const parentContainer = el.closest('li, .nav-item, .dropdown, [role="menuitem"], [role="none"]');
+      if (parentContainer && parentContainer !== el) {
+        parentContainer.dispatchEvent(new PointerEvent('pointerleave', Object.assign({}, eventInit, { bubbles: false })));
+        parentContainer.dispatchEvent(new MouseEvent('mouseleave', Object.assign({}, eventInit, { bubbles: false })));
+      }
+
+      try {
+        el.classList.remove('is-hovered', 'sw-hovered');
+        if (parentContainer) parentContainer.classList.remove('is-hovered', 'sw-hovered', 'open');
+      } catch (_e) {}
+
+      await new Promise(r => setTimeout(r, options.settleDelayMs || this.options.settleDelayMs || 40));
       return { ok: true };
     }
 
@@ -887,10 +1012,345 @@
 
       return { ok: true, target: hit };
     }
+
+    findVisualSubmenu(triggerEl) {
+      if (!triggerEl || !triggerEl.isConnected) return null;
+      const tRect = triggerEl.getBoundingClientRect();
+      if (tRect.width === 0 && tRect.height === 0) return null;
+
+      const potentialContainers = Array.from(document.querySelectorAll('[role="menu"], ul, ol, .dropdown-menu, .submenu, [class*="dropdown-menu"], [class*="submenu"]'));
+      let best = null;
+      let minDistance = Infinity;
+
+      potentialContainers.forEach(c => {
+        if (c === triggerEl || c.contains(triggerEl) || triggerEl.contains(c)) return;
+        const style = window.getComputedStyle(c);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return;
+        const cRect = c.getBoundingClientRect();
+        if (cRect.width < 10 || cRect.height < 10) return;
+
+        const isBelow = cRect.top >= (tRect.bottom - 15) && cRect.top <= (tRect.bottom + 80) &&
+                        cRect.left <= (tRect.right + 25) && cRect.right >= (tRect.left - 25);
+        if (isBelow) {
+          const dist = Math.hypot(cRect.left - tRect.left, cRect.top - tRect.bottom);
+          if (dist < minDistance) {
+            minDistance = dist;
+            best = c;
+          }
+        }
+      });
+
+      return best;
+    }
+
+    findVisualExpansionControl(containerOrTrigger) {
+      if (!containerOrTrigger || !containerOrTrigger.isConnected) return null;
+      const iconSelectors = 'button, [role="button"], .caret, .chevron, [class*="chevron"], [class*="arrow"], [class*="caret"], svg, i, span.dropdown-toggle';
+      const hits = Array.from(containerOrTrigger.querySelectorAll(iconSelectors));
+      if (hits.length > 0) {
+        const toggle = hits.find(h => h.getAttribute('aria-expanded') !== null || h.getAttribute('aria-haspopup') !== null || (h.className && String(h.className).includes('dropdown-toggle')));
+        return toggle || hits[hits.length - 1];
+      }
+      return null;
+    }
+
+    groundVisualCandidate(container, textOrIcon) {
+      if (!container) return null;
+      const norm = String(textOrIcon || '').toLowerCase().trim();
+      const items = Array.from(container.querySelectorAll('a, button, [role="menuitem"], [role="button"], li, span'));
+      for (const item of items) {
+        const text = (item.innerText || item.textContent || item.getAttribute('aria-label') || '').toLowerCase().trim();
+        if (text && (text === norm || text.includes(norm))) {
+          const rect = item.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return item;
+          }
+        }
+      }
+      return null;
+    }
   }
 
   // ===========================================================================
-  // 5. BrowserEngine (Unified Facade)
+  // 5. PageCapabilityMap (Hierarchical Menu & Capability Engine)
+  // ===========================================================================
+  class PageCapabilityMap {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        maxDepth: 10,
+        settleTimeoutMs: 600,
+        pollIntervalMs: 50
+      }, options);
+      this.nodes = [];
+      this.landmarks = [];
+    }
+
+    getNodeName(el) {
+      if (!el) return '';
+      if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const ref = document.getElementById(labelledBy);
+        if (ref) return (ref.textContent || '').trim();
+      }
+      const clone = el.cloneNode(true);
+      const toRemove = clone.querySelectorAll('script, style, noscript, [hidden], [aria-hidden="true"], .caret, .chevron, [class*="caret"], [class*="chevron"], [class*="arrow"], svg, [role="menu"]');
+      toRemove.forEach(r => r.remove());
+      return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    detectSplitButton(container, trigger) {
+      if (!container) return null;
+      // An expansion trigger's split link must be at the same level, NOT inside a nested submenu container!
+      const links = Array.from(container.querySelectorAll('a[href]')).filter(a => {
+        return !a.closest('ul, ol, [role="menu"], .dropdown-menu, .submenu, .submenu-hidden, [class*="submenu"]');
+      });
+      const toggles = Array.from(container.querySelectorAll('button, [role="button"], .dropdown-toggle, [aria-expanded], [aria-haspopup], .caret, .chevron, [data-toggle="dropdown"], [data-bs-toggle="dropdown"]')).filter(t => {
+        return !t.closest('ul, ol, [role="menu"], .dropdown-menu, .submenu, .submenu-hidden, [class*="submenu"]');
+      });
+      if (links.length > 0 && toggles.length > 0) {
+        const mainLink = links[0];
+        const expansionToggle = toggles.find(t => t !== mainLink) || toggles[0];
+        if (mainLink && expansionToggle && mainLink !== expansionToggle) {
+          return { mainLink, expansionToggle };
+        }
+      }
+      return null;
+    }
+
+    detectInteractionMethod(triggerEl, container, submenuEl) {
+      if (!triggerEl) return 'click';
+
+      const split = this.detectSplitButton(container, triggerEl);
+      if (split && split.expansionToggle) return 'split';
+
+      const isNavAnchor = triggerEl.tagName === 'A' &&
+        triggerEl.hasAttribute('href') &&
+        !/^#|^javascript:|^$/i.test(triggerEl.getAttribute('href') || '');
+
+      const hasHover = this.hasHoverBehavior(triggerEl, container, submenuEl);
+      if (hasHover) {
+        return 'hover';
+      }
+
+      if (triggerEl.getAttribute('role') === 'menubar' || (container && container.getAttribute('role') === 'menubar') || triggerEl.hasAttribute('data-keyboard-menu') || triggerEl.getAttribute('role') === 'menuitem') {
+        if (typeof triggerEl.onkeydown === 'function' || triggerEl.hasAttribute('onkeydown') || (container && container.hasAttribute('onkeydown')) || triggerEl.hasAttribute('data-keyboard-menu') || (container && container.getAttribute('role') === 'menubar')) {
+          return 'keyboard';
+        }
+      }
+
+      if (isNavAnchor && (submenuEl || triggerEl.getAttribute('aria-haspopup'))) {
+        return 'hover';
+      }
+
+      return 'click';
+    }
+
+    hasHoverBehavior(triggerEl, container, submenuEl) {
+      if (!triggerEl) return false;
+      if (triggerEl.hasAttribute('data-hover') || (container && container.hasAttribute('data-hover'))) return true;
+      if (triggerEl.getAttribute('data-trigger') === 'hover' || (container && container.getAttribute('data-trigger') === 'hover')) return true;
+
+      const classStr = `${triggerEl.className || ''} ${(container && container.className) || ''}`.toLowerCase();
+      if (/\b(?:hover-dropdown|hover-menu|dropdown-hover|hoverable|has-hover)\b/.test(classStr)) {
+        return true;
+      }
+
+      if (typeof triggerEl.onmouseenter === 'function' || typeof triggerEl.onmouseover === 'function' || triggerEl.hasAttribute('onmouseenter') || triggerEl.hasAttribute('onmouseover')) return true;
+      if (container && (typeof container.onmouseenter === 'function' || typeof container.onmouseover === 'function' || container.hasAttribute('onmouseenter') || container.hasAttribute('onmouseover'))) return true;
+
+      try {
+        const sheets = Array.from(document.styleSheets || []);
+        for (const sheet of sheets) {
+          try {
+            const rules = Array.from(sheet.cssRules || sheet.rules || []);
+            for (const rule of rules) {
+              if (rule.selectorText && rule.selectorText.includes(':hover')) {
+                const m = rule.selectorText.match(/^([^{,]+):hover(?:\s+|>)\s*([^{,]+)$/);
+                if (m) {
+                  const parentSel = m[1].trim();
+                  const childSel = m[2].trim();
+                  const matchesParent = (container && container.matches && container.matches(parentSel)) ||
+                                        (triggerEl && triggerEl.matches && triggerEl.matches(parentSel));
+                  if (matchesParent && submenuEl && submenuEl.matches && submenuEl.matches(childSel)) {
+                    return true;
+                  }
+                }
+              }
+            }
+          } catch (_e) {}
+        }
+      } catch (_e) {}
+
+      return false;
+    }
+
+    findSubmenuContainer(triggerEl, container) {
+      if (!triggerEl) return null;
+
+      const controlsId = triggerEl.getAttribute('aria-controls');
+      if (controlsId) {
+        const el = document.getElementById(controlsId);
+        if (el) return el;
+      }
+
+      const ownsId = triggerEl.getAttribute('aria-owns');
+      if (ownsId) {
+        const el = document.getElementById(ownsId);
+        if (el) return el;
+      }
+
+      if (container) {
+        const sub = container.querySelector('ul, ol, [role="menu"], [role="group"], .dropdown-menu, .submenu, .submenu-hidden, [class*="submenu"], [class*="dropdown-menu"]');
+        if (sub && sub !== triggerEl && !sub.contains(triggerEl)) {
+          return sub;
+        }
+      }
+
+      let next = triggerEl.nextElementSibling;
+      while (next) {
+        if (next.matches && next.matches('ul, ol, [role="menu"], [role="group"], .dropdown-menu, .submenu, [class*="dropdown"], [class*="submenu"]')) {
+          return next;
+        }
+        next = next.nextElementSibling;
+      }
+
+      if (triggerEl.id) {
+        const labelled = document.querySelector(`[aria-labelledby="${triggerEl.id}"]`);
+        if (labelled && labelled !== triggerEl) return labelled;
+      }
+
+      return null;
+    }
+
+    isNodeExpanded(triggerEl, container, submenuEl) {
+      if (!triggerEl) return false;
+      if (triggerEl.getAttribute('aria-expanded') === 'true') return true;
+      if (container && container.getAttribute('aria-expanded') === 'true') return true;
+
+      const cNames = `${triggerEl.className || ''} ${(container && container.className) || ''} ${(submenuEl && submenuEl.className) || ''}`.toLowerCase();
+      if (/\b(?:open|show|is-active|active|expanded)\b/.test(cNames)) {
+        if (submenuEl) {
+          const style = window.getComputedStyle(submenuEl);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && submenuEl.offsetWidth > 0) {
+            return true;
+          }
+        } else {
+          return true;
+        }
+      }
+
+      if (submenuEl) {
+        try {
+          const style = window.getComputedStyle(submenuEl);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && submenuEl.offsetWidth > 0 && submenuEl.offsetHeight > 0) {
+            return true;
+          }
+        } catch (_e) {}
+      }
+
+      return false;
+    }
+
+    build(root = document) {
+      this.nodes = [];
+      this.landmarks = [];
+      let seq = 0;
+
+      const landmarkEls = Array.from(root.querySelectorAll('nav, [role="navigation"], header, [role="banner"], [role="menubar"]'));
+      landmarkEls.forEach(lEl => {
+        const name = this.getNodeName(lEl);
+        this.landmarks.push({
+          element: lEl,
+          role: lEl.getAttribute('role') || lEl.tagName.toLowerCase(),
+          name
+        });
+      });
+
+      const parseContainer = (containerEl, parentNode = null, depth = 0) => {
+        if (!containerEl || depth > this.options.maxDepth) return [];
+
+        let items = [];
+        if (containerEl.matches && containerEl.matches('ul, ol, [role="menubar"], [role="menu"]')) {
+          items = Array.from(containerEl.children).filter(c => c.tagName === 'LI' || c.matches('[role="menuitem"], [role="none"], .nav-item, .menu-group'));
+          if (items.length === 0) items = Array.from(containerEl.children);
+        } else {
+          items = Array.from(containerEl.children);
+        }
+
+        const nodeList = [];
+
+        items.forEach(itemEl => {
+          const trigger = itemEl.matches('a, button, [role="button"], [role="menuitem"], summary')
+            ? itemEl
+            : itemEl.querySelector(':scope > a, :scope > button, :scope > [role="button"], :scope > [role="menuitem"], :scope > summary') ||
+              itemEl.querySelector('a, button, [role="button"], [role="menuitem"], summary') ||
+              itemEl;
+
+          if (this.nodes.some(n => n.element === trigger)) return;
+
+          const name = this.getNodeName(trigger) || this.getNodeName(itemEl);
+          if (!name && !trigger.hasAttribute('aria-label')) return;
+
+          const submenuEl = this.findSubmenuContainer(trigger, itemEl);
+          const split = this.detectSplitButton(itemEl, trigger);
+          const hasSubmenu = Boolean(submenuEl || trigger.getAttribute('aria-haspopup') || trigger.hasAttribute('aria-expanded'));
+          const interactionMethod = this.detectInteractionMethod(trigger, itemEl, submenuEl);
+          const isExpanded = this.isNodeExpanded(trigger, itemEl, submenuEl);
+
+          const rect = (trigger.getBoundingClientRect ? trigger.getBoundingClientRect() : itemEl.getBoundingClientRect());
+
+          const node = {
+            id: `menu-node-${++seq}`,
+            name: name.toLowerCase().trim(),
+            rawName: name,
+            element: trigger,
+            container: itemEl,
+            role: trigger.getAttribute('role') || trigger.tagName.toLowerCase(),
+            parent: parentNode,
+            depth,
+            hasSubmenu,
+            submenuElement: submenuEl,
+            expansionControl: split ? split.expansionToggle : trigger,
+            navigationLink: split ? split.mainLink : (trigger.tagName === 'A' ? trigger : null),
+            interactionMethod,
+            isExpanded,
+            boundingBox: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            },
+            children: []
+          };
+
+          if (submenuEl && (isExpanded || depth < this.options.maxDepth)) {
+            node.children = parseContainer(submenuEl, node, depth + 1);
+          }
+
+          nodeList.push(node);
+          this.nodes.push(node);
+        });
+
+        return nodeList;
+      };
+
+      const allContainers = Array.from(root.querySelectorAll('nav, [role="navigation"], [role="menubar"], [role="menu"], .navbar, .menu-group'));
+      const menuContainers = allContainers.filter(mc => !allContainers.some(other => other !== mc && other.contains(mc)));
+      if (menuContainers.length > 0) {
+        menuContainers.forEach(mc => {
+          parseContainer(mc, null, 0);
+        });
+      } else {
+        parseContainer(root === document ? document.body : root, null, 0);
+      }
+
+      return this.nodes;
+    }
+  }
+
+  // ===========================================================================
+  // 6. BrowserEngine (Unified Facade)
   // ===========================================================================
   class BrowserEngine {
     constructor(options = {}) {
@@ -904,6 +1364,7 @@
       this.executor = new PlaywrightExecutor(options.executor);
       this.verifier = new StateVerifier(options.verifier);
       this.visual = new VisualFallback(options.visual);
+      this.capabilityMap = new PageCapabilityMap(options.capabilityMap);
       this._obsCache = null;
     }
 
@@ -1385,52 +1846,346 @@
       };
     }
 
-    async openMenuAndSelect(parentMenuQuery, subItemText, options = {}) {
-      // 1. Observe
-      this.observe(options.root || document);
+    normalizeMenuPath(input) {
+      if (Array.isArray(input)) {
+        const segments = [];
+        for (const item of input) {
+          const s = String(item || '').trim();
+          if (!s) continue;
+          if (s.includes('>') || s.includes('->') || s.includes('/')) {
+            segments.push(...this.normalizeMenuPath(s));
+          } else {
+            segments.push(s);
+          }
+        }
+        return segments;
+      }
+      const str = String(input || '').trim();
+      if (!str) return [];
 
-      // Fast check: if submenu item is already visible under parentMenuQuery, click directly
-      if (typeof parentMenuQuery === 'string' && typeof subItemText === 'string') {
-        const directLoc = this.locate(subItemText, { section: parentMenuQuery });
+      const underMatch = str.match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click|select|choose|go\s+to)\s+(?:the\s+)?(.+?)\s+(?:under|inside|below|in\s+the)\s+(.+?)(?:\s+(?:menu|section|navigation))?[.?!]*$/i);
+      if (underMatch) {
+        const child = underMatch[1].trim();
+        const parentPart = underMatch[2].trim();
+        const parentSegments = this.normalizeMenuPath(parentPart);
+        return parentSegments.concat([child]);
+      }
+
+      const underFirstMatch = str.match(/^(?:under|inside|in\s+the)\s+(.+?),\s*(?:open|click|select|choose|go\s+to)\s+(.+?)[.?!]*$/i);
+      if (underFirstMatch) {
+        const parentSegments = this.normalizeMenuPath(underFirstMatch[1].trim());
+        return parentSegments.concat([underFirstMatch[2].trim()]);
+      }
+
+      if (str.includes('>') || str.includes('->') || str.includes('/')) {
+        return str.split(/(?:\s*->\s*|\s*>\s*|\s*\/\s*)/).map(s => s.trim()).filter(Boolean);
+      }
+
+      const andMatch = str.match(/^(?:(?:please\s+)?(?:open|expand|click)\s+)?(.+?)\s+and\s+(?:then\s+)?(?:select|choose|click|open)\s+(.+?)[.?!]*$/i);
+      if (andMatch) {
+        return [andMatch[1].trim(), andMatch[2].trim()];
+      }
+
+      return [str];
+    }
+
+    findMenuCandidates(stepQuery, parentNode, currentContainer, options = {}) {
+      const normQuery = String(stepQuery || '').toLowerCase().trim();
+      const queryTokens = normQuery.split(/\s+/).filter(Boolean);
+      if (!normQuery) return [];
+
+      const candidates = [];
+
+      if (!parentNode) {
+        if (options.directParentElement && options.directParentElement.isConnected) {
+          const directNode = this.capabilityMap.nodes.find(n => n.element === options.directParentElement || n.container === options.directParentElement);
+          return [{
+            score: 100,
+            element: options.directParentElement,
+            node: directNode || null
+          }];
+        }
+
+        const topNodes = this.capabilityMap.nodes.filter(n => n.depth === 0 || !n.parent);
+        for (const node of topNodes) {
+          let score = 0;
+          const normName = node.name.toLowerCase();
+          if (normName === normQuery) {
+            score += 100;
+          } else if (normName.includes(normQuery)) {
+            score += 70;
+          } else if (normQuery.includes(normName) && normName.length >= 3) {
+            score += 55;
+          }
+          const matchedTokens = queryTokens.filter(t => normName.includes(t));
+          score += (matchedTokens.length / queryTokens.length) * 35;
+          if (node.hasSubmenu) score += 20;
+
+          if (score >= this.options.minMatchScore) {
+            candidates.push({ score, element: node.element, node });
+          }
+        }
+
+        if (candidates.length === 0) {
+          const root = options.root || document;
+          const triggers = Array.from(root.querySelectorAll('nav button, nav a, [role="navigation"] button, [role="navigation"] a, [role="menubar"] [role="menuitem"], .menu-group button, .menu-group h3, .dropdown-toggle, [aria-haspopup], [aria-expanded]'));
+          for (const el of triggers) {
+            const name = this.capabilityMap.getNodeName(el).toLowerCase();
+            let score = 0;
+            if (name === normQuery) score += 100;
+            else if (name.includes(normQuery)) score += 70;
+            else if (normQuery.includes(name) && name.length >= 3) score += 55;
+            const matchedTokens = queryTokens.filter(t => name.includes(t));
+            score += (matchedTokens.length / queryTokens.length) * 35;
+            if (score >= this.options.minMatchScore) {
+              const matchedNode = this.capabilityMap.nodes.find(n => n.element === el || n.container === el || (n.container && n.container.contains(el)));
+              candidates.push({ score, element: el, node: matchedNode || null });
+            }
+          }
+        }
+      } else {
+        const container = parentNode.submenuElement || currentContainer;
+        if (!container) return [];
+
+        const elements = Array.from(container.querySelectorAll('a, button, [role="menuitem"], [role="button"], [role="treeitem"], li, summary'));
+        for (const el of elements) {
+          try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+              continue;
+            }
+          } catch (_e) { continue; }
+
+          const rawText = this.capabilityMap.getNodeName(el);
+          const normName = rawText.toLowerCase();
+          if (!normName) continue;
+
+          let score = 0;
+          if (normName === normQuery) {
+            score += 100;
+          } else if (normName.includes(normQuery)) {
+            score += 70;
+          } else if (normQuery.includes(normName) && normName.length >= 3) {
+            score += 55;
+          }
+          const matchedTokens = queryTokens.filter(t => normName.includes(t));
+          score += (matchedTokens.length / queryTokens.length) * 35;
+
+          const role = el.getAttribute('role') || el.tagName.toLowerCase();
+          if (role === 'menuitem' || role === 'a' || role === 'button') score += 15;
+
+          if (score >= this.options.minMatchScore) {
+            const matchedNode = this.capabilityMap.nodes.find(n => n.element === el || n.container === el);
+            candidates.push({ score, element: el, node: matchedNode || null });
+          }
+        }
+
+        if (candidates.length === 0) {
+          const visualEl = this.visual.groundVisualCandidate(container, stepQuery);
+          if (visualEl) {
+            candidates.push({ score: 65, element: visualEl, node: null });
+          }
+        }
+      }
+
+      const unique = [];
+      const seen = new Set();
+      for (const cand of candidates) {
+        if (!seen.has(cand.element)) {
+          seen.add(cand.element);
+          unique.push(cand);
+        }
+      }
+      unique.sort((a, b) => b.score - a.score);
+      return unique;
+    }
+
+    async openMenuPath(pathInput, options = {}) {
+      const path = this.normalizeMenuPath(pathInput);
+      if (!path || path.length === 0) {
+        return { status: 'FAILED', verified: false, reason: 'empty_menu_path' };
+      }
+
+      if (path.length === 2) {
+        const directLoc = this.locate(path[1], { section: path[0] });
         if (directLoc.status === 'FOUND' && directLoc.target) {
           return this.click(directLoc.target, Object.assign({ isNavigation: true }, options));
         }
       }
 
-      // 2. Resolve expandable parent menu trigger
-      let parentEl = null;
-      if (typeof parentMenuQuery === 'string') {
-        const loc = this.locate(parentMenuQuery);
-        if (loc.status === 'AMBIGUOUS') {
-          return { status: 'AMBIGUOUS', verified: false, candidates: loc.candidates, prompt: loc.prompt };
+      this.capabilityMap.build(options.root || document);
+
+      let currentContainer = options.root || document;
+      let currentParentNode = null;
+
+      for (let stepIndex = 0; stepIndex < path.length; stepIndex++) {
+        const stepQuery = path[stepIndex];
+        const isLeaf = stepIndex === path.length - 1;
+
+        const candidates = this.findMenuCandidates(stepQuery, currentParentNode, currentContainer, options);
+
+        if (candidates.length === 0) {
+          return {
+            status: 'FAILED',
+            verified: false,
+            reason: stepIndex === 0 ? 'parent_menu_not_found' : 'child_not_found_under_parent',
+            failedStep: stepQuery,
+            parent: currentParentNode ? currentParentNode.rawName : null,
+            path: path.slice(0, stepIndex + 1)
+          };
         }
-        if (loc.status !== 'FOUND' || !loc.target) {
-          return { status: 'FAILED', verified: false, reason: 'parent_menu_not_found' };
+
+        const topScore = candidates[0].score;
+        const competing = candidates.filter(c => (topScore - c.score) <= 10);
+        if (competing.length >= this.options.ambiguityThreshold) {
+          return {
+            status: 'AMBIGUOUS',
+            verified: false,
+            candidates: competing.map(c => ({
+              name: c.node ? c.node.rawName : this.capabilityMap.getNodeName(c.element),
+              role: c.node ? c.node.role : c.element.tagName.toLowerCase(),
+              element: c.element
+            })),
+            prompt: `I found ${competing.length} matching menus (${competing.map(c => c.node ? c.node.rawName : this.capabilityMap.getNodeName(c.element)).join(', ')}). Which one would you like to open?`
+          };
         }
-        parentEl = loc.target;
-      } else {
-        parentEl = parentMenuQuery;
+
+        const matched = candidates[0];
+        const targetEl = matched.element;
+        const targetNode = matched.node;
+
+        if (isConsequentialElement(targetEl) && options.userConfirmed !== true) {
+          return {
+            status: 'CONFIRMATION_REQUIRED',
+            verified: false,
+            consequential: true,
+            reason: 'consequential_action_requires_explicit_user_confirmation'
+          };
+        }
+
+        if (isLeaf) {
+          const clickRes = await this.click(targetEl, Object.assign({ isNavigation: true }, options));
+          return {
+            status: clickRes.status || (clickRes.ok ? 'SUCCESS' : 'FAILED'),
+            verified: Boolean(clickRes.verified || clickRes.ok),
+            action: 'open_menu_path',
+            path,
+            target: targetEl,
+            selectedItem: stepQuery,
+            details: clickRes.details || clickRes.reason
+          };
+        }
+
+        let isAlreadyExpanded = targetNode ? targetNode.isExpanded : false;
+        let submenuEl = (targetNode && targetNode.submenuElement) ||
+                        this.capabilityMap.findSubmenuContainer(targetEl, targetEl.parentElement) ||
+                        this.visual.findVisualSubmenu(targetEl);
+
+        if (submenuEl && submenuEl.isConnected) {
+          try {
+            const style = window.getComputedStyle(submenuEl);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && submenuEl.offsetWidth > 0) {
+              isAlreadyExpanded = true;
+            }
+          } catch (_e) {}
+        }
+
+        if (!isAlreadyExpanded) {
+          const method = (targetNode && targetNode.interactionMethod) ||
+                         this.capabilityMap.detectInteractionMethod(targetEl, targetEl.parentElement, submenuEl);
+          const controlToActivate = (targetNode && targetNode.expansionControl) || targetEl;
+
+          if (method === 'split') {
+            const expRes = await this.executor.click(controlToActivate);
+            if (!expRes.ok) console.warn('[Sleepwalker] Split expansion click failed:', expRes.reason, controlToActivate);
+          } else if (method === 'hover') {
+            await this.executor.hover(controlToActivate);
+          } else if (method === 'keyboard') {
+            await this.executor.keyboardActivate(controlToActivate, 'Enter');
+            await new Promise(r => setTimeout(r, 60));
+            await this.executor.keyboardActivate(controlToActivate, 'ArrowDown');
+          } else {
+            await this.executor.click(controlToActivate);
+          }
+
+          const settleLimit = options.settleTimeoutMs || 600;
+          const t0 = performance.now();
+          let opened = false;
+
+          while ((performance.now() - t0) < settleLimit) {
+            await new Promise(r => setTimeout(r, 40));
+
+            if (!submenuEl || !submenuEl.isConnected) {
+              submenuEl = this.capabilityMap.findSubmenuContainer(controlToActivate, controlToActivate.parentElement) ||
+                          this.visual.findVisualSubmenu(controlToActivate);
+            }
+
+            if (submenuEl && submenuEl.isConnected) {
+              try {
+                const style = window.getComputedStyle(submenuEl);
+                if (style.display !== 'none' && style.visibility !== 'hidden' && submenuEl.offsetWidth > 0) {
+                  opened = true;
+                  break;
+                }
+              } catch (_e) {}
+            }
+
+            if (controlToActivate.getAttribute('aria-expanded') === 'true') {
+              opened = true;
+              break;
+            }
+          }
+
+          if (!opened) {
+            if (method === 'hover') {
+              await this.executor.click(controlToActivate);
+            } else if (method === 'click' && controlToActivate.tagName !== 'A') {
+              await this.executor.hover(controlToActivate);
+              await new Promise(r => setTimeout(r, 40));
+              await this.executor.keyboardActivate(controlToActivate, 'Enter');
+              await this.executor.keyboardActivate(controlToActivate, 'ArrowDown');
+            } else if (method === 'keyboard') {
+              await this.executor.click(controlToActivate);
+            }
+            await new Promise(r => setTimeout(r, 80));
+          }
+        }
+
+        this.invalidateCache();
+        this.capabilityMap.build(options.root || document);
+
+        const freshParentNode = this.capabilityMap.nodes.find(n => n.element === targetEl || n.container === targetEl.parentElement);
+        submenuEl = (freshParentNode && freshParentNode.submenuElement) ||
+                    this.capabilityMap.findSubmenuContainer(targetEl, targetEl.parentElement) ||
+                    this.visual.findVisualSubmenu(targetEl);
+
+        currentContainer = submenuEl || (freshParentNode && freshParentNode.container) || targetEl.parentElement;
+        currentParentNode = freshParentNode || {
+          name: stepQuery.toLowerCase().trim(),
+          rawName: stepQuery,
+          element: targetEl,
+          submenuElement: currentContainer
+        };
+        if (submenuEl) {
+          currentParentNode.submenuElement = submenuEl;
+        }
       }
 
-      if (isConsequentialElement(parentEl) && options.userConfirmed !== true) {
-        return { status: 'CONFIRMATION_REQUIRED', verified: false, consequential: true, reason: 'consequential_action_requires_explicit_user_confirmation' };
+      return { status: 'FAILED', verified: false, reason: 'unknown_failure' };
+    }
+
+    async openMenuAndSelect(parentMenuQuery, subItemText, options = {}) {
+      if (typeof parentMenuQuery === 'string' && typeof subItemText === 'string') {
+        const res = await this.openMenuPath([parentMenuQuery, subItemText], options);
+        return Object.assign({ parentMenu: parentMenuQuery, selectedItem: subItemText }, res);
       }
-
-      // 3. Validate -> 4. Execute -> 5. Re-observe & Verify
-      const baseline = this.verifier.captureBaseline(parentEl);
-      const res = await this.executor.openMenuAndSelect(parentEl, subItemText);
-      this.invalidateCache();
-      baseline.stopObserver();
-      this.observe(options.root || document, { force: true });
-
-      return {
-        status: res.ok ? 'SUCCESS' : 'FAILED',
-        verified: Boolean(res.ok),
-        action: 'open_menu_and_select',
-        parentMenu: typeof parentMenuQuery === 'string' ? parentMenuQuery : '',
-        selectedItem: subItemText,
-        reason: res.reason
-      };
+      if (parentMenuQuery && parentMenuQuery.nodeType === 1 && typeof subItemText === 'string') {
+        const pName = this.capabilityMap.getNodeName(parentMenuQuery);
+        const res = await this.openMenuPath([pName || 'parent', subItemText], Object.assign({ directParentElement: parentMenuQuery }, options));
+        return Object.assign({ parentMenu: pName || 'parent', selectedItem: subItemText }, res);
+      }
+      const res = await this.openMenuPath([String(parentMenuQuery || ''), String(subItemText || '')], options);
+      return Object.assign({ parentMenu: String(parentMenuQuery || ''), selectedItem: String(subItemText || '') }, res);
     }
 
     async switchTab(tabQuery, options = {}) {
@@ -1767,6 +2522,7 @@
   global.PlaywrightExecutor = PlaywrightExecutor;
   global.StateVerifier = StateVerifier;
   global.VisualFallback = VisualFallback;
+  global.PageCapabilityMap = PageCapabilityMap;
   global.BrowserEngine = BrowserEngine;
 
   if (typeof module !== 'undefined' && module.exports) {
@@ -1775,6 +2531,7 @@
       PlaywrightExecutor,
       StateVerifier,
       VisualFallback,
+      PageCapabilityMap,
       BrowserEngine
     };
   }
