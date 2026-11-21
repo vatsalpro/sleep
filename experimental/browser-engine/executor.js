@@ -51,7 +51,12 @@
 
       // 3. Stable (Coordinates check across frame)
       const r1 = el.getBoundingClientRect();
-      await new Promise(r => requestAnimationFrame(r));
+      await new Promise(r => {
+        const timer = setTimeout(r, 20);
+        if (typeof requestAnimationFrame === 'function') {
+          try { requestAnimationFrame(() => { clearTimeout(timer); r(); }); } catch (_e) { clearTimeout(timer); r(); }
+        }
+      });
       const r2 = el.getBoundingClientRect();
       if (Math.abs(r1.x - r2.x) > 2 || Math.abs(r1.y - r2.y) > 2) {
         // Element is actively animating/moving; give a short settlement grace
@@ -141,6 +146,9 @@
       el.dispatchEvent(new PointerEvent('pointerup', eventInit));
       el.dispatchEvent(new MouseEvent('mouseup', eventInit));
       el.dispatchEvent(new MouseEvent('click', eventInit));
+      if (typeof el.click === 'function') {
+        try { el.click(); } catch (_e) {}
+      }
     }
 
     /**

@@ -1770,7 +1770,7 @@
       if (!entity) {
         return { ok: false, reason: `Candidate "${candidateId}" does not exist in tab ${tabId}.` };
       }
-      if (String(entity.tabId) !== tabId) {
+      if (entity.tabId && String(entity.tabId) !== 'default' && String(entity.tabId) !== tabId) {
         return { ok: false, reason: `Rejected cross-tab candidate "${candidateId}".` };
       }
       if (entity.element && entity.element.isConnected === false) {
@@ -1864,6 +1864,11 @@
         const defInv = this.tabInventories.get('default');
         if (defInv && defInv.document === this._getDoc()) {
           defInv.tabId = key;
+          if (defInv.entities && typeof defInv.entities.values === 'function') {
+            for (const ent of defInv.entities.values()) {
+              if (ent && (ent.tabId === 'default' || !ent.tabId)) ent.tabId = key;
+            }
+          }
           this.tabInventories.set(key, defInv);
           this.tabInventories.delete('default');
           return defInv;

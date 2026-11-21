@@ -330,7 +330,12 @@
       }
 
       const r1 = el.getBoundingClientRect();
-      await new Promise(r => requestAnimationFrame(r));
+      await new Promise(r => {
+        const timer = setTimeout(r, 20);
+        if (typeof requestAnimationFrame === 'function') {
+          try { requestAnimationFrame(() => { clearTimeout(timer); r(); }); } catch (_e) { clearTimeout(timer); r(); }
+        }
+      });
       const r2 = el.getBoundingClientRect();
       if (Math.abs(r1.x - r2.x) > 2 || Math.abs(r1.y - r2.y) > 2) {
         await new Promise(r => setTimeout(r, 120));
@@ -407,6 +412,9 @@
       el.dispatchEvent(new PointerEvent('pointerup', eventInit));
       el.dispatchEvent(new MouseEvent('mouseup', eventInit));
       el.dispatchEvent(new MouseEvent('click', eventInit));
+      if (typeof el.click === 'function') {
+        try { el.click(); } catch (_e) {}
+      }
     }
 
     async click(el) {
@@ -1028,12 +1036,17 @@
     readContent(targetOrQuery) {
       let el = null;
       if (typeof targetOrQuery === 'string') {
-        const root = document.querySelector(targetOrQuery) ||
-                     Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
-                       return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
-                              (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
-                     });
-        el = root;
+        let matches = [];
+        try { matches = Array.from(document.querySelectorAll(targetOrQuery)); } catch (_e) {}
+        const withText = matches.find(m => (m.textContent || '').trim().length > 0);
+        if (withText) {
+          el = withText;
+        } else {
+          el = matches[0] || Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
+            return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
+                   (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
+          });
+        }
       } else {
         el = targetOrQuery;
       }

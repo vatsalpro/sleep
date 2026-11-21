@@ -282,12 +282,17 @@
     readContent(targetOrQuery) {
       let el = null;
       if (typeof targetOrQuery === 'string') {
-        const root = document.querySelector(targetOrQuery) ||
-                     Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
-                       return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
-                              (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
-                     });
-        el = root;
+        let matches = [];
+        try { matches = Array.from(document.querySelectorAll(targetOrQuery)); } catch (_e) {}
+        const withText = matches.find(m => (m.textContent || '').trim().length > 0);
+        if (withText) {
+          el = withText;
+        } else {
+          el = matches[0] || Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
+            return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
+                   (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
+          });
+        }
       } else {
         el = targetOrQuery;
       }

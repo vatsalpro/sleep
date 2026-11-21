@@ -85,6 +85,7 @@
       this.linkIntent = window.SleepwalkerLinkIntent ? new window.SleepwalkerLinkIntent() : null;
       this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
       this.browserEngine = window.BrowserEngine ? new window.BrowserEngine() : null;
+      this.useRebuiltBrowserEngine = true; // Feature flag for Phase 7 rebuilt engine integration
       this.forms = window.SleepwalkerForms ? new window.SleepwalkerForms(this) : null;
       this.elementSelector = window.SleepwalkerElementSelector ? new window.SleepwalkerElementSelector(this) : null;
       this.worldModel = window.SleepwalkerWorldModel
@@ -3692,14 +3693,15 @@
       // Plan normalization: compact model may label a scoped link pick ("Select Bank card under Cards",
       // "Open Results under Examinations.") as select_option or navigate_section.
       // When no form control or exact section heading matches <X> but a real page link does, route through open_link.
-      const scopedLinkCmdM = String(raw || '').trim().match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click|select|choose)\s+(?:the\s+)?(.+?)\s+(?:under|in|inside|from)\s+(?:the\s+)?(.+?)\.?$/i);
+      const cleanScopedRaw = String(raw || '').trim().replace(/[.,!?;:]+$/, '');
+      const scopedLinkCmdM = cleanScopedRaw.match(/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:open|click|select|choose)\s+(?:the\s+)?(.+?)\s+(?:under|in|inside|from)\s+(?:the\s+)?(.+?)$/i);
       const isNavSecMislabel = (plan.intent === 'navigate_section' || act.type === 'find_section') &&
         Boolean(scopedLinkCmdM) &&
         !/\b(?:section|subsection|heading|scroll|jump)\b/i.test(String(raw || ''));
       if ((plan.intent === 'select_option' || act.type === 'select_option' || isNavSecMislabel) && this.worldModel && wmInv &&
           !/\b(?:option|radio|checkbox|toggle|switch|dropdown|setting)\b/i.test(String(raw || ''))) {
-        const wantLabel = String((scopedLinkCmdM && scopedLinkCmdM[1]) || act.target || plan.target || '').trim().toLowerCase();
-        const wantSec = String((scopedLinkCmdM && scopedLinkCmdM[2]) || plan.parent_section || (plan.context && plan.context.section) || act.section || '').trim().toLowerCase();
+        const wantLabel = String((scopedLinkCmdM && scopedLinkCmdM[1]) || act.target || plan.target || '').replace(/[.,!?;:]+$/, '').trim().toLowerCase();
+        const wantSec = String((scopedLinkCmdM && scopedLinkCmdM[2]) || plan.parent_section || (plan.context && plan.context.section) || act.section || '').replace(/[.,!?;:]+$/, '').trim().toLowerCase();
         const isActualHeading = Boolean(
           isNavSecMislabel &&
           Array.isArray(wmInv.sections) &&
@@ -4070,6 +4072,22 @@
           ? ((candById && (candById.parentSection || candById.section)) || (resolvedContext && resolvedContext.resolvedSection) || explicitSec || ctx.section || act.section || '')
           : '';
         const linkPref = ctx.link_preference || act.value || 'any';
+
+        // Narrow interface for rebuilt browser engine with fallback to existing navigator
+        if (this.browserEngine && this.useRebuiltBrowserEngine) {
+          try {
+            this.browserEngine.observe(document);
+            const beLoc = this.browserEngine.locate(targetLabel, { section: sectionScope });
+            if (beLoc.status === 'FOUND' && beLoc.target) {
+              const beRes = await this.browserEngine.click(beLoc.target, { isNavigation: true });
+              if (beRes.status === 'SUCCESS' || beRes.verified) {
+                return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: targetLabel, details: beRes.details };
+              }
+            }
+          } catch (beErr) {
+            console.warn('[Sleepwalker] Rebuilt browser engine error, falling back to navigator:', beErr);
+          }
+        }
 
         if (this.navigator && typeof this.navigator.executeLinkWithRecovery === 'function') {
           const urlBefore = window.location.href;
