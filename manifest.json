@@ -75,6 +75,7 @@
         "card.js",
         "orb.js",
         "teach.js",
+        "browser-engine.js",
         "content.js"
       ],
       "run_at": "document_idle"

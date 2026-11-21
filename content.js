@@ -84,6 +84,7 @@
       this.intentEngine = window.SleepwalkerIntentEngine ? new window.SleepwalkerIntentEngine() : null;
       this.linkIntent = window.SleepwalkerLinkIntent ? new window.SleepwalkerLinkIntent() : null;
       this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
+      this.browserEngine = window.BrowserEngine ? new window.BrowserEngine() : null;
       this.forms = window.SleepwalkerForms ? new window.SleepwalkerForms(this) : null;
       this.elementSelector = window.SleepwalkerElementSelector ? new window.SleepwalkerElementSelector(this) : null;
       this.worldModel = window.SleepwalkerWorldModel

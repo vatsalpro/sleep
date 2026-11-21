@@ -1,0 +1,1124 @@
+/**
+ * Sleepwalker 2.0 — Unified Rebuilt Browser Engine
+ * 
+ * Fuses Stagehand-inspired semantic observation with Playwright-inspired actionability and execution.
+ * Fully compatible with Chrome Manifest V3 Content Scripts and isolated worlds.
+ * 
+ * Modules:
+ * 1. StagehandObserver (W3C AccName, Roles, Landmark hierarchy, Shadow DOM)
+ * 2. PlaywrightExecutor (5-point actionability gates, collision-free scroll, full gesture sequence)
+ * 3. StateVerifier (Pre/post baseline diffs, predicate settlement, unambiguous outcome classification)
+ * 4. VisualFallback (Geometry and coordinate hit-test validation)
+ * 5. BrowserEngine (Unified facade)
+ */
+(function (global) {
+  'use strict';
+
+  // ===========================================================================
+  // 1. StagehandObserver
+  // ===========================================================================
+  class StagehandObserver {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        maxElements: 80,
+        includeInvisible: false,
+        skipHiddenInputs: true
+      }, options);
+    }
+
+    computeAccessibleName(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const parts = labelledBy.split(/\s+/).map(id => {
+          const ref = document.getElementById(id);
+          return ref ? (ref.textContent || '').trim() : '';
+        }).filter(Boolean);
+        if (parts.length > 0) return parts.join(' ');
+      }
+
+      const ariaLabel = el.getAttribute('aria-label');
+      if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+      if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+        if (el.id) {
+          const rootNode = el.getRootNode ? el.getRootNode() : document;
+          const lbl = rootNode.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (lbl) {
+            const lblText = this._getCleanText(lbl);
+            if (lblText) return lblText;
+          }
+        }
+        const wrappingLabel = el.closest('label');
+        if (wrappingLabel) {
+          const clone = wrappingLabel.cloneNode(true);
+          const childInputs = clone.querySelectorAll('input, select, textarea');
+          childInputs.forEach(i => i.remove());
+          const txt = (clone.textContent || '').trim();
+          if (txt) return txt;
+        }
+        if (el.placeholder && el.placeholder.trim()) return el.placeholder.trim();
+        if (el.title && el.title.trim()) return el.title.trim();
+        if (el.name && el.name.trim()) return el.name.trim();
+      }
+
+      if (el instanceof HTMLImageElement) {
+        if (el.alt && el.alt.trim()) return el.alt.trim();
+        if (el.title && el.title.trim()) return el.title.trim();
+      }
+
+      if (el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button' || el.getAttribute('role') === 'tab') {
+        const cleanText = this._getCleanText(el);
+        if (cleanText) return cleanText;
+        if (el.title && el.title.trim()) return el.title.trim();
+      }
+
+      const directText = this._getCleanText(el);
+      if (directText) return directText;
+
+      return el.getAttribute('title') || el.getAttribute('name') || '';
+    }
+
+    computeRole(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+
+      const explicit = el.getAttribute('role');
+      if (explicit && explicit.trim()) return explicit.trim().toLowerCase();
+
+      const tag = el.tagName.toUpperCase();
+      switch (tag) {
+        case 'A': return el.hasAttribute('href') ? 'link' : 'generic';
+        case 'BUTTON': return 'button';
+        case 'INPUT': {
+          const type = (el.getAttribute('type') || 'text').toLowerCase();
+          if (type === 'button' || type === 'submit' || type === 'reset') return 'button';
+          if (type === 'checkbox') return 'checkbox';
+          if (type === 'radio') return 'radio';
+          if (type === 'search') return 'searchbox';
+          return 'textbox';
+        }
+        case 'SELECT': return 'combobox';
+        case 'TEXTAREA': return 'textbox';
+        case 'NAV': return 'navigation';
+        case 'MAIN': return 'main';
+        case 'HEADER': return 'banner';
+        case 'FOOTER': return 'contentinfo';
+        case 'SECTION': return el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby') ? 'region' : 'section';
+        case 'H1':
+        case 'H2':
+        case 'H3':
+        case 'H4':
+        case 'H5':
+        case 'H6': return 'heading';
+        case 'UL':
+        case 'OL': return 'list';
+        case 'LI': return 'listitem';
+        case 'TABLE': return 'table';
+        default: return 'generic';
+      }
+    }
+
+    isActionable(el, role) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+
+      if (el.closest && (el.closest('#sleepwalker-ui-host') || el.closest('#sleepwalker-host') || el.closest('[data-sleepwalker-ui="1"]'))) {
+        return false;
+      }
+
+      const actionableRoles = new Set([
+        'button', 'link', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+        'combobox', 'textbox', 'searchbox', 'checkbox', 'radio', 'switch',
+        'slider', 'option'
+      ]);
+
+      if (actionableRoles.has(role)) return true;
+
+      const tag = el.tagName.toUpperCase();
+      if (tag === 'BUTTON' || tag === 'A' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
+      if (tag === 'INPUT' && (el.type || '').toLowerCase() !== 'hidden') return true;
+
+      if (el.hasAttribute('onclick') || el.hasAttribute('tabindex') || el.getAttribute('contenteditable') === 'true') {
+        return true;
+      }
+
+      try {
+        const style = window.getComputedStyle(el);
+        if (style && style.cursor === 'pointer' && !['BODY', 'HTML'].includes(tag)) {
+          return true;
+        }
+      } catch (_e) {}
+
+      return false;
+    }
+
+    computeParentSection(el) {
+      if (!el) return '';
+      let cur = el.parentElement;
+      while (cur && cur !== document.body && cur !== document.documentElement) {
+        if (cur.getAttribute('aria-label')) return cur.getAttribute('aria-label').trim();
+        const labelledBy = cur.getAttribute('aria-labelledby');
+        if (labelledBy) {
+          const ref = document.getElementById(labelledBy);
+          if (ref) return (ref.textContent || '').trim();
+        }
+
+        const heading = cur.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
+        if (heading && heading !== el && !heading.contains(el)) {
+          const hText = this._getCleanText(heading);
+          if (hText) return hText;
+        }
+
+        const role = cur.getAttribute('role');
+        if (role && ['navigation', 'main', 'region', 'form', 'banner', 'complementary'].includes(role)) {
+          return cur.getAttribute('aria-label') || cur.id || role;
+        }
+        if (['NAV', 'MAIN', 'SECTION', 'ARTICLE', 'ASIDE', 'FORM', 'HEADER'].includes(cur.tagName)) {
+          if (cur.id) return cur.id;
+        }
+
+        cur = cur.parentElement;
+      }
+      return '';
+    }
+
+    isVisible(el) {
+      if (!el || !el.isConnected) return false;
+      if (el.offsetWidth === 0 && el.offsetHeight === 0 && el.getClientRects().length === 0) return false;
+      try {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+          return false;
+        }
+      } catch (_e) {
+        return false;
+      }
+      return true;
+    }
+
+    traverseTree(root, callback) {
+      if (!root) return;
+      const stack = [root];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          callback(node);
+          if (node.shadowRoot) {
+            stack.push(node.shadowRoot);
+          }
+        }
+        if (node.children) {
+          for (let i = node.children.length - 1; i >= 0; i--) {
+            stack.push(node.children[i]);
+          }
+        }
+      }
+    }
+
+    observe(root = document) {
+      const actionable = [];
+      let seq = 0;
+
+      this.traverseTree(root === document ? document.body : root, (node) => {
+        const role = this.computeRole(node);
+        if (!this.isActionable(node, role)) return;
+
+        const visible = this.isVisible(node);
+        if (!visible && !this.options.includeInvisible) return;
+
+        const name = this.computeAccessibleName(node);
+        const rect = node.getBoundingClientRect();
+        const parentSec = this.computeParentSection(node);
+
+        const states = {
+          visible,
+          disabled: Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true'),
+          expanded: node.hasAttribute('aria-expanded') ? node.getAttribute('aria-expanded') === 'true' : undefined,
+          selected: node.hasAttribute('aria-selected') ? node.getAttribute('aria-selected') === 'true' : undefined,
+          checked: node.hasAttribute('aria-checked')
+            ? node.getAttribute('aria-checked') === 'true'
+            : (node instanceof HTMLInputElement && ['checkbox', 'radio'].includes(node.type) ? node.checked : undefined),
+          value: (node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement)
+            ? (node.type === 'password' ? '[REDACTED]' : node.value)
+            : undefined
+        };
+
+        const item = {
+          id: `e-${++seq}`,
+          role,
+          name,
+          tag: node.tagName,
+          parentSection: parentSec,
+          states,
+          boundingBox: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          },
+          domNode: node
+        };
+
+        actionable.push(item);
+      });
+
+      const tokens = actionable.slice(0, this.options.maxElements).map((a, idx) => {
+        const prefix = a.role === 'button' ? 'B'
+          : a.role === 'link' ? 'L'
+          : (a.role === 'textbox' || a.role === 'searchbox') ? 'I'
+          : a.role === 'combobox' ? 'C'
+          : a.role === 'tab' ? 'T' : 'E';
+        const num = String(idx + 1).padStart(2, '0');
+        const secPart = a.parentSection ? ` (section: ${a.parentSection})` : '';
+        const statePart = a.states.selected ? ' [selected=true]'
+          : a.states.expanded ? ' [expanded=true]'
+          : a.states.checked ? ' [checked=true]' : '';
+        return `[${prefix}${num}] ${a.role} "${a.name}"${statePart}${secPart}`;
+      });
+
+      return {
+        timestamp: Date.now(),
+        url: window.location.href,
+        title: document.title,
+        elements: actionable,
+        elementCount: actionable.length,
+        compactTokens: tokens,
+        compactPrompt: tokens.join('\n')
+      };
+    }
+
+    _getCleanText(el) {
+      if (!el) return '';
+      const clone = el.cloneNode(true);
+      const toRemove = clone.querySelectorAll('script, style, noscript, [aria-hidden="true"], #sleepwalker-ui-host');
+      toRemove.forEach(r => r.remove());
+      return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  // ===========================================================================
+  // 2. PlaywrightExecutor
+  // ===========================================================================
+  class PlaywrightExecutor {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        actionTimeoutMs: 5000,
+        settleDelayMs: 60,
+        scrollOffsetTop: 70,
+        scrollOffsetBottom: 40
+      }, options);
+    }
+
+    async validateActionability(el) {
+      if (!el) return { ok: false, reason: 'element_null' };
+
+      if (!el.isConnected) {
+        return { ok: false, reason: 'element_not_attached' };
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return { ok: false, reason: 'element_zero_dimensions' };
+      }
+      try {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+          return { ok: false, reason: 'element_css_hidden' };
+        }
+      } catch (_e) {
+        return { ok: false, reason: 'style_computation_error' };
+      }
+
+      const r1 = el.getBoundingClientRect();
+      await new Promise(r => requestAnimationFrame(r));
+      const r2 = el.getBoundingClientRect();
+      if (Math.abs(r1.x - r2.x) > 2 || Math.abs(r1.y - r2.y) > 2) {
+        await new Promise(r => setTimeout(r, 120));
+      }
+
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') {
+        return { ok: false, reason: 'element_disabled' };
+      }
+
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      if (centerX >= 0 && centerY >= 0 && centerX <= window.innerWidth && centerY <= window.innerHeight) {
+        const hit = document.elementFromPoint(centerX, centerY);
+        if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
+          const hitStyle = window.getComputedStyle(hit);
+          if (hitStyle.pointerEvents !== 'none' && !hit.id?.includes('sleepwalker')) {
+            return { ok: false, reason: 'hit_test_obstructed_by_' + hit.tagName.toLowerCase() };
+          }
+        }
+      }
+
+      return { ok: true };
+    }
+
+    async scrollIntoViewIfNeeded(el) {
+      if (!el || !el.isConnected) return;
+      const rect = el.getBoundingClientRect();
+      const inView = rect.top >= this.options.scrollOffsetTop &&
+                     rect.bottom <= (window.innerHeight - this.options.scrollOffsetBottom) &&
+                     rect.left >= 0 && rect.right <= window.innerWidth;
+      if (inView) return;
+
+      let topClearance = this.options.scrollOffsetTop;
+      const fixedHeaders = document.querySelectorAll('header, nav, [style*="position: fixed"], [style*="position: sticky"]');
+      fixedHeaders.forEach(h => {
+        const hr = h.getBoundingClientRect();
+        if (hr.top <= 10 && hr.bottom > topClearance && hr.bottom < 200) {
+          topClearance = hr.bottom + 10;
+        }
+      });
+
+      const targetY = window.scrollY + rect.top - topClearance - 20;
+      window.scrollTo({
+        top: Math.max(0, targetY),
+        behavior: 'instant'
+      });
+      await new Promise(r => setTimeout(r, this.options.settleDelayMs));
+    }
+
+    dispatchGestureTrain(el) {
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+        button: 0,
+        buttons: 1
+      };
+
+      el.dispatchEvent(new PointerEvent('pointerover', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseover', eventInit));
+      el.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+      el.dispatchEvent(new MouseEvent('mousedown', eventInit));
+
+      if (typeof el.focus === 'function') {
+        try { el.focus({ preventScroll: true }); } catch (_e) {}
+      }
+
+      el.dispatchEvent(new PointerEvent('pointerup', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseup', eventInit));
+      el.dispatchEvent(new MouseEvent('click', eventInit));
+    }
+
+    async click(el) {
+      await this.scrollIntoViewIfNeeded(el);
+      const gate = await this.validateActionability(el);
+      if (!gate.ok) {
+        return { ok: false, reason: gate.reason };
+      }
+
+      this.dispatchGestureTrain(el);
+      await new Promise(r => setTimeout(r, this.options.settleDelayMs));
+      return { ok: true };
+    }
+
+    async type(el, text, opts = {}) {
+      if (!el || !el.isConnected) return { ok: false, reason: 'element_null' };
+
+      if (el instanceof HTMLInputElement && el.type === 'password' && !opts.allowPassword) {
+        return { ok: false, reason: 'password_privacy_gate' };
+      }
+
+      await this.scrollIntoViewIfNeeded(el);
+      const gate = await this.validateActionability(el);
+      if (!gate.ok) return { ok: false, reason: gate.reason };
+
+      if (typeof el.focus === 'function') el.focus();
+      el.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+
+      if (opts.clear !== false) {
+        el.value = '';
+      }
+
+      const beforeEvent = new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        data: text,
+        inputType: 'insertText'
+      });
+      el.dispatchEvent(beforeEvent);
+
+      el.value = (opts.clear !== false) ? text : (el.value + text);
+
+      const inputEvent = new InputEvent('input', {
+        bubbles: true,
+        cancelable: false,
+        data: text,
+        inputType: 'insertText'
+      });
+      el.dispatchEvent(inputEvent);
+
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+
+      if (opts.submit) {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        const form = el.closest('form');
+        if (form && typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+        }
+      }
+
+      await new Promise(r => setTimeout(r, this.options.settleDelayMs));
+      return { ok: true, value: el.value };
+    }
+
+    async selectOption(el, valueOrLabel) {
+      if (!el || !el.isConnected) return { ok: false, reason: 'element_null' };
+      await this.scrollIntoViewIfNeeded(el);
+
+      const normTarget = String(valueOrLabel || '').toLowerCase().trim();
+
+      if (el instanceof HTMLSelectElement) {
+        let matchedIndex = -1;
+        for (let i = 0; i < el.options.length; i++) {
+          const opt = el.options[i];
+          if (opt.value.toLowerCase() === normTarget || (opt.text || '').toLowerCase().includes(normTarget)) {
+            matchedIndex = i;
+            break;
+          }
+        }
+        if (matchedIndex === -1) return { ok: false, reason: 'option_not_found' };
+
+        el.selectedIndex = matchedIndex;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, selectedValue: el.value, selectedText: el.options[matchedIndex].text };
+      }
+
+      const isCombobox = el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-haspopup');
+      if (isCombobox) {
+        await this.click(el);
+        await new Promise(r => setTimeout(r, 120));
+
+        const root = el.getRootNode ? el.getRootNode() : document;
+        const candidates = Array.from(root.querySelectorAll('[role="option"], [role="menuitem"], .dropdown-item, li, button'));
+        const matched = candidates.find(c => (c.textContent || '').toLowerCase().includes(normTarget));
+        if (matched) {
+          await this.click(matched);
+          return { ok: true, selectedText: (matched.textContent || '').trim() };
+        }
+        return { ok: false, reason: 'custom_option_not_found' };
+      }
+
+      return { ok: false, reason: 'unsupported_select_element' };
+    }
+
+    async openMenuAndSelect(parentTrigger, findChildItem) {
+      if (!parentTrigger || !parentTrigger.isConnected) return { ok: false, reason: 'parent_null' };
+
+      await this.click(parentTrigger);
+      await new Promise(r => setTimeout(r, 150));
+
+      let childEl = null;
+      if (typeof findChildItem === 'function') {
+        childEl = findChildItem();
+      } else if (typeof findChildItem === 'string') {
+        const root = parentTrigger.getRootNode ? parentTrigger.getRootNode() : document;
+        const allItems = Array.from(root.querySelectorAll('a, button, [role="menuitem"], [role="treeitem"], li'));
+        const normChild = findChildItem.toLowerCase().trim();
+        childEl = allItems.find(it => {
+          const style = window.getComputedStyle(it);
+          const isVis = style.display !== 'none' && style.visibility !== 'hidden' && it.offsetWidth > 0;
+          return isVis && (it.textContent || '').toLowerCase().includes(normChild);
+        });
+      }
+
+      if (!childEl) {
+        return { ok: false, reason: 'nested_child_not_found' };
+      }
+
+      const childClick = await this.click(childEl);
+      return childClick;
+    }
+  }
+
+  // ===========================================================================
+  // 3. StateVerifier
+  // ===========================================================================
+  class StateVerifier {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        defaultTimeoutMs: 2500,
+        pollIntervalMs: 60
+      }, options);
+    }
+
+    captureBaseline(targetEl = null) {
+      const baseline = {
+        timestamp: Date.now(),
+        url: window.location.href,
+        title: document.title,
+        activeElement: document.activeElement ? {
+          tag: document.activeElement.tagName,
+          id: document.activeElement.id
+        } : null,
+        scrollY: window.scrollY,
+        targetState: targetEl && targetEl.isConnected ? {
+          value: targetEl.value,
+          checked: targetEl.checked,
+          expanded: targetEl.getAttribute('aria-expanded'),
+          selected: targetEl.getAttribute('aria-selected')
+        } : null,
+        mutationCount: 0
+      };
+
+      let observer = null;
+      try {
+        observer = new MutationObserver(() => {
+          baseline.mutationCount++;
+        });
+        observer.observe(document.body || document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true
+        });
+      } catch (_e) {}
+
+      return {
+        baseline,
+        stopObserver: () => {
+          if (observer) {
+            try { observer.disconnect(); } catch (_e) {}
+            observer = null;
+          }
+        }
+      };
+    }
+
+    async waitForPredicate(predicate, timeoutMs = null) {
+      const timeout = timeoutMs || this.options.defaultTimeoutMs;
+      const deadline = Date.now() + timeout;
+
+      while (Date.now() < deadline) {
+        try {
+          const res = await predicate();
+          if (res) return true;
+        } catch (_e) {}
+        await new Promise(r => setTimeout(r, this.options.pollIntervalMs));
+      }
+      return false;
+    }
+
+    async verifyNavigation(baselineHandle, targetEl, opts = {}) {
+      const { baseline, stopObserver } = baselineHandle;
+      const t0 = Date.now();
+
+      const success = await this.waitForPredicate(() => {
+        if (window.location.href !== baseline.url) return true;
+        if (document.title !== baseline.title && document.title.length > 0) return true;
+        if (opts.expectedPath && window.location.pathname.includes(opts.expectedPath)) return true;
+        if (opts.expectedHeading) {
+          const h = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'))
+            .find(n => (n.textContent || '').toLowerCase().includes(opts.expectedHeading.toLowerCase()));
+          if (h) return true;
+        }
+        return false;
+      }, opts.timeoutMs);
+
+      stopObserver();
+      const durationMs = Date.now() - t0;
+
+      if (success) {
+        return {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'navigation',
+          durationMs,
+          url: window.location.href,
+          title: document.title,
+          details: 'Navigation verified via URL/DOM change.'
+        };
+      }
+
+      return {
+        status: 'FAILED',
+        verified: false,
+        action: 'navigation',
+        durationMs,
+        reason: 'no_navigation_detected'
+      };
+    }
+
+    async verifyTabSwitch(baselineHandle, tabEl, opts = {}) {
+      const { stopObserver } = baselineHandle;
+      const t0 = Date.now();
+
+      const success = await this.waitForPredicate(() => {
+        if (!tabEl || !tabEl.isConnected) return false;
+        const ariaSel = tabEl.getAttribute('aria-selected') === 'true';
+        const hasActiveClass = /(active|selected|current)/i.test(tabEl.className || '');
+        if (!ariaSel && !hasActiveClass) return false;
+
+        if (opts.panelSelector) {
+          const panel = document.querySelector(opts.panelSelector);
+          if (panel) {
+            const style = window.getComputedStyle(panel);
+            if (style.display === 'none' || panel.hidden) return false;
+          }
+        }
+        return true;
+      }, opts.timeoutMs);
+
+      stopObserver();
+      const durationMs = Date.now() - t0;
+
+      if (success) {
+        return {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'tab_switch',
+          durationMs,
+          details: 'Tab switch verified: active state confirmed.'
+        };
+      }
+
+      return {
+        status: 'FAILED',
+        verified: false,
+        action: 'tab_switch',
+        durationMs,
+        reason: 'tab_did_not_become_active'
+      };
+    }
+
+    async verifyMenuExpanded(baselineHandle, triggerEl, opts = {}) {
+      const { stopObserver } = baselineHandle;
+      const t0 = Date.now();
+
+      const success = await this.waitForPredicate(() => {
+        if (!triggerEl || !triggerEl.isConnected) return false;
+        if (triggerEl.getAttribute('aria-expanded') === 'true') return true;
+        if (opts.menuSelector) {
+          const menu = document.querySelector(opts.menuSelector);
+          if (menu) {
+            const style = window.getComputedStyle(menu);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && !menu.hidden) return true;
+          }
+        }
+        return false;
+      }, opts.timeoutMs);
+
+      stopObserver();
+      const durationMs = Date.now() - t0;
+
+      if (success) {
+        return {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'menu_expand',
+          durationMs,
+          details: 'Menu expansion verified: submenu container visible.'
+        };
+      }
+
+      return {
+        status: 'FAILED',
+        verified: false,
+        action: 'menu_expand',
+        durationMs,
+        reason: 'menu_failed_to_expand'
+      };
+    }
+
+    async verifyInputFill(baselineHandle, inputEl, expectedValue) {
+      const { stopObserver } = baselineHandle;
+      const t0 = Date.now();
+
+      const success = await this.waitForPredicate(() => {
+        if (!inputEl || !inputEl.isConnected) return false;
+        return String(inputEl.value || '').trim() === String(expectedValue || '').trim();
+      }, 1000);
+
+      stopObserver();
+      const durationMs = Date.now() - t0;
+
+      if (success) {
+        return {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'fill_input',
+          durationMs,
+          value: inputEl.value,
+          details: 'Input fill verified: value accurately committed.'
+        };
+      }
+
+      return {
+        status: 'FAILED',
+        verified: false,
+        action: 'fill_input',
+        durationMs,
+        actualValue: inputEl ? inputEl.value : null,
+        reason: 'input_value_mismatch'
+      };
+    }
+  }
+
+  // ===========================================================================
+  // 4. VisualFallback
+  // ===========================================================================
+  class VisualFallback {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        minConfidence: 0.70
+      }, options);
+    }
+
+    findVisualCandidates(root = document) {
+      const candidates = [];
+      const interactiveTags = ['svg', 'canvas', 'img', 'i', 'span'];
+
+      const elements = root.querySelectorAll(interactiveTags.join(', '));
+      elements.forEach((el) => {
+        const style = window.getComputedStyle(el);
+        const isClickable = style.cursor === 'pointer' || el.closest('button, a, [onclick], [role="button"]');
+        if (!isClickable) return;
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 4 || rect.height <= 4) return;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+
+        candidates.push({
+          element: el,
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+          },
+          tag: el.tagName,
+          isCanvas: el.tagName === 'CANVAS',
+          isSvg: el.tagName === 'SVG' || Boolean(el.closest('svg'))
+        });
+      });
+
+      return candidates;
+    }
+
+    validateCoordinateTarget(x, y) {
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+        return { ok: false, reason: 'coordinates_out_of_viewport' };
+      }
+
+      const hit = document.elementFromPoint(x, y);
+      if (!hit) {
+        return { ok: false, reason: 'no_element_at_point' };
+      }
+
+      return { ok: true, target: hit };
+    }
+  }
+
+  // ===========================================================================
+  // 5. BrowserEngine (Unified Facade)
+  // ===========================================================================
+  class BrowserEngine {
+    constructor(options = {}) {
+      this.options = Object.assign({
+        ambiguityThreshold: 2,
+        minMatchScore: 40
+      }, options);
+
+      this.observer = new StagehandObserver(options.observer);
+      this.executor = new PlaywrightExecutor(options.executor);
+      this.verifier = new StateVerifier(options.verifier);
+      this.visual = new VisualFallback(options.visual);
+    }
+
+    observe(root = document) {
+      return this.observer.observe(root);
+    }
+
+    locate(query, options = {}) {
+      const observation = this.observe(options.root || document);
+      const normQuery = String(query || '').toLowerCase().replace(/[.,!?;:]+$/g, '').trim();
+      const queryTokens = normQuery.split(/\s+/).filter(Boolean);
+
+      if (!normQuery) {
+        return { status: 'NOT_FOUND', reason: 'empty_query' };
+      }
+
+      let pool = observation.elements;
+      if (options.role) {
+        pool = pool.filter(e => e.role === options.role);
+      }
+
+      if (options.section) {
+        const normSec = options.section.toLowerCase();
+        const sectionMatches = pool.filter(e => e.parentSection.toLowerCase().includes(normSec));
+        if (sectionMatches.length > 0) pool = sectionMatches;
+      }
+
+      const scored = [];
+      for (const item of pool) {
+        let score = 0;
+        const normName = item.name.toLowerCase();
+
+        if (normName === normQuery) {
+          score += 100;
+        } else if (normName.includes(normQuery)) {
+          score += 70;
+        } else if (normQuery.includes(normName) && normName.length >= 3) {
+          score += 55;
+        }
+
+        const matchedTokens = queryTokens.filter(t => normName.includes(t));
+        score += (matchedTokens.length / queryTokens.length) * 40;
+
+        if (options.section && item.parentSection.toLowerCase().includes(options.section.toLowerCase())) {
+          score += 25;
+        }
+
+        if (item.states.visible) score += 15;
+
+        if (options.isInput && (item.role === 'textbox' || item.role === 'searchbox')) {
+          score += 30;
+        }
+
+        if (score >= this.options.minMatchScore) {
+          scored.push({ item, score, element: item.domNode });
+        }
+      }
+
+      scored.sort((a, b) => b.score - a.score);
+
+      if (scored.length === 0) {
+        return { status: 'NOT_FOUND', reason: 'no_matching_element' };
+      }
+
+      const topScore = scored[0].score;
+      const competing = scored.filter(s => (topScore - s.score) <= 10);
+
+      if (competing.length >= this.options.ambiguityThreshold) {
+        return {
+          status: 'AMBIGUOUS',
+          query,
+          candidates: competing.map(c => ({
+            id: c.item.id,
+            name: c.item.name,
+            role: c.item.role,
+            section: c.item.parentSection,
+            element: c.element
+          })),
+          prompt: `I found ${competing.length} matching controls (${competing.map(c => c.item.name || c.item.parentSection).join(', ')}). Which one would you like to use?`
+        };
+      }
+
+      return {
+        status: 'FOUND',
+        target: scored[0].element,
+        item: scored[0].item,
+        score: scored[0].score
+      };
+    }
+
+    async click(targetOrQuery, options = {}) {
+      let targetEl = null;
+
+      if (typeof targetOrQuery === 'string') {
+        const located = this.locate(targetOrQuery, options);
+        if (located.status === 'AMBIGUOUS') {
+          return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+        }
+        if (located.status !== 'FOUND' || !located.target) {
+          return { status: 'FAILED', verified: false, reason: 'element_not_found', query: targetOrQuery };
+        }
+        targetEl = located.target;
+      } else if (targetOrQuery instanceof Element) {
+        targetEl = targetOrQuery;
+      }
+
+      if (!targetEl || !targetEl.isConnected) {
+        return { status: 'FAILED', verified: false, reason: 'invalid_target_element' };
+      }
+
+      const baseline = this.verifier.captureBaseline(targetEl);
+
+      const execResult = await this.executor.click(targetEl);
+      if (!execResult.ok) {
+        baseline.stopObserver();
+        return { status: 'FAILED', verified: false, reason: execResult.reason };
+      }
+
+      if (options.isNavigation || targetEl.tagName === 'A' || targetEl.closest('a')) {
+        return this.verifier.verifyNavigation(baseline, targetEl, options);
+      } else if (options.isTab || targetEl.getAttribute('role') === 'tab') {
+        return this.verifier.verifyTabSwitch(baseline, targetEl, options);
+      } else if (options.isMenu || targetEl.hasAttribute('aria-expanded')) {
+        return this.verifier.verifyMenuExpanded(baseline, targetEl, options);
+      }
+
+      baseline.stopObserver();
+      return {
+        status: 'SUCCESS',
+        verified: true,
+        action: 'click',
+        targetTag: targetEl.tagName,
+        mutations: baseline.baseline.mutationCount
+      };
+    }
+
+    async type(targetOrQuery, text, options = {}) {
+      let targetEl = null;
+
+      if (typeof targetOrQuery === 'string') {
+        const located = this.locate(targetOrQuery, Object.assign({ isInput: true }, options));
+        if (located.status === 'AMBIGUOUS') {
+          return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+        }
+        if (located.status !== 'FOUND' || !located.target) {
+          return { status: 'FAILED', verified: false, reason: 'input_field_not_found', query: targetOrQuery };
+        }
+        targetEl = located.target;
+      } else if (targetOrQuery instanceof Element) {
+        targetEl = targetOrQuery;
+      }
+
+      const baseline = this.verifier.captureBaseline(targetEl);
+      const execResult = await this.executor.type(targetEl, text, options);
+      if (!execResult.ok) {
+        baseline.stopObserver();
+        return { status: 'FAILED', verified: false, reason: execResult.reason };
+      }
+
+      if (options.submit) {
+        return this.verifier.verifyNavigation(baseline, targetEl, options);
+      }
+
+      return this.verifier.verifyInputFill(baseline, targetEl, text);
+    }
+
+    async select(targetOrQuery, optionText, options = {}) {
+      let targetEl = null;
+      if (typeof targetOrQuery === 'string') {
+        const located = this.locate(targetOrQuery, Object.assign({ role: 'combobox' }, options));
+        if (located.status !== 'FOUND' || !located.target) {
+          const genLoc = this.locate(targetOrQuery, options);
+          if (genLoc.status !== 'FOUND') return { status: 'FAILED', verified: false, reason: 'select_element_not_found' };
+          targetEl = genLoc.target;
+        } else {
+          targetEl = located.target;
+        }
+      } else {
+        targetEl = targetOrQuery;
+      }
+
+      const res = await this.executor.selectOption(targetEl, optionText);
+      return {
+        status: res.ok ? 'SUCCESS' : 'FAILED',
+        verified: res.ok,
+        action: 'select_option',
+        selectedText: res.selectedText,
+        selectedValue: res.selectedValue,
+        reason: res.reason
+      };
+    }
+
+    readContent(targetOrQuery) {
+      let el = null;
+      if (typeof targetOrQuery === 'string') {
+        const root = document.querySelector(targetOrQuery) ||
+                     Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
+                       return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
+                              (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
+                     });
+        el = root;
+      } else {
+        el = targetOrQuery;
+      }
+
+      if (!el) {
+        return { status: 'FAILED', text: '', reason: 'content_container_not_found' };
+      }
+
+      const clone = el.cloneNode(true);
+      const toRemove = clone.querySelectorAll('script, style, noscript, [aria-hidden="true"], #sleepwalker-ui-host');
+      toRemove.forEach(r => r.remove());
+      const clean = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+
+      return {
+        status: 'SUCCESS',
+        verified: clean.length > 0,
+        text: clean,
+        wordCount: clean.split(/\s+/).filter(Boolean).length
+      };
+    }
+
+    async fillForm(fields) {
+      const results = [];
+      for (const f of fields) {
+        const fillRes = await this.type(f.label, f.value, { clear: true });
+        results.push({ field: f.label, result: fillRes });
+        if (!fillRes.verified) {
+          return { status: 'FAILED', verified: false, failedField: f.label, details: results };
+        }
+      }
+      return { status: 'SUCCESS', verified: true, filledCount: results.length, details: results };
+    }
+
+    async openMenuAndSelect(parentMenuQuery, subItemText) {
+      let parentEl = null;
+      if (typeof parentMenuQuery === 'string') {
+        const loc = this.locate(parentMenuQuery);
+        if (loc.status !== 'FOUND') return { status: 'FAILED', verified: false, reason: 'parent_menu_not_found' };
+        parentEl = loc.target;
+      } else {
+        parentEl = parentMenuQuery;
+      }
+
+      const baseline = this.verifier.captureBaseline(parentEl);
+      const res = await this.executor.openMenuAndSelect(parentEl, subItemText);
+      baseline.stopObserver();
+
+      return {
+        status: res.ok ? 'SUCCESS' : 'FAILED',
+        verified: res.ok,
+        action: 'open_menu_and_select',
+        reason: res.reason
+      };
+    }
+
+    async switchTab(tabQuery, options = {}) {
+      return this.click(tabQuery, Object.assign({ isTab: true }, options));
+    }
+
+    async executeSearch(query, options = {}) {
+      const searchBox = document.querySelector('input[type="search"], input[name*="search" i], input[id*="search" i], [role="searchbox"]') ||
+                        this.locate('Search', { isInput: true }).target;
+
+      if (!searchBox) {
+        return { status: 'FAILED', verified: false, reason: 'no_searchbox_found' };
+      }
+
+      return this.type(searchBox, query, Object.assign({ submit: true, clear: true }, options));
+    }
+  }
+
+  // Export to global scope for Manifest V3 content script isolation
+  global.StagehandObserver = StagehandObserver;
+  global.PlaywrightExecutor = PlaywrightExecutor;
+  global.StateVerifier = StateVerifier;
+  global.VisualFallback = VisualFallback;
+  global.BrowserEngine = BrowserEngine;
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      StagehandObserver,
+      PlaywrightExecutor,
+      StateVerifier,
+      VisualFallback,
+      BrowserEngine
+    };
+  }
+})(typeof window !== 'undefined' ? window : globalThis);
