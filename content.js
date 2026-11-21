@@ -4018,19 +4018,29 @@
 
       // 6. Paragraph below heading explanation
       if (act.value === 'paragraph_below' || /\bparagraph\s+(?:below|under)\b/i.test(raw)) {
-        if (this.navigator && typeof this.navigator.extractParagraphBelowHeading === 'function') {
-          const pInfo = this.navigator.extractParagraphBelowHeading(plan.target || (plan.context && plan.context.section) || raw);
-          if (pInfo && pInfo.text) {
-            const res = await this.explainPage({
-              mode: 'qa',
-              query: raw,
-              target: pInfo.heading,
-              customChunksText: `[${pInfo.heading}] ${pInfo.text}`,
-              customTitle: `Section: ${pInfo.heading}`,
-              lang: this.resolveReplyLang()
-            });
-            return { status: 'explained_paragraph', heading: pInfo.heading, ...(res || {}), nluSource: meta.nluSource };
+        const headingTarget = plan.target || (plan.context && plan.context.section) || raw;
+        let pInfo = null;
+        if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.readContent === 'function') {
+          const rT0 = performance.now();
+          const rc = this.browserEngine.readContent(headingTarget);
+          this._recordRolloutEvent({ action: 'read_content', engine: 'rebuilt_browser_engine', outcome: rc.verified ? 'success' : 'fallback', latencyMs: performance.now() - rT0 });
+          if (rc && rc.verified && rc.text) {
+            pInfo = { heading: rc.heading || headingTarget, text: rc.text, element: rc.element };
           }
+        }
+        if (!pInfo && this.navigator && typeof this.navigator.extractParagraphBelowHeading === 'function') {
+          pInfo = this.navigator.extractParagraphBelowHeading(headingTarget);
+        }
+        if (pInfo && pInfo.text) {
+          const res = await this.explainPage({
+            mode: 'qa',
+            query: raw,
+            target: pInfo.heading,
+            customChunksText: `[${pInfo.heading}] ${pInfo.text}`,
+            customTitle: `Section: ${pInfo.heading}`,
+            lang: this.resolveReplyLang()
+          });
+          return { status: 'explained_paragraph', heading: pInfo.heading, ...(res || {}), nluSource: meta.nluSource };
         }
       }
 
@@ -4645,8 +4655,43 @@
       return { status: 'help', message: msg };
     }
 
-    readPage() { this.reader.setLang(this.getEffectiveSpeechLang(this.lang)); this.reader.readPage(); return { status: 'reading_page' }; }
+    readPage() {
+      this.reader.setLang(this.getEffectiveSpeechLang(this.lang));
+      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.readContent === 'function') {
+        const rT0 = performance.now();
+        const rc = this.browserEngine.readContent('page');
+        this._recordRolloutEvent({ action: 'read_page', engine: 'rebuilt_browser_engine', outcome: rc.verified ? 'success' : 'fallback', latencyMs: performance.now() - rT0 });
+        if (rc && rc.verified && rc.text) {
+          this.reader.readText(rc.text.slice(0, 1200));
+          return { status: 'reading_page', verified: true, engine: 'rebuilt_browser_engine', wordCount: rc.wordCount, text: rc.text.slice(0, 400) };
+        }
+      }
+      this.reader.readPage();
+      return { status: 'reading_page' };
+    }
     readSection(q) {
+      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.readContent === 'function') {
+        const rT0 = performance.now();
+        const rc = this.browserEngine.readContent(q);
+        this._recordRolloutEvent({ action: 'read_section', engine: 'rebuilt_browser_engine', outcome: rc.verified ? 'success' : 'fallback', latencyMs: performance.now() - rT0 });
+        if (rc && rc.verified && rc.text) {
+          if (rc.element && typeof rc.element.scrollIntoView === 'function') {
+            try { rc.element.scrollIntoView({ behavior: 'instant', block: 'start' }); } catch (_e) {}
+          }
+          const preview = rc.text.slice(0, 260);
+          this.reader.setLang(this.getEffectiveSpeechLang(this.lang));
+          this.reader.readText(rc.text.slice(0, 900));
+          if (window.SW_UI) {
+            window.SW_UI.setState('speaking');
+            window.SW_UI.showCard({
+              type: 'summary',
+              title: `Section: ${rc.heading || q}`,
+              text: preview
+            });
+          }
+          return { status: 'reading_section', verified: true, engine: 'rebuilt_browser_engine', section: rc.heading || q, text: preview };
+        }
+      }
       if (this.outline && (!this.outline.items || this.outline.items.length === 0) && typeof this.outline.extractOutline === 'function') {
         this.outline.extractOutline();
       }

@@ -1240,36 +1240,65 @@
       };
     }
 
-    readContent(targetOrQuery) {
+    readContent(targetOrQuery = '', options = {}) {
+      const root = options.root || document;
       let el = null;
-      if (typeof targetOrQuery === 'string') {
+      let headingLabel = '';
+      let extractedText = '';
+
+      if (!targetOrQuery || targetOrQuery === 'page') {
+        el = root.querySelector('main, article, [role="main"]') || root.body;
+        headingLabel = root.title || 'Page';
+      } else if (typeof targetOrQuery === 'string') {
+        const qTrim = targetOrQuery.trim();
         let matches = [];
-        try { matches = Array.from(document.querySelectorAll(targetOrQuery)); } catch (_e) {}
-        const withText = matches.find(m => (m.textContent || '').trim().length > 0);
+        try { matches = Array.from(root.querySelectorAll(qTrim)); } catch (_e) {}
+        const withText = matches.find(m => this.observer._getCleanText(m).length > 0);
         if (withText) {
           el = withText;
         } else {
-          el = matches[0] || Array.from(document.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
-            return (e.getAttribute('aria-label') || '').toLowerCase().includes(targetOrQuery.toLowerCase()) ||
-                   (e.querySelector('h1, h2, h3')?.textContent || '').toLowerCase().includes(targetOrQuery.toLowerCase());
-          });
+          const qLow = qTrim.toLowerCase().replace(/\b(?:section|heading|paragraph)\b/gi, '').trim();
+          const headings = Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]'));
+          const hitH = headings.find(h => this.observer._getCleanText(h).toLowerCase().includes(qLow));
+          if (hitH) {
+            headingLabel = sanitizeUntrustedLabel(this.observer._getCleanText(hitH), 120);
+            const secContainer = hitH.closest('section, article, [role="region"]');
+            if (secContainer && secContainer !== root.body) {
+              el = secContainer;
+            } else {
+              const parts = [];
+              let sib = hitH.nextElementSibling;
+              while (sib && !/^H[1-6]$/.test(sib.tagName) && sib.getAttribute('role') !== 'heading') {
+                const t = this.observer._getCleanText(sib);
+                if (t) parts.push(t);
+                sib = sib.nextElementSibling;
+              }
+              extractedText = parts.join(' ').trim() || this.observer._getCleanText(hitH.parentElement);
+              el = hitH;
+            }
+          } else {
+            el = Array.from(root.querySelectorAll('article, section, main, [role="region"], div')).find(e => {
+              return (e.getAttribute('aria-label') || '').toLowerCase().includes(qLow);
+            }) || null;
+          }
         }
-      } else {
+      } else if (targetOrQuery instanceof Element) {
         el = targetOrQuery;
       }
 
-      if (!el) {
-        return { status: 'FAILED', text: '', reason: 'content_container_not_found' };
+      if (!el && !extractedText) {
+        return { status: 'FAILED', verified: false, text: '', reason: 'content_container_not_found' };
       }
 
-      const clone = el.cloneNode(true);
-      const toRemove = clone.querySelectorAll('script, style, noscript, [aria-hidden="true"], #sleepwalker-ui-host');
-      toRemove.forEach(r => r.remove());
-      const clean = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      const rawClean = extractedText || this.observer._getCleanText(el);
+      const clean = rawClean.replace(PROMPT_INJECTION_RE, '[FILTERED_DIRECTIVE]').trim();
 
       return {
-        status: 'SUCCESS',
+        status: clean.length > 0 ? 'SUCCESS' : 'FAILED',
         verified: clean.length > 0,
+        action: 'read_content',
+        heading: headingLabel,
+        element: el,
         text: clean,
         wordCount: clean.split(/\s+/).filter(Boolean).length
       };
