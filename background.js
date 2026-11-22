@@ -285,6 +285,8 @@ const CONTENT_SCRIPT_FILES = [
   'threads.js',
   'card.js',
   'orb.js',
+  'teach.js',
+  'browser-engine.js',
   'content.js'
 ];
 

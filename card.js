@@ -499,6 +499,34 @@
       }, this.autoDismissMs);
     }
 
+    reset() {
+      this._clearDismissTimer();
+      this.spec = null;
+      this.visible = false;
+      this.expanded = false;
+      this.speechDone = true;
+      if (this.el) {
+        this.el.hidden = true;
+        this.el.classList.remove('sw-card-open', 'sw-expanded', 'sw-pos-top', 'sw-pos-left', 'sw-pos-right');
+        delete this.el.dataset.cardType;
+        delete this.el.dataset.streamStatus;
+      }
+      if (this.titleEl) this.titleEl.textContent = '';
+      if (this.badgeEl) {
+        this.badgeEl.textContent = '';
+        this.badgeEl.hidden = true;
+      }
+      if (this.bodyEl) this.bodyEl.textContent = '';
+      if (this.readBarEl) {
+        this.readBarEl.textContent = '';
+        this.readBarEl.hidden = true;
+      }
+      if (this.actionsEl) {
+        this.actionsEl.textContent = '';
+        this.actionsEl.hidden = true;
+      }
+    }
+
     hide({ restoreFocus = true } = {}) {
       this._clearDismissTimer();
       this.visible = false;

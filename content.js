@@ -43,13 +43,14 @@
 
       this.initModules();
       this.bindEvents();
-      this.loadPreferences();
+      this.loadPreferencesPromise = this.loadPreferences();
       this._installSpaNavigationWatcher();
       this._installVisibilityAndTabListeners();
       this._bootDone = false;
-      this._bootPromise = this.restorePersistentSessionOnBoot()
-        .catch(() => null)
-        .finally(() => { this._bootDone = true; });
+      this._bootPromise = Promise.all([
+        this.restorePersistentSessionOnBoot().catch(() => null),
+        this.loadPreferencesPromise
+      ]).finally(() => { this._bootDone = true; });
       if (this.worldModel && typeof this.worldModel.scheduleProactiveScan === 'function' &&
           typeof document !== 'undefined' && !document.hidden) {
         this.worldModel.scheduleProactiveScan(document, { delayMs: 120, reason: 'initial_page_load' });
@@ -118,7 +119,7 @@
       if (ui && typeof ui.setHandlers === 'function') {
         ui.setHandlers({
           onOrbClick: () => this.toggle({ startDialogue: true, source: 'orb' }),
-          onSubmitText: (text) => this.handleUserInput(text, 'typed'),
+          onSubmitText: (text, reqId) => this.handleUserInput(text, 'typed', { reqId }),
           onDismiss: (reason) => this.dismissUi(reason || 'escape'),
           onCancelTask: () => this.cancelActiveTask('Cancelled.', { source: 'ui_cancel' }),
           onQuickControl: (pref, val) => {
@@ -154,7 +155,7 @@
       this.voice.onCommand = (cmd, meta = {}) => {
         if (cmd && cmd.raw) {
           this._setStatusChip(`Command received: "${cmd.raw}"`);
-          this.handleUserInput(cmd.raw, 'voice', {
+          return this.handleUserInput(cmd.raw, 'voice', {
             asrConfidence: meta.confidence ?? cmd.confidence ?? null,
             activeLang: meta.activeLang || this.voice.activeLang,
             mode: meta.mode || this.voice.mode
@@ -299,14 +300,15 @@
 
       this.reader.onError = (err) => {
         this.recordError(err);
-        if (this.dialogue && this.dialogue.isActive()) {
-          // Preserve the visible assistant response card and resume listening if TTS is blocked or unavailable
+        const cardType = window.SW_UI && typeof window.SW_UI.getCardType === 'function' ? window.SW_UI.getCardType() : null;
+        if (cardType || (this.dialogue && this.dialogue.isActive())) {
+          // Preserve the visible assistant response card if TTS is blocked or audio device unavailable
           if (window.SW_UI) {
             window.SW_UI.notifySpeechEnd();
             window.SW_UI.setState(this.voice && this.voice.isListening ? 'listening' : 'silent');
             this._setStatusChip('Reply shown (audio unavailable) — waiting for command...');
           }
-          this.dialogue.onSpeechStatusChange({ isPlaying: false, isPaused: false });
+          if (this.dialogue) this.dialogue.onSpeechStatusChange({ isPlaying: false, isPaused: false });
           return;
         }
         if (window.SW_UI) {
@@ -1163,7 +1165,7 @@
       const turn = this.agentFsm
         ? this.agentFsm.beginTurn({ tabId: currentTabId, command: raw, inventoryVersion: currentInv ? currentInv.inventoryVersion : 0, url: window.location.href })
         : null;
-      const requestId = turn ? turn.requestId : cmdId;
+      const requestId = (meta && meta.reqId) || (turn ? turn.requestId : cmdId);
       const checkTurnValid = (opts = {}) => {
         if (!this._isTaskCurrent(taskId, taskSignal)) return { ok: false, reason: 'user_cancelled' };
         return !this.agentFsm || !requestId ? { ok: true } : this.agentFsm.assertTurnCurrent(requestId, opts);
@@ -1172,11 +1174,107 @@
       this._setStatusChip(`Understanding: "${raw}"`);
       this._setAuroraTaskUi('processing', 'Understanding request');
 
+      // Unified request tracking across Orb UI, cards, and speech
+      if (window.SW_UI && typeof window.SW_UI.beginRequest === 'function') {
+        window.SW_UI.beginRequest(requestId, raw);
+      }
+
       // 1. Hide UI / UI visibility command without ending conversation
       if (/^(?:hide\s+(?:the\s+)?(?:ui|orb|assistant)|minimize)$/i.test(raw)) {
         this.dismissUi('hide_ui');
         if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'ui_hidden' });
         return { status: 'ui_hidden' };
+      }
+
+      // 1c. Conversational Greeting (Issue A: handle greetings directly without analyzing whole page DOM or showing stale content)
+      if (/^(?:hello|hi|hey|good\s+(?:morning|afternoon|evening)|namaste|greetings)\b[!.?]*$/i.test(raw.trim())) {
+        const greetingMsg = "Hello! I'm Sleepwalker. How can I help you on this page? You can ask me to read the page, click links, search, or fill forms.";
+        this.setAssistantReply(greetingMsg);
+        if (window.SW_UI) {
+          window.SW_UI.setState('speaking');
+          window.SW_UI.showCard({
+            type: 'answer',
+            title: 'Sleepwalker',
+            text: greetingMsg,
+            reqId: requestId,
+            choices: ['Read this page', 'Explain this page', 'Search on this page']
+          });
+        }
+        if (this.reader) this.reader.readText(greetingMsg);
+        if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'greeting_handled' });
+        this._finishActiveTask(taskId, 'COMPLETED', 'Greeting');
+        return { status: 'greeting_handled', answer: greetingMsg, verified: true, engine: this.useRebuiltBrowserEngine ? 'rebuilt_browser_engine' : 'legacy' };
+      }
+
+      // 1d. Direct URL Navigation & Web Search (Issue B: distinguish direct URL navigation, Google search, and current page search)
+      const directUrlMatch = raw.match(/^(?:(?:please\s+)?(?:go\s+to|visit|open|navigate\s+to)\s+)?(https?:\/\/[^\s]+)$/i) ||
+                             raw.match(/^(?:(?:please\s+)?(?:go\s+to|visit|open|navigate\s+to)\s+)([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?)$/i);
+      if (directUrlMatch) {
+        let destUrl = directUrlMatch[1].trim();
+        if (!/^https?:\/\//i.test(destUrl)) {
+          destUrl = 'https://' + destUrl;
+        }
+        if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_url' });
+        return this._navigateToExternalUrl(destUrl, destUrl, destUrl);
+      }
+
+      const googleSearchMatch = raw.match(/^(?:(?:please\s+)?(?:search\s+(?:on\s+|using\s+)?google(?:\s+for)?|google)\s+(.+))$/i) ||
+                                raw.match(/^(?:(?:please\s+)?search\s+(?:the\s+web|online|internet)\s+(?:for\s+)?(.+))$/i);
+      if (googleSearchMatch) {
+        const query = googleSearchMatch[1].trim();
+        const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+        if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_google' });
+        return this._navigateToExternalUrl(googleUrl, `Google Search: ${query}`, query);
+      }
+
+      // 1e. Rebuilt BrowserEngine Unified Hierarchical Menu Navigation (Phases 9.1 & 10.1)
+      if (this.useRebuiltBrowserEngine && this.browserEngine && typeof this.browserEngine.normalizeMenuPath === 'function') {
+        const normMenu = this.browserEngine.normalizeMenuPath(raw);
+        if (Array.isArray(normMenu) && normMenu.length >= 2) {
+          this._setAuroraTaskUi('processing', `Opening menu: ${normMenu.join(' > ')}`);
+          const beT0 = performance.now();
+          const menuRes = await this.browserEngine.openMenuPath(normMenu);
+          const beMs = performance.now() - beT0;
+          if (menuRes && menuRes.status === 'CONFIRMATION_REQUIRED') {
+            this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: menuRes.reason, latencyMs: beMs });
+            return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', target: normMenu[normMenu.length - 1], reason: menuRes.reason };
+          }
+          if (menuRes && (menuRes.status === 'SUCCESS' || menuRes.verified)) {
+            this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: beMs });
+            const succMsg = `Opened ${normMenu[normMenu.length - 1]} under ${normMenu.slice(0, -1).join(' > ')}.`;
+            this.setAssistantReply(succMsg);
+            if (window.SW_UI) {
+              window.SW_UI.showCard({ type: 'answer', title: 'Menu Navigation', text: succMsg, reqId: requestId });
+            }
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'opened' });
+            this._finishActiveTask(taskId, 'COMPLETED', succMsg);
+            return { status: 'opened', verified: true, engine: 'rebuilt_browser_engine', target: normMenu[normMenu.length - 1], menuPath: normMenu };
+          }
+          if (menuRes && menuRes.status === 'AMBIGUOUS') {
+            this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: 'ambiguous_candidates', latencyMs: beMs });
+            const choices = (menuRes.candidates || []).map(c => c.label || c.text || String(c));
+            const clarifyMsg = menuRes.message || `Found multiple options matching "${normMenu[normMenu.length - 1]}". Which one did you mean?`;
+            this.setAssistantReply(clarifyMsg);
+            if (window.SW_UI) {
+              window.SW_UI.setState('confirm');
+              window.SW_UI.showCard({ type: 'choices', title: 'Clarify Menu Choice', text: clarifyMsg, choices, reqId: requestId });
+            }
+            this._enterWaitingForClarification(taskId, clarifyMsg, async (ansText) => {
+              return this.browserEngine.openMenuPath(normMenu.slice(0, -1).concat([ansText]));
+            });
+            return { status: 'needs_clarification', choices, engine: 'rebuilt_browser_engine' };
+          }
+          // Honest failure: do NOT fall back to typing the menu query into website search or Google
+          this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'fallback', reason: (menuRes && menuRes.reason) || 'menu_not_found', latencyMs: beMs });
+          const failMsg = `Could not find "${normMenu[normMenu.length - 1]}" under "${normMenu.slice(0, -1).join(' > ')}".`;
+          this.setAssistantReply(failMsg);
+          if (window.SW_UI) {
+            window.SW_UI.showCard({ type: 'error', title: 'Navigation Failed', text: failMsg, reqId: requestId });
+          }
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'not_found' });
+          this._finishActiveTask(taskId, 'ERROR', failMsg);
+          return { status: 'not_found', ok: false, verified: false, engine: 'rebuilt_browser_engine', reason: (menuRes && menuRes.reason) || 'menu_path_failed' };
+        }
       }
 
       // 1b. Teaching mode lifecycle commands (start, pause, resume, finish, cancel)
@@ -4147,12 +4245,12 @@
         if (this.browserEngine && this.useRebuiltBrowserEngine) {
           const beT0 = performance.now();
           try {
-            const isHierarchical = Boolean(
-              (sectionScope && (sectionScope.includes('>') || sectionScope.includes('->') || sectionScope.includes('/'))) ||
-              (raw && (raw.includes('>') || raw.includes('->') || raw.includes('/')))
-            );
+            const normMenu = typeof this.browserEngine.normalizeMenuPath === 'function'
+              ? this.browserEngine.normalizeMenuPath(sectionScope ? [sectionScope, targetLabel] : raw)
+              : null;
+            const isHierarchical = Boolean(Array.isArray(normMenu) && normMenu.length >= 2);
             if (isHierarchical && typeof this.browserEngine.openMenuPath === 'function') {
-              const menuRes = await this.browserEngine.openMenuPath(sectionScope ? [sectionScope, targetLabel] : raw);
+              const menuRes = await this.browserEngine.openMenuPath(normMenu);
               const beMs = performance.now() - beT0;
               if (menuRes && menuRes.status === 'CONFIRMATION_REQUIRED') {
                 this._recordRolloutEvent({ action: 'nested_menu', engine: 'rebuilt_browser_engine', outcome: 'clarification', reason: menuRes.reason, latencyMs: beMs });
@@ -4334,10 +4432,35 @@
       }
 
       // 9c. Form submission with required validation & mandatory user confirmation gate
-      if ((plan.intent === 'submit_form' || act.type === 'submit' || /\b(?:submit|complete\s+(?:the\s+)?(?:application|form)|send\s+application)\b/i.test(raw)) &&
-          this.forms && typeof this.forms.reviewAndActOnStepOrSubmit === 'function') {
-        const subRes = this.forms.reviewAndActOnStepOrSubmit('submit');
-        return { ...(subRes || { status: 'confirming' }), verified: true, nluSource: meta.nluSource };
+      if (plan.intent === 'submit_form' || act.type === 'submit' || /\b(?:submit|complete\s+(?:the\s+)?(?:application|form)|send\s+application)\b/i.test(raw)) {
+        if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.submitForm === 'function') {
+          const beSub = await this.browserEngine.submitForm(act.target || plan.target || null, { userConfirmed: false });
+          if (beSub && beSub.status === 'CONFIRMATION_REQUIRED') {
+            const sumLines = (beSub.summary && beSub.summary.summaryLines) || ['Form submission requires your confirmation.'];
+            if (window.SW_UI) {
+              window.SW_UI.setState('confirm');
+              window.SW_UI.showCard({
+                type: 'confirm',
+                title: 'Confirm Form Submission',
+                stepLabel: 'Review & Confirm',
+                text: 'Are you sure you want to submit this form?',
+                summaryLines: sumLines,
+                reqId: (meta && meta.requestId) || null,
+                onConfirm: async () => {
+                  return this.browserEngine.submitForm(act.target || plan.target || null, { userConfirmed: true });
+                }
+              });
+            }
+            return { status: 'confirming', awaiting: true, verified: false, engine: 'rebuilt_browser_engine', reason: 'confirmation_required' };
+          }
+          if (beSub && (beSub.status === 'SUCCESS' || beSub.verified)) {
+            return { status: 'submitted', verified: true, engine: 'rebuilt_browser_engine', details: beSub.details };
+          }
+        }
+        if (this.forms && typeof this.forms.reviewAndActOnStepOrSubmit === 'function') {
+          const subRes = this.forms.reviewAndActOnStepOrSubmit('submit');
+          return { ...(subRes || { status: 'confirming' }), verified: true, nluSource: meta.nluSource };
+        }
       }
 
       // 10. Search
@@ -4452,10 +4575,13 @@
           const ms = performance.now() - t0;
           if (beRes && beRes.status === 'SENSITIVE_SKIPPED') {
             this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'success', reason: 'sensitive_skipped', latencyMs: ms });
-            if (this.forms && typeof this.forms.handleDictateIntent === 'function') {
-              return this.forms.handleDictateIntent(args, rawText);
+            const warnMsg = 'Protected sensitive field (password or financial credential) cannot be filled automatically.';
+            this.setAssistantReply(warnMsg);
+            if (window.SW_UI) {
+              window.SW_UI.setState('speaking');
+              window.SW_UI.showCard({ type: 'answer', title: 'Protected Field', text: warnMsg });
             }
-            return { status: 'sensitive_skipped', ok: false, verified: false, engine: 'rebuilt_browser_engine', reason: beRes.reason };
+            return { status: 'sensitive_skipped', ok: false, verified: false, engine: 'rebuilt_browser_engine', reason: beRes.reason, protected: true };
           }
           if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
             this._recordRolloutEvent({ action: 'fill_input', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
@@ -5057,78 +5183,83 @@
     }
 
     loadPreferences() {
-      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-      chrome.storage.local.get([
-        'sleepwalker_lang', 'sleepwalker_font_size', 'sleepwalker_rate', 'sleepwalker_barge_in',
-        'sleepwalker_ai_search_enabled', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model',
-        'sleepwalker_memory_paused', 'sleepwalker_disable_page_analysis',
-        'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
-        'sleepwalker_use_rebuilt_browser_engine'
-      ], (d) => {
-        if (d.sleepwalker_lang) this.setLanguage(d.sleepwalker_lang);
-        if (d.sleepwalker_rate) this.setRate(d.sleepwalker_rate);
-        if (d.sleepwalker_font_size) this.fontSize = Number(d.sleepwalker_font_size) || 18;
-        this.bargeIn = Boolean(d.sleepwalker_barge_in);
-        this.aiSearchEnabled = d.sleepwalker_ai_search_enabled !== false;
-        this.ollamaUrl = d.sleepwalker_ollama_url || 'http://localhost:11434';
-        this.ollamaModel = d.sleepwalker_ollama_model || 'llama3.2:3b';
-        this.useRebuiltBrowserEngine = Boolean(
-          d.sleepwalker_use_rebuilt_browser_engine === true ||
-          (typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true)
-        );
-        if (this.memory) {
-          this.memory.privacy.memoryPaused = Boolean(d.sleepwalker_memory_paused);
-          this.memory.privacy.disablePageAnalysis = Boolean(d.sleepwalker_disable_page_analysis);
-          this.memory.privacy.learningEnabled = d.sleepwalker_adaptive_learning_enabled !== false;
-          this.memory.privacy.proactiveEnabled = d.sleepwalker_proactive_enabled !== false;
-        }
-        if (this.navigator) {
-          this.navigator.aiSearchEnabled = this.aiSearchEnabled;
-          this.navigator.ollamaUrl = this.ollamaUrl;
-          this.navigator.ollamaModel = this.ollamaModel;
-        }
-        if (this.elementSelector) {
-          this.elementSelector.aiSearchEnabled = this.aiSearchEnabled;
-        }
-        if (this.dialogue) this.dialogue.setBargeIn(this.bargeIn);
-      });
-      if (!this._storagePrivacyWatched && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
-        this._storagePrivacyWatched = true;
-        chrome.storage.onChanged.addListener((changes, area) => {
-          if (area !== 'local') return;
-          if (changes.sleepwalker_use_rebuilt_browser_engine) {
-            this.useRebuiltBrowserEngine = Boolean(changes.sleepwalker_use_rebuilt_browser_engine.newValue === true);
-          }
-          if (!this.memory) return;
-          if (changes.sleepwalker_memory_paused) this.memory.privacy.memoryPaused = Boolean(changes.sleepwalker_memory_paused.newValue);
-          if (changes.sleepwalker_disable_page_analysis) this.memory.privacy.disablePageAnalysis = Boolean(changes.sleepwalker_disable_page_analysis.newValue);
-          if (changes.sleepwalker_adaptive_learning_enabled) {
-            this.memory.privacy.learningEnabled = changes.sleepwalker_adaptive_learning_enabled.newValue !== false;
-            if (this.memory.state && this.memory.state.personalContext && this.memory.state.personalContext.privacyControls) {
-              this.memory.state.personalContext.privacyControls.learningEnabled = this.memory.privacy.learningEnabled;
+      if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return Promise.resolve();
+      return new Promise((resolve) => {
+        chrome.storage.local.get([
+          'sleepwalker_lang', 'sleepwalker_font_size', 'sleepwalker_rate', 'sleepwalker_barge_in',
+          'sleepwalker_ai_search_enabled', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model',
+          'sleepwalker_memory_paused', 'sleepwalker_disable_page_analysis',
+          'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
+          'sleepwalker_use_rebuilt_browser_engine'
+        ], (d) => {
+          if (d) {
+            if (d.sleepwalker_lang) this.setLanguage(d.sleepwalker_lang);
+            if (d.sleepwalker_rate) this.setRate(d.sleepwalker_rate);
+            if (d.sleepwalker_font_size) this.fontSize = Number(d.sleepwalker_font_size) || 18;
+            this.bargeIn = Boolean(d.sleepwalker_barge_in);
+            this.aiSearchEnabled = d.sleepwalker_ai_search_enabled !== false;
+            this.ollamaUrl = d.sleepwalker_ollama_url || 'http://localhost:11434';
+            this.ollamaModel = d.sleepwalker_ollama_model || 'llama3.2:3b';
+            this.useRebuiltBrowserEngine = Boolean(
+              d.sleepwalker_use_rebuilt_browser_engine === true ||
+              (typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true)
+            );
+            if (this.memory) {
+              this.memory.privacy.memoryPaused = Boolean(d.sleepwalker_memory_paused);
+              this.memory.privacy.disablePageAnalysis = Boolean(d.sleepwalker_disable_page_analysis);
+              this.memory.privacy.learningEnabled = d.sleepwalker_adaptive_learning_enabled !== false;
+              this.memory.privacy.proactiveEnabled = d.sleepwalker_proactive_enabled !== false;
             }
-          }
-          if (changes.sleepwalker_proactive_enabled) {
-            this.memory.privacy.proactiveEnabled = changes.sleepwalker_proactive_enabled.newValue !== false;
-            if (this.memory.state && this.memory.state.personalContext && this.memory.state.personalContext.privacyControls) {
-              this.memory.state.personalContext.privacyControls.proactiveEnabled = this.memory.privacy.proactiveEnabled;
+            if (this.navigator) {
+              this.navigator.aiSearchEnabled = this.aiSearchEnabled;
+              this.navigator.ollamaUrl = this.ollamaUrl;
+              this.navigator.ollamaModel = this.ollamaModel;
             }
-          }
-          if (changes.sleepwalker_persistent_memory_v1 && changes.sleepwalker_persistent_memory_v1.newValue && this.memory.state) {
-            const incoming = changes.sleepwalker_persistent_memory_v1.newValue;
-            const myKey = typeof this.memory._getTabKey === 'function' ? this.memory._getTabKey() : '';
-            if (incoming.tabContexts && typeof incoming.tabContexts === 'object') {
-              const curTabs = this.memory.state.tabContexts || {};
-              const mergedTabs = { ...incoming.tabContexts };
-              if (myKey && curTabs[myKey]) mergedTabs[myKey] = curTabs[myKey];
-              this.memory.state.tabContexts = mergedTabs;
+            if (this.elementSelector) {
+              this.elementSelector.aiSearchEnabled = this.aiSearchEnabled;
             }
-            if (Array.isArray(incoming.recentTasks)) {
-              this.memory.state.recentTasks = incoming.recentTasks;
-            }
+            if (this.dialogue) this.dialogue.setBargeIn(this.bargeIn);
           }
+          resolve();
         });
-      }
+        if (!this._storagePrivacyWatched && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
+          this._storagePrivacyWatched = true;
+          chrome.storage.onChanged.addListener((changes, area) => {
+            if (area !== 'local') return;
+            if (changes.sleepwalker_use_rebuilt_browser_engine) {
+              this.useRebuiltBrowserEngine = Boolean(changes.sleepwalker_use_rebuilt_browser_engine.newValue === true);
+            }
+            if (!this.memory) return;
+            if (changes.sleepwalker_memory_paused) this.memory.privacy.memoryPaused = Boolean(changes.sleepwalker_memory_paused.newValue);
+            if (changes.sleepwalker_disable_page_analysis) this.memory.privacy.disablePageAnalysis = Boolean(changes.sleepwalker_disable_page_analysis.newValue);
+            if (changes.sleepwalker_adaptive_learning_enabled) {
+              this.memory.privacy.learningEnabled = changes.sleepwalker_adaptive_learning_enabled.newValue !== false;
+              if (this.memory.state && this.memory.state.personalContext && this.memory.state.personalContext.privacyControls) {
+                this.memory.state.personalContext.privacyControls.learningEnabled = this.memory.privacy.learningEnabled;
+              }
+            }
+            if (changes.sleepwalker_proactive_enabled) {
+              this.memory.privacy.proactiveEnabled = changes.sleepwalker_proactive_enabled.newValue !== false;
+              if (this.memory.state && this.memory.state.personalContext && this.memory.state.personalContext.privacyControls) {
+                this.memory.state.personalContext.privacyControls.proactiveEnabled = this.memory.privacy.proactiveEnabled;
+              }
+            }
+            if (changes.sleepwalker_persistent_memory_v1 && changes.sleepwalker_persistent_memory_v1.newValue && this.memory.state) {
+              const incoming = changes.sleepwalker_persistent_memory_v1.newValue;
+              const myKey = typeof this.memory._getTabKey === 'function' ? this.memory._getTabKey() : '';
+              if (incoming.tabContexts && typeof incoming.tabContexts === 'object') {
+                const curTabs = this.memory.state.tabContexts || {};
+                const mergedTabs = { ...incoming.tabContexts };
+                if (myKey && curTabs[myKey]) mergedTabs[myKey] = curTabs[myKey];
+                this.memory.state.tabContexts = mergedTabs;
+              }
+              if (Array.isArray(incoming.recentTasks)) {
+                this.memory.state.recentTasks = incoming.recentTasks;
+              }
+            }
+          });
+        }
+      });
     }
 
     setRebuiltBrowserEngineEnabled(enabled, persist = false) {

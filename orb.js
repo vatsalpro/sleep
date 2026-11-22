@@ -28,6 +28,7 @@
       this.typeForm = null;
       this.typeInput = null;
       this._hideTimer = null;
+      this.currentRequestId = '';
       this.handlers = {
         onOrbClick: typeof options.onOrbClick === 'function' ? options.onOrbClick : null,
         onSubmitText: typeof options.onSubmitText === 'function' ? options.onSubmitText : null,
@@ -206,16 +207,14 @@
           if (!text) return;
           this.typeInput.value = '';
           this._processingTurn = true;
-          if (this.card && typeof this.card._clearDismissTimer === 'function') {
-            this.card._clearDismissTimer();
-          }
+          const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+          this.beginRequest(reqId, text);
           // Keep the command bar accessible below cards so follow-up typed commands are never obstructed.
           this.typeForm.hidden = false;
           this.typeBtn.setAttribute('aria-expanded', 'true');
-          this.setTranscript(text);
           this.syncLayout();
           if (typeof this.handlers.onSubmitText === 'function') {
-            this.handlers.onSubmitText(text);
+            this.handlers.onSubmitText(text, reqId);
           }
         });
       }
@@ -358,7 +357,23 @@
       this.syncLayout();
     }
 
+    beginRequest(reqId, text = '') {
+      const id = reqId || (`req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+      this.currentRequestId = id;
+      if (this.card && typeof this.card.reset === 'function') {
+        this.card.reset();
+      }
+      this.setState('thinking');
+      if (text) {
+        this.setTranscript(text);
+      }
+      return id;
+    }
+
     showCard(spec = {}) {
+      if (spec && spec.reqId && this.currentRequestId && spec.reqId !== this.currentRequestId) {
+        return;
+      }
       if (this.card) { this.card.show(spec); return; }
       if (spec && typeof spec === 'object') {
         if (this.state === 'idle') this.setState('speaking');
@@ -367,6 +382,9 @@
       }
     }
     updateCard(spec = {}) {
+      if (spec && spec.reqId && this.currentRequestId && spec.reqId !== this.currentRequestId) {
+        return;
+      }
       if (this.card && typeof this.card.updateStreaming === 'function') {
         this.card.updateStreaming(spec);
         return;
@@ -421,6 +439,8 @@
     const orb = new SleepwalkerOrbUI();
     rootScope.__SW_ORB_INSTANCE__ = orb;
     const api = {
+      beginRequest: (reqId, text) => orb.beginRequest(reqId, text),
+      getCurrentRequestId: () => orb.currentRequestId,
       setState: (s) => orb.setState(s), setLevel: (l) => orb.setLevel(l), setTranscript: (t) => orb.setTranscript(t),
       setTaskStatus: (st) => orb.setTaskStatus(st), setScanning: (on, lbl) => orb.setScanning(on, lbl),
       showCard: (c) => orb.showCard(c), updateCard: (c) => orb.updateCard(c), highlightTopic: (i) => orb.highlightTopic(i), highlightSentence: (i) => orb.highlightSentence(i),
