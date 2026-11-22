@@ -443,7 +443,7 @@
     async scrollIntoViewIfNeeded(el) {
       if (!el || !el.isConnected) return;
       const rect = el.getBoundingClientRect();
-      const inView = rect.top >= this.options.scrollOffsetTop &&
+      const inView = (rect.top >= this.options.scrollOffsetTop || (window.scrollY === 0 && rect.top >= 0)) &&
                      rect.bottom <= (window.innerHeight - this.options.scrollOffsetBottom) &&
                      rect.left >= 0 && rect.right <= window.innerWidth;
       if (inView) return;
@@ -457,9 +457,10 @@
         }
       });
 
-      const targetY = window.scrollY + rect.top - topClearance - 20;
+      const targetY = Math.max(0, window.scrollY + rect.top - topClearance - 20);
+      if (Math.abs(targetY - window.scrollY) < 5) return;
       window.scrollTo({
-        top: Math.max(0, targetY),
+        top: targetY,
         behavior: 'instant'
       });
       await new Promise(r => setTimeout(r, this.options.settleDelayMs));
@@ -498,16 +499,30 @@
       }
     }
 
-    async click(el) {
+    async click(el, options = {}) {
       await this.scrollIntoViewIfNeeded(el);
       const gate = await this.validateActionability(el);
       if (!gate.ok) {
         return { ok: false, reason: gate.reason };
       }
 
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+
+      let mechanism = 'synthetic_events_and_dom_methods';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'mouseClick', x: clientX, y: clientY, button: 'left', clickCount: 1 });
+          mechanism = 'cdp_browser_level_input';
+          await new Promise((r) => setTimeout(r, this.options.settleDelayMs));
+          return { ok: true, clientX, clientY, mechanism };
+        } catch (_e) {}
+      }
+
       this.dispatchGestureTrain(el);
-      await new Promise(r => setTimeout(r, this.options.settleDelayMs));
-      return { ok: true };
+      await new Promise((r) => setTimeout(r, this.options.settleDelayMs));
+      return { ok: true, clientX, clientY, mechanism };
     }
 
     async hover(el, options = {}) {
@@ -1433,10 +1448,77 @@
       this.executor = (engine && engine.executor) || new PlaywrightExecutor(options);
       this.options = Object.assign({
         pointerSettleMs: 50,
-        keyDelayMs: 30
+        keyDelayMs: 30,
+        moveSteps: 6,
+        stepDelayMs: 15
       }, options);
-      this.currentPointer = { x: 0, y: 0 };
+      this.currentPointer = (typeof window !== 'undefined' && window.__sleepwalker_pointer)
+        ? { x: window.__sleepwalker_pointer.x, y: window.__sleepwalker_pointer.y }
+        : { x: 0, y: 0 };
       this.operationHistory = [];
+      this.interrupted = false;
+    }
+
+    interrupt() {
+      this.interrupted = true;
+      this._hidePointerIndicator();
+    }
+
+    resetInterrupt() {
+      this.interrupted = false;
+    }
+
+    _ensurePointerIndicator() {
+      if (typeof document === 'undefined') return null;
+      let indicator = document.getElementById('sleepwalker-pointer-indicator');
+      if (!indicator && document.body) {
+        indicator = document.createElement('div');
+        indicator.id = 'sleepwalker-pointer-indicator';
+        indicator.className = 'sleepwalker-pointer-cursor';
+        indicator.setAttribute('aria-hidden', 'true');
+        indicator.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none !important;z-index:2147483647;display:none;will-change:left,top,transform;transform:translate(-2px,-2px);';
+        indicator.innerHTML = `
+          <svg viewBox="0 0 24 24" class="sw-pointer-svg" width="28" height="28" style="pointer-events:none;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.45));">
+            <path d="M4 2 L20 10 L12 13 L8 21 Z" fill="#ffd700" stroke="#1b1714" stroke-width="1.8" stroke-linejoin="round"/>
+          </svg>
+          <span class="sw-pointer-pulse" style="pointer-events:none;"></span>
+          <span class="sw-pointer-label" style="pointer-events:none;display:none;"></span>
+        `;
+        document.documentElement.appendChild(indicator);
+      }
+      return indicator;
+    }
+
+    _updatePointerIndicator(x, y, label = null, clicking = false) {
+      if (typeof document === 'undefined') return;
+      const indicator = this._ensurePointerIndicator();
+      if (!indicator) return;
+      indicator.style.display = 'block';
+      indicator.style.left = `${Math.round(x)}px`;
+      indicator.style.top = `${Math.round(y)}px`;
+      if (clicking) {
+        indicator.classList.add('sw-pointer-clicking');
+      } else {
+        indicator.classList.remove('sw-pointer-clicking');
+      }
+      const lbl = indicator.querySelector('.sw-pointer-label');
+      if (lbl) {
+        if (label) {
+          lbl.textContent = label;
+          lbl.style.display = 'inline-block';
+        } else {
+          lbl.style.display = 'none';
+        }
+      }
+    }
+
+    _hidePointerIndicator() {
+      if (typeof document === 'undefined') return;
+      const indicator = document.getElementById('sleepwalker-pointer-indicator');
+      if (indicator) {
+        indicator.style.display = 'none';
+        indicator.classList.remove('sw-pointer-clicking');
+      }
     }
 
     inspectMechanisms() {
@@ -1447,8 +1529,8 @@
         cdpHoverBridgeActive: hasCdpHover,
         operations: {
           movePointer: {
-            contentScriptDefault: 'DOM getBoundingClientRect + scrollIntoViewIfNeeded (window.scrollTo) + synthetic PointerEvent("pointermove") & MouseEvent("mousemove")',
-            cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseMoved", x, y })',
+            contentScriptDefault: 'DOM getBoundingClientRect + scrollIntoViewIfNeeded + synthetic PointerEvent("pointermove") & MouseEvent("mousemove")',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseMoved", x, y }) with coordinate-aligned visual pointer indicator',
             activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_dom_events'
           },
           hover: {
@@ -1458,7 +1540,7 @@
           },
           click: {
             contentScriptDefault: 'DOM scrollIntoViewIfNeeded + validateActionability + synthetic pointerover/mouseover/pointerdown/mousedown/pointerup/mouseup + DOM el.focus() & el.click()',
-            cdpWhenAttached: 'CDP Input.dispatchMouseEvent(mouseMoved + mousePressed + mouseReleased) + synthetic/DOM fallback',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent(mouseMoved + mousePressed + mouseReleased) with visual click pulse',
             activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_events_and_dom_methods'
           },
           doubleClick: {
@@ -1478,18 +1560,23 @@
           },
           typeText: {
             contentScriptDefault: 'DOM el.focus() + el.value assignment + synthetic FocusEvent("focus"), InputEvent("beforeinput"), InputEvent("input"), Event("change"), form.requestSubmit()',
-            cdpWhenAttached: 'DOM focus + CDP Input.insertText / keyDown-keyUp + DOM input/change verification',
-            activeMode: hasCdpInput ? 'cdp_browser_level_input_and_dom' : 'synthetic_events_and_dom_methods'
+            cdpWhenAttached: 'DOM focus + CDP Input.dispatchKeyEvent (char-by-char) / Input.insertText + DOM value verification',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_events_and_dom_methods'
           },
           pressKey: {
             contentScriptDefault: 'Synthetic KeyboardEvent("keydown"), KeyboardEvent("keypress"), KeyboardEvent("keyup") on document.activeElement',
-            cdpWhenAttached: 'CDP Input.dispatchKeyEvent({ type: "keyDown" / "keyUp", key })',
+            cdpWhenAttached: 'CDP Input.dispatchKeyEvent({ type: "keyDown" / "keyUp", key, windowsVirtualKeyCode })',
             activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_dom_events'
+          },
+          keyboardNavigate: {
+            contentScriptDefault: 'DOM el.focus() + synthetic KeyboardEvents for arrow keys & Enter',
+            cdpWhenAttached: 'DOM el.focus() + CDP Input.dispatchKeyEvent for arrow keys & Enter with accessible feedback',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'accessible_keyboard_navigation'
           },
           scroll: {
             contentScriptDefault: 'DOM window.scrollBy / element.scrollBy ({ behavior: "instant" })',
             cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseWheel", deltaX, deltaY }) or DOM scrollBy',
-            activeMode: hasCdpInput ? 'cdp_browser_level_input_or_dom' : 'dom_method'
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'dom_method'
           }
         }
       };
@@ -1524,58 +1611,91 @@
     }
 
     async movePointer(target, options = {}) {
-      let x = 0, y = 0;
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
+      let targetX = 0, targetY = 0;
       if (typeof target === 'object' && typeof target.x === 'number' && typeof target.y === 'number') {
-        x = target.x;
-        y = target.y;
+        targetX = target.x;
+        targetY = target.y;
       } else {
         const el = this._resolveTargetElement(target);
         if (!el) return { ok: false, reason: 'target_not_found' };
         await this.executor.scrollIntoViewIfNeeded(el);
         const rect = el.getBoundingClientRect();
-        x = Math.round(rect.left + rect.width / 2);
-        y = Math.round(rect.top + rect.height / 2);
-      }
-      this.currentPointer = { x, y };
-
-      const eventInit = {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window,
-        clientX: x,
-        clientY: y,
-        screenX: x,
-        screenY: y,
-        buttons: 0
-      };
-      const hit = (typeof document !== 'undefined' && typeof document.elementFromPoint === 'function')
-        ? document.elementFromPoint(x, y) || document.body
-        : null;
-      if (hit) {
-        hit.dispatchEvent(new PointerEvent('pointermove', eventInit));
-        hit.dispatchEvent(new MouseEvent('mousemove', eventInit));
+        targetX = Math.round(rect.left + rect.width / 2);
+        targetY = Math.round(rect.top + rect.height / 2);
       }
 
-      let mechanism = 'synthetic_dom_events';
-      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
-        try {
-          await window.__sleepwalker_cdp_input({ type: 'mouseMoved', x, y });
-          mechanism = 'cdp_browser_level_input';
-        } catch (_e) {}
+      const startX = (this.currentPointer && typeof this.currentPointer.x === 'number') ? this.currentPointer.x : targetX;
+      const startY = (this.currentPointer && typeof this.currentPointer.y === 'number') ? this.currentPointer.y : targetY;
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+      let mechanism = hasCdp ? 'cdp_browser_level_input' : 'synthetic_dom_events';
+      const steps = hasCdp
+        ? Math.max(1, Math.min(options.steps || this.options.moveSteps || 6, 20))
+        : Math.max(1, Math.min(options.steps || 1, 2));
+      const stepDelayMs = hasCdp
+        ? Math.max(2, options.stepDelayMs || this.options.stepDelayMs || 15)
+        : 0;
+
+      for (let i = 1; i <= steps; i++) {
+        if (this.interrupted) {
+          this._hidePointerIndicator();
+          return { ok: false, reason: 'interrupted', cancelled: true };
+        }
+        const progress = i / steps;
+        const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+        const curX = Math.round(startX + (targetX - startX) * ease);
+        const curY = Math.round(startY + (targetY - startY) * ease);
+
+        this.currentPointer = { x: curX, y: curY };
+        if (typeof window !== 'undefined') window.__sleepwalker_pointer = this.currentPointer;
+        this._updatePointerIndicator(curX, curY, options.label || null, false);
+
+        if (hasCdp) {
+          try {
+            await window.__sleepwalker_cdp_input({ type: 'mouseMoved', x: curX, y: curY });
+          } catch (_e) {}
+        } else {
+          const eventInit = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            clientX: curX,
+            clientY: curY,
+            screenX: curX,
+            screenY: curY,
+            buttons: 0
+          };
+          const hit = (typeof document !== 'undefined' && typeof document.elementFromPoint === 'function')
+            ? document.elementFromPoint(curX, curY) || document.body
+            : null;
+          if (hit) {
+            hit.dispatchEvent(new PointerEvent('pointermove', eventInit));
+            hit.dispatchEvent(new MouseEvent('mousemove', eventInit));
+          }
+        }
+
+        if (stepDelayMs > 0 && i < steps) {
+          await new Promise((r) => setTimeout(r, stepDelayMs));
+        }
       }
 
-      if (options.settleMs) await new Promise(r => setTimeout(r, options.settleMs));
-      this._recordOp('movePointer', { x, y, mechanism });
-      return { ok: true, x, y, mechanism };
+      if (options.settleMs) await new Promise((r) => setTimeout(r, options.settleMs));
+      this._recordOp('movePointer', { x: targetX, y: targetY, mechanism });
+      return { ok: true, x: targetX, y: targetY, mechanism };
     }
 
     async hover(target, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
+
+      await this.movePointer(el, { steps: options.steps || 4, label: options.label || 'Hovering...' });
       const res = await this.executor.hover(el, options);
       if (res && res.ok) {
         this.currentPointer = { x: res.clientX, y: res.clientY };
+        if (typeof window !== 'undefined') window.__sleepwalker_pointer = this.currentPointer;
+        this._updatePointerIndicator(res.clientX, res.clientY, options.label || 'Hovering...', false);
       }
       this._recordOp('hover', {
         x: res && res.clientX,
@@ -1587,6 +1707,7 @@
     }
 
     async click(target, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
       await this.executor.scrollIntoViewIfNeeded(el);
@@ -1597,109 +1718,125 @@
       const clientX = Math.round(rect.left + rect.width / 2);
       const clientY = Math.round(rect.top + rect.height / 2);
       this.currentPointer = { x: clientX, y: clientY };
+      if (typeof window !== 'undefined') window.__sleepwalker_pointer = this.currentPointer;
+      this._updatePointerIndicator(clientX, clientY, options.label || 'Clicking...', true);
 
       let mechanism = 'synthetic_events_and_dom_methods';
-      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+
+      if (hasCdp) {
         try {
           await window.__sleepwalker_cdp_input({ type: 'mouseClick', x: clientX, y: clientY, button: 'left', clickCount: 1 });
           mechanism = 'cdp_browser_level_input';
-          await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
-          this._recordOp('click', { x: clientX, y: clientY, mechanism });
-          return { ok: true, clientX, clientY, mechanism };
         } catch (_e) {}
       }
 
-      this.executor.dispatchGestureTrain(el);
-      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      if (mechanism !== 'cdp_browser_level_input') {
+        this.executor.dispatchGestureTrain(el);
+      }
+
+      await new Promise((r) => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      this._updatePointerIndicator(clientX, clientY, null, false);
       this._recordOp('click', { x: clientX, y: clientY, mechanism });
       return { ok: true, clientX, clientY, mechanism };
     }
 
     async doubleClick(target, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
       await this.executor.scrollIntoViewIfNeeded(el);
       const gate = await this.executor.validateActionability(el);
       if (!gate.ok) return { ok: false, reason: gate.reason };
 
-      const rect = el.getBoundingClientRect();
-      const clientX = Math.round(rect.left + rect.width / 2);
-      const clientY = Math.round(rect.top + rect.height / 2);
-      this.currentPointer = { x: clientX, y: clientY };
+      const moveRes = await this.movePointer(el, { steps: 5, label: 'Double Clicking...' });
+      if (!moveRes.ok) return moveRes;
+
+      const { x: clientX, y: clientY } = this.currentPointer;
+      this._updatePointerIndicator(clientX, clientY, 'Double Clicking...', true);
 
       let mechanism = 'synthetic_events_and_dom_methods';
-      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+
+      if (hasCdp) {
         try {
           await window.__sleepwalker_cdp_input({ type: 'mouseDoubleClick', x: clientX, y: clientY, button: 'left' });
           mechanism = 'cdp_browser_level_input';
-          await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
-          this._recordOp('doubleClick', { x: clientX, y: clientY, mechanism });
-          return { ok: true, clientX, clientY, mechanism };
         } catch (_e) {}
       }
 
-      const eventInit = {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window,
-        clientX,
-        clientY,
-        detail: 1,
-        button: 0,
-        buttons: 1
-      };
-      this.executor.dispatchGestureTrain(el);
-      const dblInit = Object.assign({}, eventInit, { detail: 2 });
-      el.dispatchEvent(new PointerEvent('pointerdown', dblInit));
-      el.dispatchEvent(new MouseEvent('mousedown', dblInit));
-      el.dispatchEvent(new PointerEvent('pointerup', dblInit));
-      el.dispatchEvent(new MouseEvent('mouseup', dblInit));
-      el.dispatchEvent(new MouseEvent('click', dblInit));
-      el.dispatchEvent(new MouseEvent('dblclick', dblInit));
+      if (mechanism !== 'cdp_browser_level_input') {
+        const eventInit = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          clientX,
+          clientY,
+          detail: 1,
+          button: 0,
+          buttons: 1
+        };
+        this.executor.dispatchGestureTrain(el);
+        const dblInit = Object.assign({}, eventInit, { detail: 2 });
+        el.dispatchEvent(new PointerEvent('pointerdown', dblInit));
+        el.dispatchEvent(new MouseEvent('mousedown', dblInit));
+        el.dispatchEvent(new PointerEvent('pointerup', dblInit));
+        el.dispatchEvent(new MouseEvent('mouseup', dblInit));
+        el.dispatchEvent(new MouseEvent('click', dblInit));
+        el.dispatchEvent(new MouseEvent('dblclick', dblInit));
+      }
 
-      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      await new Promise((r) => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      this._updatePointerIndicator(clientX, clientY, null, false);
       this._recordOp('doubleClick', { x: clientX, y: clientY, mechanism });
       return { ok: true, clientX, clientY, mechanism };
     }
 
     async rightClick(target, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
       await this.executor.scrollIntoViewIfNeeded(el);
       const gate = await this.executor.validateActionability(el);
       if (!gate.ok) return { ok: false, reason: gate.reason };
 
-      const rect = el.getBoundingClientRect();
-      const clientX = Math.round(rect.left + rect.width / 2);
-      const clientY = Math.round(rect.top + rect.height / 2);
-      this.currentPointer = { x: clientX, y: clientY };
+      const moveRes = await this.movePointer(el, { steps: 5, label: 'Right Clicking...' });
+      if (!moveRes.ok) return moveRes;
+
+      const { x: clientX, y: clientY } = this.currentPointer;
+      this._updatePointerIndicator(clientX, clientY, 'Right Clicking...', true);
 
       let mechanism = 'synthetic_dom_events';
-      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+
+      if (hasCdp) {
         try {
           await window.__sleepwalker_cdp_input({ type: 'mouseClick', x: clientX, y: clientY, button: 'right', clickCount: 1 });
           mechanism = 'cdp_browser_level_input';
         } catch (_e) {}
       }
 
-      const eventInit = {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window,
-        clientX,
-        clientY,
-        button: 2,
-        buttons: 2
-      };
-      el.dispatchEvent(new PointerEvent('pointerdown', eventInit));
-      el.dispatchEvent(new MouseEvent('mousedown', eventInit));
-      el.dispatchEvent(new PointerEvent('pointerup', eventInit));
-      el.dispatchEvent(new MouseEvent('mouseup', eventInit));
-      el.dispatchEvent(new MouseEvent('contextmenu', eventInit));
+      if (mechanism !== 'cdp_browser_level_input') {
+        const eventInit = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          clientX,
+          clientY,
+          button: 2,
+          buttons: 2
+        };
+        el.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        el.dispatchEvent(new MouseEvent('mousedown', eventInit));
+        el.dispatchEvent(new PointerEvent('pointerup', eventInit));
+        el.dispatchEvent(new MouseEvent('mouseup', eventInit));
+        el.dispatchEvent(new MouseEvent('contextmenu', eventInit));
+      }
 
-      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      await new Promise((r) => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      this._updatePointerIndicator(clientX, clientY, null, false);
       this._recordOp('rightClick', { x: clientX, y: clientY, mechanism });
       return { ok: true, clientX, clientY, mechanism };
     }
@@ -1716,58 +1853,140 @@
     }
 
     async typeText(target, text, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
-      const res = await this.executor.type(el, text, options);
-      const mechanism = 'synthetic_events_and_dom_methods';
-      this._recordOp('typeText', { textLength: String(text || '').length, mechanism, ok: Boolean(res && res.ok) });
-      return Object.assign({}, res, { mechanism });
+      await this.executor.scrollIntoViewIfNeeded(el);
+
+      const str = String(text != null ? text : '');
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+      let mechanism = 'synthetic_events_and_dom_methods';
+
+      if (hasCdp) {
+        const clickRes = await this.click(el, { steps: 4, label: 'Focusing input...' });
+        if (!clickRes.ok && clickRes.cancelled) return clickRes;
+        if (typeof el.focus === 'function') el.focus();
+
+        try {
+          const keyDelay = Math.max(10, options.keyDelayMs || this.options.keyDelayMs || 25);
+          for (const char of str) {
+            if (this.interrupted) {
+              this._hidePointerIndicator();
+              return { ok: false, reason: 'interrupted', cancelled: true };
+            }
+            this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, `Typing: ${char}`);
+            await window.__sleepwalker_cdp_input({ type: 'keyPress', key: char });
+            await new Promise((r) => setTimeout(r, keyDelay));
+          }
+          mechanism = 'cdp_browser_level_input';
+        } catch (_e) {}
+
+        if (el.value !== undefined && !el.value.includes(str)) {
+          try {
+            el.value = '';
+            await window.__sleepwalker_cdp_input({ type: 'insertText', text: str });
+          } catch (_e) {}
+        }
+      }
+
+      if (el.value !== undefined && !el.value.includes(str)) {
+        await this.executor.type(el, str, options);
+      } else if (!hasCdp) {
+        await this.executor.type(el, str, options);
+      }
+
+      this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, null, false);
+      this._recordOp('typeText', { textLength: str.length, mechanism, ok: true });
+      return { ok: true, text: str, mechanism };
     }
 
     async pressKey(key, options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const activeEl = (typeof document !== 'undefined' && document.activeElement && document.activeElement !== document.body)
         ? document.activeElement
         : (typeof document !== 'undefined' ? document.body : null);
       if (!activeEl) return { ok: false, reason: 'no_active_element' };
 
       let mechanism = 'synthetic_dom_events';
-      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+
+      if (hasCdp) {
         try {
+          this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, `Key: ${key}`);
           await window.__sleepwalker_cdp_input({ type: 'keyPress', key });
           mechanism = 'cdp_browser_level_input';
+          await new Promise((r) => setTimeout(r, 30));
+          this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, null, false);
         } catch (_e) {}
       }
 
-      const keyInit = {
-        key,
-        code: key,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window,
-        ctrlKey: Boolean(options.ctrlKey || options.ctrl),
-        altKey: Boolean(options.altKey || options.alt),
-        shiftKey: Boolean(options.shiftKey || options.shift),
-        metaKey: Boolean(options.metaKey || options.meta)
-      };
-      activeEl.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-      activeEl.dispatchEvent(new KeyboardEvent('keypress', keyInit));
-      activeEl.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+      if (mechanism !== 'cdp_browser_level_input') {
+        const keyInit = {
+          key,
+          code: key,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          ctrlKey: Boolean(options.ctrlKey || options.ctrl),
+          altKey: Boolean(options.altKey || options.alt),
+          shiftKey: Boolean(options.shiftKey || options.shift),
+          metaKey: Boolean(options.metaKey || options.meta)
+        };
+        activeEl.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+        activeEl.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+        activeEl.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+      }
+
       this._recordOp('pressKey', { key, mechanism });
       return { ok: true, key, mechanism };
     }
 
+    async keyboardNavigate(target, keys = ['ArrowDown', 'Enter'], options = {}) {
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      await this.executor.scrollIntoViewIfNeeded(el);
+      if (typeof el.focus === 'function') el.focus();
+
+      let lastMech = 'accessible_keyboard_navigation';
+      for (const k of keys) {
+        if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
+        const res = await this.pressKey(k, options);
+        if (res && res.mechanism === 'cdp_browser_level_input') {
+          lastMech = 'cdp_browser_level_input';
+        }
+        await new Promise((r) => setTimeout(r, options.keyDelayMs || 50));
+      }
+      this._recordOp('keyboardNavigate', { keys, mechanism: lastMech });
+      return { ok: true, keys, mechanism: lastMech };
+    }
+
     async scroll(direction = 'down', options = {}) {
-      const mechanism = 'dom_method';
-      if (this.engine && typeof this.engine.scroll === 'function') {
-        const res = this.engine.scroll(direction, options);
-        this._recordOp('scroll', { dir: direction, mechanism });
-        return Object.assign({}, res, { mechanism });
-      }
+      if (this.interrupted) return { ok: false, reason: 'interrupted', cancelled: true };
       const dy = direction === 'up' ? -400 : 400;
-      if (typeof window !== 'undefined' && typeof window.scrollBy === 'function') {
-        window.scrollBy({ top: dy, behavior: 'instant' });
+      let mechanism = 'dom_method';
+      const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
+
+      if (hasCdp) {
+        try {
+          const { x, y } = this.currentPointer;
+          await window.__sleepwalker_cdp_input({ type: 'mouseWheel', x, y, deltaX: 0, deltaY: dy });
+          mechanism = 'cdp_browser_level_input';
+        } catch (_e) {}
       }
+
+      if (mechanism !== 'cdp_browser_level_input') {
+        if (this.engine && typeof this.engine.scroll === 'function') {
+          const res = this.engine.scroll(direction, options);
+          this._recordOp('scroll', { dir: direction, mechanism });
+          return Object.assign({}, res, { mechanism });
+        }
+        if (typeof window !== 'undefined' && typeof window.scrollBy === 'function') {
+          window.scrollBy({ top: dy, behavior: 'instant' });
+        }
+      }
+
       this._recordOp('scroll', { dir: direction, mechanism });
       return { ok: true, dir: direction, mechanism };
     }
@@ -1965,31 +2184,41 @@
         };
       }
 
+      if (this.inputController && typeof this.inputController.resetInterrupt === 'function') {
+        this.inputController.resetInterrupt();
+      }
       const baseline = this.verifier.captureBaseline(targetEl);
 
-      const execResult = await this.executor.click(targetEl);
+      const execResult = (this.inputController && typeof this.inputController.click === 'function' && !options.syntheticOnly)
+        ? await this.inputController.click(targetEl, options)
+        : await this.executor.click(targetEl, options);
       this.invalidateCache();
       if (!execResult.ok) {
         baseline.stopObserver();
         return { status: 'FAILED', verified: false, reason: execResult.reason };
       }
 
+      let res;
       if (options.isNavigation || targetEl.tagName === 'A' || targetEl.closest('a')) {
-        return this.verifier.verifyNavigation(baseline, targetEl, options);
+        res = await this.verifier.verifyNavigation(baseline, targetEl, options);
       } else if (options.isTab || targetEl.getAttribute('role') === 'tab') {
-        return this.verifier.verifyTabSwitch(baseline, targetEl, options);
+        res = await this.verifier.verifyTabSwitch(baseline, targetEl, options);
       } else if (options.isMenu || targetEl.hasAttribute('aria-expanded')) {
-        return this.verifier.verifyMenuExpanded(baseline, targetEl, options);
+        res = await this.verifier.verifyMenuExpanded(baseline, targetEl, options);
+      } else {
+        baseline.stopObserver();
+        res = {
+          status: 'SUCCESS',
+          verified: true,
+          action: 'click',
+          targetTag: targetEl.tagName,
+          mutations: baseline.baseline.mutationCount
+        };
       }
-
-      baseline.stopObserver();
-      return {
-        status: 'SUCCESS',
-        verified: true,
-        action: 'click',
-        targetTag: targetEl.tagName,
-        mutations: baseline.baseline.mutationCount
-      };
+      if (execResult && execResult.mechanism) {
+        res.mechanism = execResult.mechanism;
+      }
+      return res;
     }
 
     async type(targetOrQuery, text, options = {}) {
@@ -2030,8 +2259,13 @@
         return { status: 'SENSITIVE_SKIPPED', verified: false, reason: 'sensitive_field_privacy_gate' };
       }
 
+      if (this.inputController && typeof this.inputController.resetInterrupt === 'function') {
+        this.inputController.resetInterrupt();
+      }
       const baseline = this.verifier.captureBaseline(targetEl);
-      const execResult = await this.executor.type(targetEl, text, options);
+      const execResult = (this.inputController && typeof this.inputController.typeText === 'function' && !options.syntheticOnly)
+        ? await this.inputController.typeText(targetEl, text, options)
+        : await this.executor.type(targetEl, text, options);
       this.invalidateCache();
       if (!execResult.ok) {
         baseline.stopObserver();
@@ -2039,6 +2273,9 @@
       }
 
       if (options.submit) {
+        if (this.inputController && execResult.mechanism === 'cdp_browser_level_input') {
+          await this.inputController.pressKey('Enter');
+        }
         const navRes = await this.verifier.verifyNavigation(baseline, targetEl, Object.assign({ timeoutMs: options.timeoutMs || 1800 }, options));
         if (navRes.verified || String(targetEl.value || '') === String(text || '')) {
           return {
@@ -2048,9 +2285,11 @@
             value: String(targetEl.value || text || ''),
             navigated: Boolean(navRes.verified),
             url: window.location.href,
+            mechanism: execResult.mechanism || 'synthetic_events_and_dom_methods',
             details: navRes.verified ? navRes.details : 'Input value committed and submitted.'
           };
         }
+        if (execResult.mechanism) navRes.mechanism = execResult.mechanism;
         return navRes;
       }
 
@@ -2058,6 +2297,7 @@
       this.observe(options.root || document, { force: true });
       return {
         ...verifyRes,
+        mechanism: execResult.mechanism || 'synthetic_events_and_dom_methods',
         targetLabel: sanitizeUntrustedLabel(this.observer.computeAccessibleName(targetEl), 80)
       };
     }
@@ -2991,6 +3231,9 @@
     // Observe -> Plan -> Check Permissions -> Act -> Wait -> Verify -> Recover
     // =========================================================================
     async executeGoal(goalText, options = {}) {
+      if (this.inputController && typeof this.inputController.resetInterrupt === 'function') {
+        this.inputController.resetInterrupt();
+      }
       const maxSteps = options.maxSteps || 6;
       const stepLog = [];
       const intermediateStates = [];
@@ -3002,6 +3245,7 @@
       const isCancelled = () => {
         if (options.signal && options.signal.aborted) return true;
         if (typeof options.isCancelled === 'function' && options.isCancelled()) return true;
+        if (this.inputController && this.inputController.interrupted) return true;
         if (typeof window !== 'undefined' && window.__SLEEPWALKER_INSTANCE__ && window.__SLEEPWALKER_INSTANCE__.taskLifecycle && window.__SLEEPWALKER_INSTANCE__.taskLifecycle.state === 'CANCELLED') {
           return true;
         }
@@ -3414,6 +3658,12 @@
       }
       if (act === 'select') {
         return this.select(step.target, step.value || '', opts);
+      }
+      if (act === 'scroll') {
+        return this.scroll(step.direction || 'down', opts);
+      }
+      if (act === 'key' || act === 'press') {
+        return this.inputController ? this.inputController.pressKey(step.key || 'Enter', opts) : { ok: true };
       }
       return { ok: false, reason: 'unrecognized_goal_action' };
     }

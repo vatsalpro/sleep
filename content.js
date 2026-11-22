@@ -104,6 +104,8 @@
       this.navigator = window.SleepwalkerNavigator ? new window.SleepwalkerNavigator(this) : null;
       this.browserEngine = window.BrowserEngine ? new window.BrowserEngine() : null;
       this.useRebuiltBrowserEngine = Boolean(typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true); // Disabled by default for production safety; opt-in via Dev setting or config flag
+      this.genuineInputEnabled = Boolean(typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_GENUINE_INPUT__ === true);
+      this._initCdpBridge();
       this.rolloutTelemetry = {
         successfulActions: 0,
         failedActions: 0,
@@ -905,6 +907,9 @@
       }
       if (this.teach && typeof this.teach.cancelTeaching === 'function' && this.teach.isTeachingActive && this.teach.isTeachingActive()) {
         this.teach.cancelTeaching('user_cancelled');
+      }
+      if (this.browserEngine && this.browserEngine.inputController && typeof this.browserEngine.inputController.interrupt === 'function') {
+        this.browserEngine.inputController.interrupt();
       }
 
       this.setAssistantReply('Cancelled.');
@@ -5409,6 +5414,11 @@
               d.sleepwalker_use_rebuilt_browser_engine === true ||
               (typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_REBUILT_ENGINE__ === true)
             );
+            this.genuineInputEnabled = Boolean(
+              d.sleepwalker_genuine_input_enabled === true ||
+              (typeof window !== 'undefined' && window.__SLEEPWALKER_ENABLE_GENUINE_INPUT__ === true)
+            );
+            this._initCdpBridge();
             if (this.memory) {
               this.memory.privacy.memoryPaused = Boolean(d.sleepwalker_memory_paused);
               this.memory.privacy.disablePageAnalysis = Boolean(d.sleepwalker_disable_page_analysis);
@@ -5433,6 +5443,9 @@
             if (area !== 'local') return;
             if (changes.sleepwalker_use_rebuilt_browser_engine) {
               this.useRebuiltBrowserEngine = Boolean(changes.sleepwalker_use_rebuilt_browser_engine.newValue === true);
+            }
+            if (changes.sleepwalker_genuine_input_enabled) {
+              this.setGenuineInputEnabled(changes.sleepwalker_genuine_input_enabled.newValue === true, false);
             }
             if (!this.memory) return;
             if (changes.sleepwalker_memory_paused) this.memory.privacy.memoryPaused = Boolean(changes.sleepwalker_memory_paused.newValue);
@@ -5473,6 +5486,58 @@
         chrome.storage.local.set({ sleepwalker_use_rebuilt_browser_engine: this.useRebuiltBrowserEngine });
       }
       return this.useRebuiltBrowserEngine;
+    }
+
+    _initCdpBridge() {
+      if (typeof window === 'undefined') return;
+      if (this.genuineInputEnabled) {
+        window.__sleepwalker_cdp_input = async (payload) => {
+          if (!this.genuineInputEnabled) {
+            throw new Error('Genuine browser-level input is disabled');
+          }
+          return new Promise((resolve, reject) => {
+            if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+              return reject(new Error('chrome.runtime messaging unavailable'));
+            }
+            chrome.runtime.sendMessage({
+              type: 'SLEEPWALKER_CDP_INPUT',
+              action: payload
+            }, (res) => {
+              if (chrome.runtime && chrome.runtime.lastError) {
+                return reject(new Error(chrome.runtime.lastError.message));
+              }
+              if (!res || !res.ok) {
+                return reject(new Error((res && res.error) || 'CDP input failed'));
+              }
+              resolve(res.result || {});
+            });
+          });
+        };
+      } else {
+        if (window.__sleepwalker_cdp_input && !window.__sw_cdp_bridge) {
+          try { delete window.__sleepwalker_cdp_input; } catch (_e) { window.__sleepwalker_cdp_input = null; }
+        }
+      }
+    }
+
+    setGenuineInputEnabled(enabled, persist = false) {
+      this.genuineInputEnabled = Boolean(enabled);
+      this._initCdpBridge();
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        if (this.genuineInputEnabled) {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_ATTACH_DEBUGGER' }, () => {
+            void (chrome.runtime && chrome.runtime.lastError);
+          });
+        } else {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_DETACH_DEBUGGER' }, () => {
+            void (chrome.runtime && chrome.runtime.lastError);
+          });
+        }
+      }
+      if (persist && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ sleepwalker_genuine_input_enabled: this.genuineInputEnabled });
+      }
+      return this.genuineInputEnabled;
     }
 
     _recordRolloutEvent(evt = {}) {

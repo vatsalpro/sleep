@@ -1018,6 +1018,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((err) => sendResponse({ status: 'vision_failed', usedVision: false, error: (err && err.message) || 'Visual grounding failed.' }));
     return true;
   }
+
+  // Phase 12A: Genuine Browser-Level Input Bridge (Chrome Debugger Protocol)
+  if (message.type === 'SLEEPWALKER_ATTACH_DEBUGGER') {
+    const tabId = (sender && sender.tab && sender.tab.id) || message.tabId;
+    attachTabDebugger(tabId)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_DETACH_DEBUGGER') {
+    const tabId = (sender && sender.tab && sender.tab.id) || message.tabId;
+    detachTabDebugger(tabId)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_CDP_INPUT') {
+    const tabId = (sender && sender.tab && sender.tab.id) || message.tabId;
+    dispatchCdpInputAction(tabId, message.action || message.payload || {})
+      .then((res) => sendResponse({ ok: true, result: res }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_DEBUGGER_STATUS') {
+    const tabId = (sender && sender.tab && sender.tab.id) || message.tabId;
+    sendResponse({ ok: true, attached: attachedDebuggerTabs.has(tabId) });
+    return true;
+  }
 });
 
 /**
@@ -1556,3 +1587,274 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onStartup)
   });
 }
 reconcileReminderAlarms().catch(() => {});
+
+// =============================================================================
+// Phase 12A: Genuine Browser-Level Input Bridge (Chrome Debugger Protocol)
+// Provides trusted Input.dispatchMouseEvent and Input.dispatchKeyEvent
+// =============================================================================
+const attachedDebuggerTabs = new Set();
+
+if (typeof chrome !== 'undefined' && chrome.debugger && chrome.debugger.onDetach) {
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    if (source && source.tabId) {
+      attachedDebuggerTabs.delete(source.tabId);
+      console.log(`[Sleepwalker CDP] Debugger detached from tab ${source.tabId}: ${reason}`);
+    }
+  });
+}
+
+if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    attachedDebuggerTabs.delete(tabId);
+  });
+}
+
+async function attachTabDebugger(tabId) {
+  if (!tabId) throw new Error('Missing tabId for debugger attach');
+  if (attachedDebuggerTabs.has(tabId)) {
+    return { ok: true, attached: true, alreadyAttached: true };
+  }
+  if (!chrome.debugger || typeof chrome.debugger.attach !== 'function') {
+    throw new Error('chrome.debugger API is not available (check manifest permissions)');
+  }
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, '1.3', () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        console.warn(`[Sleepwalker CDP] attach error on tab ${tabId}:`, err.message);
+        return reject(new Error(err.message));
+      }
+      attachedDebuggerTabs.add(tabId);
+      console.log(`[Sleepwalker CDP] Debugger attached successfully to tab ${tabId}`);
+      resolve({ ok: true, attached: true });
+    });
+  });
+}
+
+async function detachTabDebugger(tabId) {
+  if (!tabId || !attachedDebuggerTabs.has(tabId)) {
+    return { ok: true, detached: false };
+  }
+  return new Promise((resolve) => {
+    chrome.debugger.detach({ tabId }, () => {
+      attachedDebuggerTabs.delete(tabId);
+      resolve({ ok: true, detached: true });
+    });
+  });
+}
+
+function sendDebuggerCommand(tabId, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    if (!attachedDebuggerTabs.has(tabId)) {
+      return reject(new Error(`Debugger is not attached to tab ${tabId}`));
+    }
+    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        return reject(new Error(err.message));
+      }
+      resolve(result || {});
+    });
+  });
+}
+
+function getKeyCodeInfo(key) {
+  const map = {
+    'Enter': { code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
+    'Escape': { code: 'Escape', windowsVirtualKeyCode: 27 },
+    'Tab': { code: 'Tab', windowsVirtualKeyCode: 9 },
+    'ArrowDown': { code: 'ArrowDown', windowsVirtualKeyCode: 40 },
+    'ArrowUp': { code: 'ArrowUp', windowsVirtualKeyCode: 38 },
+    'ArrowLeft': { code: 'ArrowLeft', windowsVirtualKeyCode: 37 },
+    'ArrowRight': { code: 'ArrowRight', windowsVirtualKeyCode: 39 },
+    'Backspace': { code: 'Backspace', windowsVirtualKeyCode: 8 },
+    'Delete': { code: 'Delete', windowsVirtualKeyCode: 46 },
+    'Space': { code: 'Space', windowsVirtualKeyCode: 32, text: ' ' },
+    ' ': { code: 'Space', windowsVirtualKeyCode: 32, text: ' ' },
+    '.': { code: 'Period', windowsVirtualKeyCode: 190, text: '.' },
+    ',': { code: 'Comma', windowsVirtualKeyCode: 188, text: ',' },
+    '/': { code: 'Slash', windowsVirtualKeyCode: 191, text: '/' },
+    ';': { code: 'Semicolon', windowsVirtualKeyCode: 186, text: ';' },
+    '=': { code: 'Equal', windowsVirtualKeyCode: 187, text: '=' },
+    '-': { code: 'Minus', windowsVirtualKeyCode: 189, text: '-' },
+    '[': { code: 'BracketLeft', windowsVirtualKeyCode: 219, text: '[' },
+    ']': { code: 'BracketRight', windowsVirtualKeyCode: 221, text: ']' },
+    '\'': { code: 'Quote', windowsVirtualKeyCode: 222, text: '\'' },
+    '`': { code: 'Backquote', windowsVirtualKeyCode: 192, text: '`' },
+    '\\': { code: 'Backslash', windowsVirtualKeyCode: 220, text: '\\' },
+    '@': { code: 'Digit2', windowsVirtualKeyCode: 50, text: '@' }
+  };
+  if (map[key]) return map[key];
+  if (key && key.length === 1) {
+    const isAlpha = /^[a-zA-Z]$/.test(key);
+    const isDigit = /^[0-9]$/.test(key);
+    const code = isAlpha ? `Key${key.toUpperCase()}` : (isDigit ? `Digit${key}` : '');
+    const windowsVirtualKeyCode = isAlpha ? key.toUpperCase().charCodeAt(0) : (isDigit ? key.charCodeAt(0) : 0);
+    return { code, windowsVirtualKeyCode, text: key };
+  }
+  return { code: key, windowsVirtualKeyCode: 0 };
+}
+
+async function dispatchCdpInputAction(tabId, action = {}) {
+  if (!attachedDebuggerTabs.has(tabId)) {
+    await attachTabDebugger(tabId);
+  }
+
+  const type = action.type;
+  const modifiers = Number(action.modifiers || 0);
+
+  if (type === 'mouseMoved') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x,
+      y,
+      modifiers
+    });
+  }
+
+  if (type === 'mousePressed') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    const button = action.button || 'left';
+    const clickCount = Number(action.clickCount) || 1;
+    return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button,
+      clickCount,
+      modifiers
+    });
+  }
+
+  if (type === 'mouseReleased') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    const button = action.button || 'left';
+    const clickCount = Number(action.clickCount) || 1;
+    return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button,
+      clickCount,
+      modifiers
+    });
+  }
+
+  if (type === 'mouseClick') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    const button = action.button || 'left';
+    const clickCount = Number(action.clickCount) || 1;
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount, modifiers });
+    await new Promise((r) => setTimeout(r, 40));
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount, modifiers });
+    return { ok: true };
+  }
+
+  if (type === 'mouseDoubleClick') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    const button = action.button || 'left';
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount: 1, modifiers });
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount: 1, modifiers });
+    await new Promise((r) => setTimeout(r, 40));
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, clickCount: 2, modifiers });
+    await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount: 2, modifiers });
+    return { ok: true };
+  }
+
+  if (type === 'mouseWheel') {
+    const x = Math.round(Number(action.x) || 0);
+    const y = Math.round(Number(action.y) || 0);
+    const deltaX = Math.round(Number(action.deltaX) || 0);
+    const deltaY = Math.round(Number(action.deltaY) || 0);
+    return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX,
+      deltaY,
+      modifiers
+    });
+  }
+
+  if (type === 'keyDown' || type === 'keyUp') {
+    const key = action.key || '';
+    const info = getKeyCodeInfo(key);
+    const params = {
+      type,
+      key,
+      code: action.code || info.code || key,
+      windowsVirtualKeyCode: action.windowsVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      nativeVirtualKeyCode: action.nativeVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      modifiers
+    };
+    if (info.text && type === 'keyDown') params.text = info.text;
+    return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', params);
+  }
+
+  if (type === 'keyPress') {
+    const key = action.key || '';
+    const info = getKeyCodeInfo(key);
+    const downParams = {
+      type: 'keyDown',
+      key,
+      code: action.code || info.code || key,
+      windowsVirtualKeyCode: action.windowsVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      nativeVirtualKeyCode: action.nativeVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      modifiers
+    };
+    if (info.text) downParams.text = info.text;
+    await sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', downParams);
+    await new Promise((r) => setTimeout(r, 25));
+    const upParams = {
+      type: 'keyUp',
+      key,
+      code: action.code || info.code || key,
+      windowsVirtualKeyCode: action.windowsVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      nativeVirtualKeyCode: action.nativeVirtualKeyCode || info.windowsVirtualKeyCode || 0,
+      modifiers
+    };
+    await sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', upParams);
+    return { ok: true };
+  }
+
+  if (type === 'insertText') {
+    return sendDebuggerCommand(tabId, 'Input.insertText', { text: String(action.text || '') });
+  }
+
+  if (type === 'typeText') {
+    const text = String(action.text || '');
+    const delay = Math.max(10, Number(action.delayMs) || 30);
+    for (const char of text) {
+      const info = getKeyCodeInfo(char);
+      await sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: char,
+        text: char,
+        unmodifiedText: char,
+        code: info.code,
+        windowsVirtualKeyCode: info.windowsVirtualKeyCode,
+        modifiers
+      });
+      await new Promise((r) => setTimeout(r, Math.round(delay / 2)));
+      await sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: char,
+        code: info.code,
+        windowsVirtualKeyCode: info.windowsVirtualKeyCode,
+        modifiers
+      });
+      await new Promise((r) => setTimeout(r, Math.round(delay / 2)));
+    }
+    return { ok: true, charactersTyped: text.length };
+  }
+
+  throw new Error(`Unsupported CDP input action type: ${type}`);
+}

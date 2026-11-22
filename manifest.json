@@ -8,7 +8,8 @@
     "scripting",
     "storage",
     "offscreen",
-    "alarms"
+    "alarms",
+    "debugger"
   ],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*",

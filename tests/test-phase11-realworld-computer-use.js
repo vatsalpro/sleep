@@ -370,8 +370,9 @@ async function runPhase11Validation() {
               const button = payload.button || 'left';
               const clickCount = payload.clickCount || 1;
               await callCdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: payload.x, y: payload.y });
-              await callCdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: payload.x, y: payload.y, button, clickCount });
-              await callCdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: payload.x, y: payload.y, button, clickCount });
+              await callCdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: payload.x, y: payload.y, button, clickCount, buttons: 1 });
+              await new Promise(r => setTimeout(r, 40));
+              await callCdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: payload.x, y: payload.y, button, clickCount, buttons: 0 });
             } else if (payload.type === 'mouseDoubleClick') {
               await callCdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: payload.x, y: payload.y });
               await callCdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: payload.x, y: payload.y, button: 'left', clickCount: 1 });
