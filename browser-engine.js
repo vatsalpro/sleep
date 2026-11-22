@@ -200,7 +200,7 @@
 
     computeParentSection(el) {
       if (!el) return '';
-      let cur = el.parentElement;
+      let cur = el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
       while (cur && cur !== document.body && cur !== document.documentElement) {
         if (cur.getAttribute('aria-label')) return cur.getAttribute('aria-label').trim();
         const labelledBy = cur.getAttribute('aria-labelledby');
@@ -235,7 +235,7 @@
           if (cur.id) return cur.id;
         }
 
-        cur = cur.parentElement;
+        cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
       }
       return '';
     }
@@ -260,6 +260,14 @@
       while (stack.length > 0) {
         const node = stack.pop();
         if (node.nodeType === Node.ELEMENT_NODE) {
+          if (
+            node.id === 'sleepwalker-ui-host' ||
+            node.id === 'sleepwalker-host' ||
+            node.id === 'sleepwalker-candidate-overlay-root' ||
+            node.getAttribute('data-sleepwalker-ui') === '1'
+          ) {
+            continue;
+          }
           callback(node);
           if (node.shadowRoot) {
             stack.push(node.shadowRoot);
@@ -537,17 +545,34 @@
         parentContainer.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, eventInit, { bubbles: false })));
       }
 
-      try {
-        el.classList.add('is-hovered', 'sw-hovered');
-        if (parentContainer) parentContainer.classList.add('is-hovered', 'sw-hovered', 'open');
-      } catch (_e) {}
+      if (!options.pureHoverOnly) {
+        try {
+          el.classList.add('is-hovered', 'sw-hovered');
+          if (parentContainer) parentContainer.classList.add('is-hovered', 'sw-hovered', 'open');
+        } catch (_e) {}
+      }
 
-      if (typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_hover === 'function') {
-        try { await window.__sleepwalker_cdp_hover(clientX, clientY); } catch (_e) {}
+      let mechanism = 'synthetic_dom_events';
+      if (!options.syntheticOnly && typeof window !== 'undefined') {
+        if (typeof window.__sleepwalker_cdp_input === 'function') {
+          try {
+            await window.__sleepwalker_cdp_input({ type: 'mouseMoved', x: clientX, y: clientY });
+            mechanism = 'cdp_browser_level_input';
+          } catch (_e) {}
+        } else if (typeof window.__sleepwalker_cdp_hover === 'function') {
+          try {
+            await window.__sleepwalker_cdp_hover(clientX, clientY);
+            mechanism = 'cdp_browser_level_input';
+          } catch (_e) {}
+        }
       }
 
       await new Promise(r => setTimeout(r, options.settleDelayMs || this.options.settleDelayMs || 60));
-      return { ok: true, clientX, clientY };
+      const nativeHoverMatched = Boolean(
+        (el.matches && el.matches(':hover')) ||
+        (parentContainer && parentContainer.matches && parentContainer.matches(':hover'))
+      );
+      return { ok: true, clientX, clientY, mechanism, nativeHoverMatched };
     }
 
     async keyboardActivate(el, key = 'Enter', options = {}) {
@@ -1257,13 +1282,50 @@
       this.landmarks = [];
       let seq = 0;
 
-      const landmarkEls = Array.from(root.querySelectorAll('nav, [role="navigation"], header, [role="banner"], [role="menubar"]'));
+      // Collect root + accessible open ShadowRoots (excluding Sleepwalker's own UI hosts)
+      const queryRoots = [root];
+      const collectShadowRoots = (startNode) => {
+        if (!startNode) return;
+        const stack = [startNode];
+        while (stack.length > 0) {
+          const n = stack.pop();
+          if (!n) continue;
+          if (n.nodeType === 1) {
+            if (
+              n.id === 'sleepwalker-ui-host' ||
+              n.id === 'sleepwalker-host' ||
+              n.id === 'sleepwalker-candidate-overlay-root' ||
+              n.getAttribute('data-sleepwalker-ui') === '1'
+            ) {
+              continue;
+            }
+            if (n.shadowRoot && !queryRoots.includes(n.shadowRoot)) {
+              queryRoots.push(n.shadowRoot);
+              stack.push(n.shadowRoot);
+            }
+          }
+          if (n.children) {
+            for (let i = n.children.length - 1; i >= 0; i--) {
+              stack.push(n.children[i]);
+            }
+          }
+        }
+      };
+      collectShadowRoots(root === document ? document.body : root);
+
+      const landmarkEls = [];
+      queryRoots.forEach(qr => {
+        if (qr && typeof qr.querySelectorAll === 'function') {
+          landmarkEls.push(...Array.from(qr.querySelectorAll('nav, [role="navigation"], header, [role="banner"], [role="menubar"]')));
+        }
+      });
       landmarkEls.forEach(lEl => {
         const name = this.getNodeName(lEl);
         this.landmarks.push({
           element: lEl,
           role: lEl.getAttribute('role') || lEl.tagName.toLowerCase(),
-          name
+          name,
+          inShadowDom: Boolean(lEl.getRootNode && lEl.getRootNode() !== document)
         });
       });
 
@@ -1315,6 +1377,7 @@
             navigationLink: split ? split.mainLink : (trigger.tagName === 'A' ? trigger : null),
             interactionMethod,
             isExpanded,
+            inShadowDom: Boolean(trigger.getRootNode && trigger.getRootNode() !== document),
             boundingBox: {
               x: Math.round(rect.x),
               y: Math.round(rect.y),
@@ -1335,7 +1398,12 @@
         return nodeList;
       };
 
-      const allContainers = Array.from(root.querySelectorAll('nav, [role="navigation"], [role="menubar"], [role="menu"], .navbar, .menu-group'));
+      const allContainers = [];
+      queryRoots.forEach(qr => {
+        if (qr && typeof qr.querySelectorAll === 'function') {
+          allContainers.push(...Array.from(qr.querySelectorAll('nav, [role="navigation"], [role="menubar"], [role="menu"], .navbar, .menu-group')));
+        }
+      });
       const menuContainers = allContainers.filter(mc => !allContainers.some(other => other !== mc && other.contains(mc)));
       if (menuContainers.length > 0) {
         menuContainers.forEach(mc => {
@@ -1344,6 +1412,12 @@
       } else {
         parseContainer(root === document ? document.body : root, null, 0);
       }
+
+      this.url = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+      this.title = (root && root.title) || (typeof document !== 'undefined' ? document.title : '');
+      this.timestamp = Date.now();
+      this.buildVersion = (this.buildVersion || 0) + 1;
+      this.shadowRootCount = Math.max(0, queryRoots.length - 1);
 
       return this.nodes;
     }
@@ -1362,6 +1436,70 @@
         keyDelayMs: 30
       }, options);
       this.currentPointer = { x: 0, y: 0 };
+      this.operationHistory = [];
+    }
+
+    inspectMechanisms() {
+      const hasCdpInput = Boolean(typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function');
+      const hasCdpHover = Boolean(typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_hover === 'function');
+      return {
+        cdpInputBridgeActive: hasCdpInput,
+        cdpHoverBridgeActive: hasCdpHover,
+        operations: {
+          movePointer: {
+            contentScriptDefault: 'DOM getBoundingClientRect + scrollIntoViewIfNeeded (window.scrollTo) + synthetic PointerEvent("pointermove") & MouseEvent("mousemove")',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseMoved", x, y })',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_dom_events'
+          },
+          hover: {
+            contentScriptDefault: 'DOM scrollIntoViewIfNeeded + synthetic pointerover/mouseover/pointerenter/mouseenter/pointermove/mousemove + CSS class fallback (.is-hovered, .sw-hovered, .open)',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseMoved", x, y }) triggering native CSS :hover pseudo-class',
+            activeMode: (hasCdpInput || hasCdpHover) ? 'cdp_browser_level_input' : 'synthetic_dom_events'
+          },
+          click: {
+            contentScriptDefault: 'DOM scrollIntoViewIfNeeded + validateActionability + synthetic pointerover/mouseover/pointerdown/mousedown/pointerup/mouseup + DOM el.focus() & el.click()',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent(mouseMoved + mousePressed + mouseReleased) + synthetic/DOM fallback',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_events_and_dom_methods'
+          },
+          doubleClick: {
+            contentScriptDefault: 'dispatchGestureTrain + synthetic pointerdown/mousedown/pointerup/mouseup/click/dblclick (detail=2)',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent (clickCount=1, clickCount=2) + synthetic dblclick',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_events_and_dom_methods'
+          },
+          rightClick: {
+            contentScriptDefault: 'Synthetic pointerdown/mousedown/pointerup/mouseup/contextmenu (button=2, buttons=2)',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent (button="right") + synthetic contextmenu',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_dom_events'
+          },
+          focus: {
+            contentScriptDefault: 'DOM el.focus()',
+            cdpWhenAttached: 'DOM el.focus()',
+            activeMode: 'dom_method'
+          },
+          typeText: {
+            contentScriptDefault: 'DOM el.focus() + el.value assignment + synthetic FocusEvent("focus"), InputEvent("beforeinput"), InputEvent("input"), Event("change"), form.requestSubmit()',
+            cdpWhenAttached: 'DOM focus + CDP Input.insertText / keyDown-keyUp + DOM input/change verification',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input_and_dom' : 'synthetic_events_and_dom_methods'
+          },
+          pressKey: {
+            contentScriptDefault: 'Synthetic KeyboardEvent("keydown"), KeyboardEvent("keypress"), KeyboardEvent("keyup") on document.activeElement',
+            cdpWhenAttached: 'CDP Input.dispatchKeyEvent({ type: "keyDown" / "keyUp", key })',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input' : 'synthetic_dom_events'
+          },
+          scroll: {
+            contentScriptDefault: 'DOM window.scrollBy / element.scrollBy ({ behavior: "instant" })',
+            cdpWhenAttached: 'CDP Input.dispatchMouseEvent({ type: "mouseWheel", deltaX, deltaY }) or DOM scrollBy',
+            activeMode: hasCdpInput ? 'cdp_browser_level_input_or_dom' : 'dom_method'
+          }
+        }
+      };
+    }
+
+    _recordOp(op, details) {
+      const entry = Object.assign({ op, timestamp: Date.now() }, details);
+      this.operationHistory.push(entry);
+      if (this.operationHistory.length > 50) this.operationHistory.shift();
+      return entry;
     }
 
     _resolveTargetElement(target) {
@@ -1374,6 +1512,9 @@
         } catch (_e) {}
         if (this.engine && typeof this.engine.locate === 'function') {
           const loc = this.engine.locate(target);
+          if (loc && loc.target) {
+            return loc.target;
+          }
           if (loc && loc.candidate && loc.candidate.domNode) {
             return loc.candidate.domNode;
           }
@@ -1415,8 +1556,18 @@
         hit.dispatchEvent(new PointerEvent('pointermove', eventInit));
         hit.dispatchEvent(new MouseEvent('mousemove', eventInit));
       }
+
+      let mechanism = 'synthetic_dom_events';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'mouseMoved', x, y });
+          mechanism = 'cdp_browser_level_input';
+        } catch (_e) {}
+      }
+
       if (options.settleMs) await new Promise(r => setTimeout(r, options.settleMs));
-      return { ok: true, x, y };
+      this._recordOp('movePointer', { x, y, mechanism });
+      return { ok: true, x, y, mechanism };
     }
 
     async hover(target, options = {}) {
@@ -1426,13 +1577,42 @@
       if (res && res.ok) {
         this.currentPointer = { x: res.clientX, y: res.clientY };
       }
+      this._recordOp('hover', {
+        x: res && res.clientX,
+        y: res && res.clientY,
+        mechanism: (res && res.mechanism) || 'synthetic_dom_events',
+        nativeHoverMatched: Boolean(res && res.nativeHoverMatched)
+      });
       return res;
     }
 
     async click(target, options = {}) {
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
-      return this.executor.click(el, options);
+      await this.executor.scrollIntoViewIfNeeded(el);
+      const gate = await this.executor.validateActionability(el);
+      if (!gate.ok) return { ok: false, reason: gate.reason };
+
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+      this.currentPointer = { x: clientX, y: clientY };
+
+      let mechanism = 'synthetic_events_and_dom_methods';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'mouseClick', x: clientX, y: clientY, button: 'left', clickCount: 1 });
+          mechanism = 'cdp_browser_level_input';
+          await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+          this._recordOp('click', { x: clientX, y: clientY, mechanism });
+          return { ok: true, clientX, clientY, mechanism };
+        } catch (_e) {}
+      }
+
+      this.executor.dispatchGestureTrain(el);
+      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      this._recordOp('click', { x: clientX, y: clientY, mechanism });
+      return { ok: true, clientX, clientY, mechanism };
     }
 
     async doubleClick(target, options = {}) {
@@ -1445,6 +1625,19 @@
       const rect = el.getBoundingClientRect();
       const clientX = Math.round(rect.left + rect.width / 2);
       const clientY = Math.round(rect.top + rect.height / 2);
+      this.currentPointer = { x: clientX, y: clientY };
+
+      let mechanism = 'synthetic_events_and_dom_methods';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'mouseDoubleClick', x: clientX, y: clientY, button: 'left' });
+          mechanism = 'cdp_browser_level_input';
+          await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+          this._recordOp('doubleClick', { x: clientX, y: clientY, mechanism });
+          return { ok: true, clientX, clientY, mechanism };
+        } catch (_e) {}
+      }
+
       const eventInit = {
         bubbles: true,
         cancelable: true,
@@ -1466,7 +1659,8 @@
       el.dispatchEvent(new MouseEvent('dblclick', dblInit));
 
       await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
-      return { ok: true, clientX, clientY };
+      this._recordOp('doubleClick', { x: clientX, y: clientY, mechanism });
+      return { ok: true, clientX, clientY, mechanism };
     }
 
     async rightClick(target, options = {}) {
@@ -1479,6 +1673,16 @@
       const rect = el.getBoundingClientRect();
       const clientX = Math.round(rect.left + rect.width / 2);
       const clientY = Math.round(rect.top + rect.height / 2);
+      this.currentPointer = { x: clientX, y: clientY };
+
+      let mechanism = 'synthetic_dom_events';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'mouseClick', x: clientX, y: clientY, button: 'right', clickCount: 1 });
+          mechanism = 'cdp_browser_level_input';
+        } catch (_e) {}
+      }
+
       const eventInit = {
         bubbles: true,
         cancelable: true,
@@ -1496,7 +1700,8 @@
       el.dispatchEvent(new MouseEvent('contextmenu', eventInit));
 
       await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
-      return { ok: true, clientX, clientY };
+      this._recordOp('rightClick', { x: clientX, y: clientY, mechanism });
+      return { ok: true, clientX, clientY, mechanism };
     }
 
     async focus(target) {
@@ -1504,7 +1709,8 @@
       if (!el) return { ok: false, reason: 'target_not_found' };
       if (typeof el.focus === 'function') {
         el.focus();
-        return { ok: true };
+        this._recordOp('focus', { mechanism: 'dom_method' });
+        return { ok: true, mechanism: 'dom_method' };
       }
       return { ok: false, reason: 'focus_not_supported' };
     }
@@ -1512,7 +1718,10 @@
     async typeText(target, text, options = {}) {
       const el = this._resolveTargetElement(target);
       if (!el) return { ok: false, reason: 'target_not_found' };
-      return this.executor.type(el, text, options);
+      const res = await this.executor.type(el, text, options);
+      const mechanism = 'synthetic_events_and_dom_methods';
+      this._recordOp('typeText', { textLength: String(text || '').length, mechanism, ok: Boolean(res && res.ok) });
+      return Object.assign({}, res, { mechanism });
     }
 
     async pressKey(key, options = {}) {
@@ -1520,6 +1729,14 @@
         ? document.activeElement
         : (typeof document !== 'undefined' ? document.body : null);
       if (!activeEl) return { ok: false, reason: 'no_active_element' };
+
+      let mechanism = 'synthetic_dom_events';
+      if (!options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function') {
+        try {
+          await window.__sleepwalker_cdp_input({ type: 'keyPress', key });
+          mechanism = 'cdp_browser_level_input';
+        } catch (_e) {}
+      }
 
       const keyInit = {
         key,
@@ -1536,18 +1753,23 @@
       activeEl.dispatchEvent(new KeyboardEvent('keydown', keyInit));
       activeEl.dispatchEvent(new KeyboardEvent('keypress', keyInit));
       activeEl.dispatchEvent(new KeyboardEvent('keyup', keyInit));
-      return { ok: true, key };
+      this._recordOp('pressKey', { key, mechanism });
+      return { ok: true, key, mechanism };
     }
 
     async scroll(direction = 'down', options = {}) {
+      const mechanism = 'dom_method';
       if (this.engine && typeof this.engine.scroll === 'function') {
-        return this.engine.scroll(direction, options);
+        const res = this.engine.scroll(direction, options);
+        this._recordOp('scroll', { dir: direction, mechanism });
+        return Object.assign({}, res, { mechanism });
       }
       const dy = direction === 'up' ? -400 : 400;
       if (typeof window !== 'undefined' && typeof window.scrollBy === 'function') {
         window.scrollBy({ top: dy, behavior: 'instant' });
       }
-      return { ok: true, dir: direction };
+      this._recordOp('scroll', { dir: direction, mechanism });
+      return { ok: true, dir: direction, mechanism };
     }
   }
 
@@ -1597,6 +1819,12 @@
         }
       }
       const result = this.observer.observe(root);
+      if (this.capabilityMap && typeof this.capabilityMap.build === 'function') {
+        this.capabilityMap.build(root);
+        this.capabilityMap.actionableCount = result.elementCount;
+        if (opts.navigationIdentity) this.capabilityMap.navigationIdentity = opts.navigationIdentity;
+        if (opts.tabId) this.capabilityMap.tabId = opts.tabId;
+      }
       this._obsCache = { root, url: curUrl, childSig, ts: now, result };
       return result;
     }
@@ -1643,7 +1871,7 @@
 
         if (item.states.visible) score += 15;
 
-        if (options.isInput && (item.role === 'textbox' || item.role === 'searchbox')) {
+        if (options.isInput && (item.role === 'textbox' || item.role === 'searchbox' || (item.role === 'combobox' && item.tag === 'INPUT'))) {
           score += 30;
         }
 
@@ -1688,16 +1916,38 @@
       let targetEl = null;
 
       if (typeof targetOrQuery === 'string') {
-        const located = this.locate(targetOrQuery, options);
-        if (located.status === 'AMBIGUOUS') {
-          return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+        const qTrim = targetOrQuery.trim();
+        if (/^[#.\[]/.test(qTrim)) {
+          try {
+            targetEl = (options.root || document).querySelector(qTrim);
+          } catch (_e) {}
         }
-        if (located.status !== 'FOUND' || !located.target) {
-          return { status: 'FAILED', verified: false, reason: 'element_not_found', query: targetOrQuery };
+        if (!targetEl) {
+          const located = this.locate(targetOrQuery, options);
+          if (located.status === 'AMBIGUOUS') {
+            return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+          }
+          if (located.status !== 'FOUND' || !located.target) {
+            return { status: 'FAILED', verified: false, reason: 'element_not_found', query: targetOrQuery };
+          }
+          targetEl = located.target;
         }
-        targetEl = located.target;
       } else if (targetOrQuery instanceof Element) {
         targetEl = targetOrQuery;
+        if (!targetEl.isConnected) {
+          this.invalidateCache();
+          const staleId = targetEl.id;
+          const staleLabel = this.observer.computeAccessibleName(targetEl) || (targetEl.textContent || '').trim();
+          const root = options.root || document;
+          if (staleId && root.getElementById && root.getElementById(staleId)) {
+            targetEl = root.getElementById(staleId);
+          } else if (staleLabel) {
+            const reloc = this.locate(staleLabel, Object.assign({}, options, { force: true }));
+            if (reloc.status === 'FOUND' && reloc.target && reloc.target.isConnected) {
+              targetEl = reloc.target;
+            }
+          }
+        }
       }
 
       if (!targetEl || !targetEl.isConnected) {
@@ -1750,14 +2000,22 @@
       }
 
       if (typeof targetOrQuery === 'string' && targetOrQuery.trim()) {
-        const located = this.locate(targetOrQuery, Object.assign({ isInput: true }, options));
-        if (located.status === 'AMBIGUOUS') {
-          return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+        const qTrim = targetOrQuery.trim();
+        if (/^[#.\[]/.test(qTrim)) {
+          try {
+            targetEl = (options.root || document).querySelector(qTrim);
+          } catch (_e) {}
         }
-        if (located.status !== 'FOUND' || !located.target) {
-          return { status: 'FAILED', verified: false, reason: 'input_field_not_found', query: targetOrQuery };
+        if (!targetEl) {
+          const located = this.locate(targetOrQuery, Object.assign({ isInput: true }, options));
+          if (located.status === 'AMBIGUOUS') {
+            return { status: 'AMBIGUOUS', verified: false, candidates: located.candidates, prompt: located.prompt };
+          }
+          if (located.status !== 'FOUND' || !located.target) {
+            return { status: 'FAILED', verified: false, reason: 'input_field_not_found', query: targetOrQuery };
+          }
+          targetEl = located.target;
         }
-        targetEl = located.target;
       } else if (targetOrQuery instanceof Element) {
         targetEl = targetOrQuery;
       } else if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
@@ -2152,12 +2410,9 @@
 
         const elements = Array.from(container.querySelectorAll('a, button, [role="menuitem"], [role="button"], [role="treeitem"], li, summary'));
         for (const el of elements) {
-          try {
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
-              continue;
-            }
-          } catch (_e) { continue; }
+          if (!this.observer.isVisible(el)) {
+            continue;
+          }
 
           const rawText = this.capabilityMap.getNodeName(el);
           const normName = rawText.toLowerCase();
@@ -2228,10 +2483,21 @@
         const candidates = this.findMenuCandidates(stepQuery, currentParentNode, currentContainer, options);
 
         if (candidates.length === 0) {
+          const parentSubmenu = currentParentNode && currentParentNode.submenuElement;
+          let parentFailedToOpen = false;
+          if (stepIndex > 0 && parentSubmenu && parentSubmenu.isConnected) {
+            try {
+              const st = window.getComputedStyle(parentSubmenu);
+              if (st.display === 'none' || st.visibility === 'hidden' || parentSubmenu.offsetWidth === 0) {
+                parentFailedToOpen = true;
+              }
+            } catch (_e) {}
+          }
           return {
             status: 'FAILED',
             verified: false,
             reason: stepIndex === 0 ? 'parent_menu_not_found' : 'child_not_found_under_parent',
+            parentMenuFailedToOpen: parentFailedToOpen,
             failedStep: stepQuery,
             parent: currentParentNode ? currentParentNode.rawName : null,
             path: path.slice(0, stepIndex + 1)
@@ -2647,16 +2913,17 @@
         const searchItems = obs.elements.filter((e) => {
           if (!e.states.visible || e.states.disabled || e.states.sensitive) return false;
           if (e.role === 'searchbox') return true;
-          if (e.role === 'textbox' && e.domNode) {
+          if ((e.role === 'textbox' || (e.role === 'combobox' && e.tag === 'INPUT')) && e.domNode) {
             const meta = [
               e.name || '',
               e.parentSection || '',
               e.domNode.id || '',
               e.domNode.name || '',
               e.domNode.placeholder || '',
+              (e.domNode.getAttribute && e.domNode.getAttribute('type')) || '',
               (e.domNode.getAttribute && e.domNode.getAttribute('aria-label')) || ''
             ].join(' ');
-            return /\b(?:search|find|query|filter|lookup|explore)\b/i.test(meta);
+            return /\b(?:search|find|query|filter|lookup|explore)\b|search_query/i.test(meta);
           }
           return false;
         });
@@ -2726,73 +2993,222 @@
     async executeGoal(goalText, options = {}) {
       const maxSteps = options.maxSteps || 6;
       const stepLog = [];
+      const intermediateStates = [];
+      const actualInputs = [];
+      const verificationEvidence = [];
       const goal = String(goalText || '').trim();
       if (!goal) return { status: 'ERROR', ok: false, reason: 'empty_goal' };
 
+      const isCancelled = () => {
+        if (options.signal && options.signal.aborted) return true;
+        if (typeof options.isCancelled === 'function' && options.isCancelled()) return true;
+        if (typeof window !== 'undefined' && window.__SLEEPWALKER_INSTANCE__ && window.__SLEEPWALKER_INSTANCE__.taskLifecycle && window.__SLEEPWALKER_INSTANCE__.taskLifecycle.state === 'CANCELLED') {
+          return true;
+        }
+        return false;
+      };
+
       // 1. Observe current page state
-      let obs = this.observe(options.root || document);
-      let capMap = this.capabilityMap ? this.capabilityMap.build(options.root || document) : null;
+      const root = options.root || document;
+      let obs = this.observe(root, { force: true });
+      let capMap = this.capabilityMap ? this.capabilityMap.nodes : [];
+      const initialUrl = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+      const initialObservation = {
+        url: obs.url,
+        title: obs.title,
+        elementCount: obs.elementCount,
+        capabilityNodeCount: Array.isArray(capMap) ? capMap.length : 0,
+        timestamp: obs.timestamp
+      };
 
       // 2. High-level goal planning / step decomposition
       const planSteps = this._decomposeGoal(goal, { obs, capMap, options });
+      const plannedActions = planSteps.map((s, idx) => ({
+        step: idx + 1,
+        action: s.action,
+        target: s.target || s.query || (Array.isArray(s.path) ? s.path.join(' > ') : ''),
+        value: s.value
+      }));
 
       let stepIndex = 0;
+      let lastExtractedText = '';
+
       for (const step of planSteps) {
         if (stepIndex >= maxSteps) break;
+        if (isCancelled()) {
+          return {
+            status: 'CANCELLED',
+            ok: false,
+            verified: false,
+            goal,
+            reason: 'task_cancelled',
+            stepsExecuted: stepIndex,
+            initialObservation,
+            plannedActions,
+            actualInputs,
+            intermediateStates,
+            verificationEvidence,
+            stepLog
+          };
+        }
         stepIndex++;
 
         // Closed loop: Check Permissions / Consequential safety
-        if (this._isConsequentialAction(step)) {
+        if (this._isConsequentialAction(step) && options.userConfirmed !== true) {
           return {
             status: 'CONFIRMATION_REQUIRED',
+            verified: false,
             goal,
             stepIndex,
             pendingStep: step,
             reason: `Action "${step.action} ${step.target || ''}" requires user confirmation.`,
+            initialObservation,
+            plannedActions,
+            actualInputs,
+            intermediateStates,
+            verificationEvidence,
             stepLog
           };
         }
 
         // Act
-        let stepRes = await this._executeGoalStep(step, { obs, capMap });
-        let verified = Boolean(stepRes && (stepRes.verified || stepRes.ok || stepRes.status === 'SUCCESS'));
+        let stepRes = await this._executeGoalStep(step, { obs, capMap, options, isCancelled });
+        if (stepRes && stepRes.text) {
+          lastExtractedText = stepRes.text;
+        }
+        let verified = Boolean(stepRes && (stepRes.verified || stepRes.ok || stepRes.status === 'SUCCESS' || stepRes.status === 'SENSITIVE_SKIPPED'));
+
+        if (isCancelled()) {
+          return {
+            status: 'CANCELLED',
+            ok: false,
+            verified: false,
+            goal,
+            reason: 'task_cancelled',
+            stepsExecuted: stepIndex,
+            initialObservation,
+            plannedActions,
+            actualInputs,
+            intermediateStates,
+            verificationEvidence,
+            stepLog
+          };
+        }
 
         // Recovery if step failed
         if (!verified) {
-          const recRes = await this._recoverGoalStep(step, stepRes, { obs, capMap });
-          if (recRes && (recRes.verified || recRes.ok)) {
+          if (stepRes && stepRes.status === 'CONFIRMATION_REQUIRED') {
+            return {
+              status: 'CONFIRMATION_REQUIRED',
+              verified: false,
+              goal,
+              stepIndex,
+              pendingStep: step,
+              reason: stepRes.reason || 'Consequential action requires confirmation.',
+              initialObservation,
+              plannedActions,
+              actualInputs,
+              intermediateStates,
+              verificationEvidence,
+              stepLog
+            };
+          }
+
+          const recRes = await this._recoverGoalStep(step, stepRes, { obs, capMap, options, initialUrl, isCancelled });
+          if (recRes && recRes.status === 'CANCELLED') {
+            return {
+              status: 'CANCELLED',
+              ok: false,
+              verified: false,
+              goal,
+              reason: 'task_cancelled',
+              stepsExecuted: stepIndex,
+              initialObservation,
+              plannedActions,
+              actualInputs,
+              intermediateStates,
+              verificationEvidence,
+              stepLog
+            };
+          }
+          if (recRes && (recRes.verified || recRes.ok || recRes.status === 'SUCCESS')) {
             stepRes = recRes;
+            if (stepRes.text) lastExtractedText = stepRes.text;
             verified = true;
+            actualInputs.push({
+              step: stepIndex,
+              action: step.action,
+              target: step.target || step.query || (Array.isArray(step.path) ? step.path.join(' > ') : ''),
+              recovered: true,
+              strategy: recRes.recoveryStrategy || 'reobserve_and_retry'
+            });
+            verificationEvidence.push({
+              step: stepIndex,
+              verified: true,
+              recovered: true,
+              details: recRes.details || recRes.status || 'recovered_and_verified',
+              url: (typeof window !== 'undefined' && window.location) ? window.location.href : ''
+            });
             stepLog.push({
               step: stepIndex,
               action: step.action,
-              target: step.target,
+              target: step.target || step.query || (Array.isArray(step.path) ? step.path.join(' > ') : ''),
               outcome: 'RECOVERED',
+              recoveryStrategy: recRes.recoveryStrategy || 'reobserve_and_retry',
               verified: true
             });
           } else {
+            const failReason = (recRes && recRes.reason && recRes.reason !== 'recovery_exhausted')
+              ? recRes.reason
+              : ((stepRes && stepRes.reason) || 'execution_failed');
             stepLog.push({
               step: stepIndex,
               action: step.action,
-              target: step.target,
+              target: step.target || step.query || (Array.isArray(step.path) ? step.path.join(' > ') : ''),
               outcome: 'FAILED',
-              reason: (stepRes && stepRes.reason) || 'execution_failed',
+              reason: failReason,
               verified: false
+            });
+            verificationEvidence.push({
+              step: stepIndex,
+              verified: false,
+              reason: failReason,
+              url: (typeof window !== 'undefined' && window.location) ? window.location.href : ''
             });
             return {
               status: 'FAILED',
               ok: false,
+              verified: false,
               goal,
               failedStep: step,
-              reason: (stepRes && stepRes.reason) || 'Step failed and could not be recovered',
+              reason: failReason,
+              initialObservation,
+              plannedActions,
+              actualInputs,
+              intermediateStates,
+              verificationEvidence,
               stepLog
             };
           }
         } else {
+          actualInputs.push({
+            step: stepIndex,
+            action: step.action,
+            target: step.target || step.query || (Array.isArray(step.path) ? step.path.join(' > ') : ''),
+            value: step.value,
+            status: stepRes.status || 'SUCCESS'
+          });
+          verificationEvidence.push({
+            step: stepIndex,
+            verified: true,
+            status: stepRes.status || 'SUCCESS',
+            details: stepRes.details || (stepRes.text ? `read_${stepRes.text.length}_chars` : 'verified'),
+            url: (typeof window !== 'undefined' && window.location) ? window.location.href : ''
+          });
           stepLog.push({
             step: stepIndex,
             action: step.action,
-            target: step.target,
+            target: step.target || step.query || (Array.isArray(step.path) ? step.path.join(' > ') : ''),
             outcome: stepRes.status || 'SUCCESS',
             verified: true
           });
@@ -2800,7 +3216,15 @@
 
         // Wait & Settle
         await new Promise(r => setTimeout(r, options.settleDelayMs || 60));
-        obs = this.observe(options.root || document, { force: true });
+        obs = this.observe(root, { force: true });
+        capMap = this.capabilityMap ? this.capabilityMap.nodes : [];
+        intermediateStates.push({
+          afterStep: stepIndex,
+          url: obs.url,
+          title: obs.title,
+          elementCount: obs.elementCount,
+          capabilityNodeCount: Array.isArray(capMap) ? capMap.length : 0
+        });
       }
 
       return {
@@ -2808,34 +3232,116 @@
         ok: true,
         goal,
         stepsExecuted: stepIndex,
+        initialObservation,
+        plannedActions,
+        actualInputs,
+        intermediateStates,
+        verificationEvidence,
+        finalResult: {
+          url: obs.url,
+          title: obs.title,
+          extractedText: lastExtractedText || undefined
+        },
         stepLog,
         verified: true
       };
     }
 
     _decomposeGoal(goal, ctx = {}) {
-      const g = goal.toLowerCase();
+      const g = goal.toLowerCase().trim();
       const steps = [];
+      const opts = (ctx && ctx.options) || {};
 
-      // E.g. "search for [X] and click [Y]"
-      const searchAndClickM = goal.match(/^(?:search\s+(?:for\s+)?)(.+?)\s+(?:and\s+(?:then\s+)?(?:click|open|select)\s+)(.+)$/i);
+      // Explicit structured fields passed in options.fields (e.g. form filling goal)
+      if (Array.isArray(opts.fields) && opts.fields.length > 0) {
+        for (const f of opts.fields) {
+          if (f.type === 'select') {
+            steps.push({ action: 'select', target: f.label || f.target, value: f.value });
+          } else {
+            steps.push({ action: 'type', target: f.label || f.target, value: f.value });
+          }
+        }
+        return steps;
+      }
+
+      // Consequential actions: delete, pay, purchase
+      if (/\b(?:delete|destroy|terminate|close|erase)\s+(?:(?:my|the|this)\s+)?(?:account|data|profile|records?)\b/i.test(g) || /\b(?:pay\s+now|purchase|buy\s+now|transfer\s+funds)\b/i.test(g)) {
+        steps.push({ action: 'delete', target: goal });
+        return steps;
+      }
+
+      // Hierarchical / Nested Menu Path ("Open X under Y", "Navigate to A > B > C")
+      const menuPath = this.normalizeMenuPath(goal);
+      if (Array.isArray(menuPath) && menuPath.length >= 2) {
+        steps.push({ action: 'menu', path: menuPath, target: menuPath.join(' > ') });
+        return steps;
+      }
+
+      // Multi-field or single-field form filling ("Fill Full Name with Ada Lovelace and Email with ada@example.edu")
+      if (/^(?:fill|enter|type|populate)\b/i.test(g) && /\b(?:with|as|into|in)\b/i.test(g)) {
+        const clauses = goal.replace(/^(?:please\s+)?(?:fill(?:\s+out|\s+in)?(?:\s+the\s+form)?(?:\s+with)?)\s*/i, '').split(/\s*(?:,\s*and\s+|\s+and\s+|,\s*)\s*/i);
+        for (const clause of clauses) {
+          const withM = clause.match(/^(?:fill\s+)?(.+?)\s+(?:with|as|=|:)\s+(.+)$/i);
+          const intoM = clause.match(/^(?:enter|type)\s+(.+?)\s+(?:into|in)\s+(.+)$/i);
+          if (withM) {
+            steps.push({ action: 'type', target: withM[1].trim().replace(/^["']|["']$/g, ''), value: withM[2].trim().replace(/^["']|["']$/g, '') });
+          } else if (intoM) {
+            steps.push({ action: 'type', target: intoM[2].trim().replace(/^["']|["']$/g, ''), value: intoM[1].trim().replace(/^["']|["']$/g, '') });
+          }
+        }
+        if (steps.length > 0) return steps;
+      }
+
+      // E.g. "search [site?] for [X] and click [Y]"
+      const searchAndClickM = goal.match(/^(?:search|find)\s+(?:(?:on|in)\s+)?(?:(?:wikipedia|youtube|github|google)\s+)?(?:for\s+)?(.+?)\s+(?:and\s+(?:then\s+)?(?:click|open|select)\s+)(.+)$/i);
       if (searchAndClickM) {
         steps.push({ action: 'search', query: searchAndClickM[1].trim() });
         steps.push({ action: 'click', target: searchAndClickM[2].trim() });
         return steps;
       }
 
-      // E.g. "search for [X]"
+      // E.g. "Search Wikipedia for artificial intelligence" or "Search for [X]"
+      const siteSearchM = goal.match(/^(?:search|look\s+up)\s+(?:(?:on|in)\s+)?(?:wikipedia|youtube|github|google)\s+(?:for\s+)(.+)$/i);
+      if (siteSearchM) {
+        steps.push({ action: 'search', query: siteSearchM[1].trim() });
+        return steps;
+      }
+
       const searchM = goal.match(/^(?:search\s+(?:for\s+)?)(.+)$/i);
       if (searchM && !/\band\b/i.test(searchM[1])) {
         steps.push({ action: 'search', query: searchM[1].trim() });
         return steps;
       }
 
-      // E.g. "check my attendance" / "check attendance"
+      // E.g. "Find a repository on GitHub: [X]" or "Find repository [X] on GitHub" or "Find YouTube video [X]"
+      const findRepoOrVideoM = goal.match(/^(?:find|locate|look\s+for)\s+(?:a\s+|the\s+|particular\s+)?(?:(?:github\s+)?(?:repository|repo)|(?:youtube\s+)?video)\s*(?:called|named|for|about|on|:)?\s*(.+?)(?:\s+on\s+(?:github|youtube))?$/i);
+      if (findRepoOrVideoM) {
+        const targetQuery = findRepoOrVideoM[1].replace(/\s+on\s+(?:github|youtube)$/i, '').trim();
+        const loc = this.locate(targetQuery);
+        if (loc && loc.status === 'FOUND' && loc.target) {
+          steps.push({ action: 'click', target: targetQuery });
+        } else {
+          steps.push({ action: 'search', query: targetQuery });
+          steps.push({ action: 'click', target: targetQuery });
+        }
+        return steps;
+      }
+
+      // E.g. "check my attendance" / "retrieve information from [X]"
       if (/\b(?:check|view|see)\s+(?:my\s+)?attendance\b/i.test(g)) {
         steps.push({ action: 'click', target: 'attendance' });
-        steps.push({ action: 'read', scope: 'page' });
+        steps.push({ action: 'read', target: 'attendance', scope: 'section' });
+        return steps;
+      }
+
+      const retrieveM = goal.match(/^(?:retrieve|get|extract|find)\s+(?:the\s+)?(?:information|details|data|text|records?)\s+(?:from|about|on|in|for)\s+(?:the\s+)?(.+)$/i);
+      if (retrieveM) {
+        const topic = retrieveM[1].replace(/\s+(?:section|portal|page)$/i, '').trim();
+        const loc = this.locate(topic);
+        if (loc && loc.status === 'FOUND' && loc.target) {
+          steps.push({ action: 'click', target: topic });
+        }
+        steps.push({ action: 'read', target: topic, scope: 'section' });
         return steps;
       }
 
@@ -2846,22 +3352,19 @@
         return steps;
       }
 
-      // E.g. "click [X]" / "open [X]"
-      const clickM = goal.match(/^(?:click(?:\s+on)?|open|select|press)\s+(?:the\s+)?(.+)$/i);
+      // E.g. "click [X]" / "open [X]" / "navigate to [X]"
+      const clickM = goal.match(/^(?:click(?:\s+on)?|open|select|press|navigate\s+to|go\s+to)\s+(?:the\s+)?(.+)$/i);
       if (clickM) {
         steps.push({ action: 'click', target: clickM[1].trim() });
         return steps;
       }
 
-      // Consequential actions: delete, pay, purchase
-      if (/\b(?:delete|destroy|terminate|close|erase)\s+(?:(?:my|the|this)\s+)?(?:account|data|profile|records?)\b/i.test(g) || /\b(?:pay|purchase|buy)\b/i.test(g)) {
-        steps.push({ action: 'delete', target: goal });
-        return steps;
-      }
-
-      // E.g. "read this page" / "summarize"
-      if (/\b(?:read|summarize|explain)\b/i.test(g)) {
-        steps.push({ action: 'read', scope: 'page' });
+      // E.g. "read [X]" / "read this page" / "summarize"
+      const readSecM = goal.match(/^(?:read|summarize|explain)\s+(?:the\s+)?(.+?)(?:\s+section)?$/i);
+      if (readSecM) {
+        const sec = readSecM[1].trim();
+        const isWholePage = /^(?:this\s+page|the\s+page|page|everything)$/i.test(sec);
+        steps.push({ action: 'read', target: isWholePage ? 'page' : sec, scope: isWholePage ? 'page' : 'section' });
         return steps;
       }
 
@@ -2889,39 +3392,108 @@
 
     async _executeGoalStep(step, ctx = {}) {
       const act = String(step.action || '').toLowerCase();
+      const opts = (ctx && ctx.options) || {};
+      if (act === 'menu') {
+        return this.openMenuPath(step.path || step.target, opts);
+      }
       if (act === 'click' || act === 'navigate') {
-        return this.click(step.target, { isNavigation: true });
+        return this.click(step.target, Object.assign({ isNavigation: true }, opts));
       }
       if (act === 'search') {
-        return this.executeSearch(step.query || step.target);
+        return this.executeSearch(step.query || step.target, opts);
       }
       if (act === 'read') {
-        const rc = this.readContent(step.target || 'page');
-        return { ok: rc.verified, verified: rc.verified, status: 'READ_COMPLETE', text: rc.text };
+        let rc = this.readContent(step.target || 'page', opts);
+        if (!rc.verified && step.target && step.target !== 'page') {
+          rc = this.readContent('page', opts);
+        }
+        return { ok: rc.verified, verified: rc.verified, status: rc.verified ? 'READ_COMPLETE' : 'FAILED', text: rc.text, heading: rc.heading, reason: rc.reason };
       }
       if (act === 'type' || act === 'fill') {
-        return this.type(step.target, step.value || '');
+        return this.type(step.target, step.value || '', opts);
+      }
+      if (act === 'select') {
+        return this.select(step.target, step.value || '', opts);
       }
       return { ok: false, reason: 'unrecognized_goal_action' };
     }
 
     async _recoverGoalStep(step, previousFailure, ctx = {}) {
-      // Re-observe fresh DOM
-      this.invalidateCache();
-      const freshObs = this.observe(document, { force: true });
-      const act = String(step.action || '').toLowerCase();
+      const isCancelled = ctx.isCancelled || (() => false);
+      if (isCancelled()) return { ok: false, status: 'CANCELLED', reason: 'task_cancelled' };
 
-      if (act === 'click' || act === 'navigate') {
-        // Try locating with relaxed/fuzzy matching
-        const loc = this.locate(step.target, { root: document });
-        if (loc.status === 'FOUND' && loc.candidate) {
-          const clkRes = await this.executor.click(loc.candidate.domNode);
-          if (clkRes.ok) {
-            return { ok: true, verified: true, status: 'SUCCESS' };
+      const root = (ctx.options && ctx.options.root) || document;
+      const act = String(step.action || '').toLowerCase();
+      const prevReason = (previousFailure && previousFailure.reason) || '';
+
+      // 1. Check for unexpected navigation away from expected origin/context
+      const currentUrl = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+      if (ctx.initialUrl && currentUrl !== ctx.initialUrl) {
+        try {
+          const u1 = new URL(ctx.initialUrl);
+          const u2 = new URL(currentUrl);
+          if (u1.origin !== u2.origin || /error|404|unexpected/i.test(u2.pathname + u2.hash)) {
+            this.invalidateCache();
+            this.observe(root, { force: true });
+            const checkLoc = step.target ? this.locate(step.target, { root }) : { status: 'NOT_FOUND' };
+            if (checkLoc.status !== 'FOUND') {
+              return { ok: false, verified: false, status: 'FAILED', reason: 'unexpected_navigation_target_missing', unexpectedUrl: currentUrl };
+            }
+          }
+        } catch (_e) {}
+      }
+
+      // 2. If click failed due to obstruction (modal/toast/sticky overlay), try pressing Escape and scrolling into view
+      if (prevReason.startsWith('hit_test_obstructed_by_')) {
+        try {
+          if (this.inputController) {
+            await this.inputController.pressKey('Escape');
+          }
+          // Also check for close/dismiss button on blocking overlay
+          const dismissBtn = root.querySelector('[data-dismiss], .modal-close, .toast-close, .overlay-close, button[aria-label*="close" i], button[aria-label*="dismiss" i]');
+          if (dismissBtn && typeof dismissBtn.click === 'function') {
+            dismissBtn.click();
+          }
+        } catch (_e) {}
+        await new Promise(r => setTimeout(r, 80));
+        this.invalidateCache();
+        this.observe(root, { force: true });
+        const retryObstructed = await this._executeGoalStep(step, ctx);
+        if (retryObstructed && (retryObstructed.verified || retryObstructed.ok || retryObstructed.status === 'SUCCESS')) {
+          return Object.assign({}, retryObstructed, { ok: true, verified: true, recoveryStrategy: 'dismiss_obstruction_and_retry' });
+        }
+      }
+
+      // 3. Poll for delayed / slow-loading DOM settlement (e.g. async SPA rendering)
+      const waitBudgetMs = (ctx.options && ctx.options.recoveryTimeoutMs) || 700;
+      const pollIntervalMs = 100;
+      let elapsed = 0;
+
+      while (elapsed < waitBudgetMs) {
+        if (isCancelled()) return { ok: false, status: 'CANCELLED', reason: 'task_cancelled' };
+        await new Promise(r => setTimeout(r, pollIntervalMs));
+        elapsed += pollIntervalMs;
+
+        this.invalidateCache();
+        this.observe(root, { force: true });
+
+        if (act === 'click' || act === 'navigate') {
+          const loc = this.locate(step.target, { root });
+          if (loc.status === 'FOUND' && loc.target && loc.target.isConnected) {
+            const retryRes = await this.click(loc.target, Object.assign({ isNavigation: true }, ctx.options));
+            if (retryRes && (retryRes.verified || retryRes.status === 'SUCCESS')) {
+              return Object.assign({}, retryRes, { ok: true, verified: true, recoveryStrategy: 'delayed_dom_settlement_retry' });
+            }
+          }
+        } else if (act === 'search' || act === 'type' || act === 'fill' || act === 'menu') {
+          const retryRes = await this._executeGoalStep(step, ctx);
+          if (retryRes && (retryRes.verified || retryRes.ok || retryRes.status === 'SUCCESS')) {
+            return Object.assign({}, retryRes, { ok: true, verified: true, recoveryStrategy: 'delayed_dom_settlement_retry' });
           }
         }
       }
-      return { ok: false, reason: 'recovery_exhausted' };
+
+      return { ok: false, verified: false, status: 'FAILED', reason: prevReason || 'recovery_exhausted' };
     }
   }
 

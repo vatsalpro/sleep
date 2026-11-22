@@ -903,6 +903,16 @@
 
       this.tabInventories.set(tabId, inventory);
       this._syncTabInventorySummaryToMemory(inventory);
+      if (this.controller && this.controller.browserEngine) {
+        try {
+          this.controller.browserEngine.invalidateCache();
+          this.controller.browserEngine.observe(doc, {
+            force: true,
+            tabId,
+            navigationIdentity
+          });
+        } catch (_e) {}
+      }
       return inventory;
     }
 

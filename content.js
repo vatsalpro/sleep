@@ -376,7 +376,17 @@
     }
 
     async syncSessionFromTabActivation({ isForegroundTab = true } = {}) {
-      if (!this.memory || !isForegroundTab || (typeof document !== 'undefined' && document.hidden)) return;
+      if (!isForegroundTab || (typeof document !== 'undefined' && document.hidden)) return;
+      if (this.browserEngine) {
+        try {
+          this.browserEngine.invalidateCache();
+          this.browserEngine.observe(document, { force: true });
+        } catch (_e) {}
+      }
+      if (this.worldModel) {
+        this.worldModel.observeTab(document, { force: true }).catch(() => {});
+      }
+      if (!this.memory) return;
       const t0 = Date.now();
       const state = await this.memory.loadState();
       const mode = state && state.sessionMode;
@@ -607,6 +617,15 @@
         if (this.navigator && typeof this.navigator.invalidateSearchCache === 'function') {
           this.navigator.invalidateSearchCache();
         }
+        if (this.browserEngine) {
+          try {
+            this.browserEngine.invalidateCache();
+            this.browserEngine.observe(document, { force: true });
+          } catch (_e) {}
+        }
+        if (this.worldModel) {
+          this.worldModel.observeTab(document, { force: true }).catch(() => {});
+        }
         if (!this.memory) return;
         const headings = this.outline && typeof this.outline.extractOutline === 'function'
           ? (this.outline.extractOutline() || []).map((h) => h.text)
@@ -618,9 +637,6 @@
         });
         if (this.dialogue && this.dialogue.isActive() && window.SW_UI && window.SW_UI.getState() === 'idle') {
           window.SW_UI.setState(this.voice && this.voice.isListening ? 'listening' : 'silent');
-        }
-        if (this.worldModel) {
-          this.worldModel.observeTab(document, { force: true }).catch(() => {});
         }
       };
 
