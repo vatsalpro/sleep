@@ -26,6 +26,7 @@
     'CONFIRM_NO',
     'UNDO',
     'CONTROL',
+    'CHANGE_LANGUAGE',
     'HELP'
   ]);
 
@@ -65,9 +66,52 @@
     'मत', 'नहीं', 'ना', 'न', 'क्या', 'कब', 'कहाँ', 'कहां', 'कैसे', 'क्यों', 'कितना', 'कितनी', 'कितने',
     'कौन', 'किसका', 'किसकी', 'किसको', 'किसने', 'कुछ', 'कोई', 'बहुत', 'क्योंकि', 'लेकिन', 'और', 'या', 'भी', 'ही', 'तो',
     'मुझे', 'मेरा', 'मेरी', 'तुम', 'हम', 'आप', 'यह', 'वह', 'ये', 'वे', 'बंद',
+    'सिलेक्ट', 'टॉक', 'बोल', 'सर्च', 'खोजो', 'क्लिक', 'चुनो', 'डालो', 'भर', 'भरो',
     // Marathi grammar/verb/postposition markers (keeps REG05 "पुढच्या पानावर जा" routing to LLM)
     'पुढच्या', 'मागील', 'पानावर', 'वर', 'खाली', 'करा', 'सांगा', 'वाचा', 'दाखवा', 'मला', 'माझ्या', 'आहे', 'नाही'
   ]);
+
+  const SUPPORTED_LANGUAGE_MAP = {
+    'english': 'en-IN',
+    'english india': 'en-IN',
+    'indian english': 'en-IN',
+    'english us': 'en-US',
+    'american english': 'en-US',
+    'us english': 'en-US',
+    'hindi': 'hi-IN',
+    'हिंदी': 'hi-IN',
+    'हिन्दी': 'hi-IN',
+    'kannada': 'kn-IN',
+    'कन्नड़': 'kn-IN',
+    'कन्नड': 'kn-IN',
+    'ಕನ್ನಡ': 'kn-IN',
+    'tamil': 'ta-IN',
+    'तमिल': 'ta-IN',
+    'தமிழ்': 'ta-IN',
+    'telugu': 'te-IN',
+    'तेलुगु': 'te-IN',
+    'తెలుగు': 'te-IN',
+    'malayalam': 'ml-IN',
+    'मलयालम': 'ml-IN',
+    'മലയാളം': 'ml-IN',
+    'bengali': 'bn-IN',
+    'बंगाली': 'bn-IN',
+    'বাংলা': 'bn-IN',
+    'marathi': 'mr-IN',
+    'मराठी': 'mr-IN',
+    'french': 'fr-FR',
+    'français': 'fr-FR',
+    'फ्रेंच': 'fr-FR',
+    'german': 'de-DE',
+    'deutsch': 'de-DE',
+    'जर्मन': 'de-DE',
+    'japanese': 'ja-JP',
+    '日本語': 'ja-JP',
+    'जापानी': 'ja-JP',
+    'spanish': 'es-ES',
+    'español': 'es-ES',
+    'स्पेनिश': 'es-ES'
+  };
 
   function isBareDevanagariLinkCandidate(text) {
     if (!text || !/^[\u0900-\u097F\s]+$/.test(text)) return false;
@@ -348,6 +392,18 @@
 
       if (!text) {
         return base('HELP', {}, 0.0, 'empty');
+      }
+
+      // 0. Dedicated Language Switching Command (e.g. "Change language to Hindi", "Switch language to English")
+      const langSwitchM = text.match(/^(?:(?:please\s+)?(?:change|switch|set)\s+(?:the\s+)?language\s+(?:to\s+|in\s+)?(.+)|(?:language\s+(?:ko\s+)?(.+?)\s+(?:mein\s+)?(?:badlo|karo|set\s+karo))|(?:भाषा\s+(?:को\s+)?(.+?)\s*(?:में\s+)?(?:बदलो|करो|परिवर्तित\s+करो)))[.?!]*$/i);
+      if (langSwitchM) {
+        const langInput = String(langSwitchM[1] || langSwitchM[2] || langSwitchM[3] || '').trim().toLowerCase();
+        const resolvedLocale = SUPPORTED_LANGUAGE_MAP[langInput] || null;
+        return base('CHANGE_LANGUAGE', {
+          targetLanguage: langInput,
+          locale: resolvedLocale,
+          supported: Boolean(resolvedLocale)
+        }, 0.99, 'change_language_direct');
       }
 
       // Non-EN/HI regional Indian language scripts or explicit regional session language (unless standard English ASCII match?)
@@ -1135,6 +1191,10 @@
         }
       }
       if (!isQuestion && isBareDevanagariLinkCandidate(text)) {
+        if (Array.isArray(context.candidates) && context.candidates.length > 0) {
+          // Candidates were evaluated above but none scored >= 52. Do NOT treat bare text as a valid link click!
+          return base('ANSWER', { query: raw }, 0.35, 'low_confidence_unmatched');
+        }
         return base('NAVIGATE', { action: 'click', target: (parsedLink && parsedLink.target) || text, linkIntent: parsedLink || null }, 0.84, 'navigate_bare_devanagari');
       }
 
@@ -1248,7 +1308,17 @@
 
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
         return await new Promise((resolve) => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (!done) {
+              done = true;
+              resolve(null);
+            }
+          }, 2500);
           chrome.runtime.sendMessage({ type: 'SLEEPWALKER_INTENT_REQUEST', payload }, (res) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
             if (chrome.runtime.lastError || !res || res.status !== 'ok') {
               resolve(null);
             } else {

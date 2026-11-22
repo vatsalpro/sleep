@@ -24,6 +24,7 @@
   const SUPPORTED_LANGS = new Set([
     'auto',
     'en-IN',
+    'en-US',
     'hi-IN',
     'ta-IN',
     'te-IN',
@@ -32,15 +33,37 @@
     'gu-IN',
     'kn-IN',
     'ml-IN',
-    'pa-IN'
+    'pa-IN',
+    'fr-FR',
+    'de-DE',
+    'ja-JP',
+    'es-ES'
   ]);
 
-  const LANG_ALIASES = {};
+  const LANG_ALIASES = {
+    'english': 'en-IN',
+    'english (india)': 'en-IN',
+    'english (us)': 'en-US',
+    'american english': 'en-US',
+    'hindi': 'hi-IN',
+    'kannada': 'kn-IN',
+    'tamil': 'ta-IN',
+    'telugu': 'te-IN',
+    'malayalam': 'ml-IN',
+    'bengali': 'bn-IN',
+    'marathi': 'mr-IN',
+    'gujarati': 'gu-IN',
+    'punjabi': 'pa-IN',
+    'french': 'fr-FR',
+    'german': 'de-DE',
+    'japanese': 'ja-JP',
+    'spanish': 'es-ES'
+  };
   SUPPORTED_LANGS.forEach((code) => {
     LANG_ALIASES[code.toLowerCase()] = code;
   });
 
-  const AUTO_DEFAULT_LANG = 'hi-IN';
+  const AUTO_DEFAULT_LANG = 'en-IN';
   const AUTO_RETRY_LANG = 'en-IN';
   const AUTO_CONFIDENCE_THRESHOLD = 0.6;
 
@@ -1067,6 +1090,10 @@
           } catch (e) {}
         }
       }
+    }
+
+    setLanguage(newLang) {
+      return this.setLang(newLang);
     }
 
     /**

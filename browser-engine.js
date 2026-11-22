@@ -1350,6 +1350,208 @@
   }
 
   // ===========================================================================
+  // 5.5 BrowserInputController (Mode C - Computer-Use Browser Operator)
+  // Provides clean, realistic mouse/pointer and keyboard automation abstractions
+  // ===========================================================================
+  class BrowserInputController {
+    constructor(engine = null, options = {}) {
+      this.engine = engine;
+      this.executor = (engine && engine.executor) || new PlaywrightExecutor(options);
+      this.options = Object.assign({
+        pointerSettleMs: 50,
+        keyDelayMs: 30
+      }, options);
+      this.currentPointer = { x: 0, y: 0 };
+    }
+
+    _resolveTargetElement(target) {
+      if (!target) return null;
+      if (typeof target === 'object' && target.nodeType === 1) return target;
+      if (typeof target === 'string') {
+        try {
+          const el = document.querySelector(target);
+          if (el) return el;
+        } catch (_e) {}
+        if (this.engine && typeof this.engine.locate === 'function') {
+          const loc = this.engine.locate(target);
+          if (loc && loc.candidate && loc.candidate.domNode) {
+            return loc.candidate.domNode;
+          }
+        }
+      }
+      return null;
+    }
+
+    async movePointer(target, options = {}) {
+      let x = 0, y = 0;
+      if (typeof target === 'object' && typeof target.x === 'number' && typeof target.y === 'number') {
+        x = target.x;
+        y = target.y;
+      } else {
+        const el = this._resolveTargetElement(target);
+        if (!el) return { ok: false, reason: 'target_not_found' };
+        await this.executor.scrollIntoViewIfNeeded(el);
+        const rect = el.getBoundingClientRect();
+        x = Math.round(rect.left + rect.width / 2);
+        y = Math.round(rect.top + rect.height / 2);
+      }
+      this.currentPointer = { x, y };
+
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        buttons: 0
+      };
+      const hit = (typeof document !== 'undefined' && typeof document.elementFromPoint === 'function')
+        ? document.elementFromPoint(x, y) || document.body
+        : null;
+      if (hit) {
+        hit.dispatchEvent(new PointerEvent('pointermove', eventInit));
+        hit.dispatchEvent(new MouseEvent('mousemove', eventInit));
+      }
+      if (options.settleMs) await new Promise(r => setTimeout(r, options.settleMs));
+      return { ok: true, x, y };
+    }
+
+    async hover(target, options = {}) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      const res = await this.executor.hover(el, options);
+      if (res && res.ok) {
+        this.currentPointer = { x: res.clientX, y: res.clientY };
+      }
+      return res;
+    }
+
+    async click(target, options = {}) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      return this.executor.click(el, options);
+    }
+
+    async doubleClick(target, options = {}) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      await this.executor.scrollIntoViewIfNeeded(el);
+      const gate = await this.executor.validateActionability(el);
+      if (!gate.ok) return { ok: false, reason: gate.reason };
+
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+        detail: 1,
+        button: 0,
+        buttons: 1
+      };
+      this.executor.dispatchGestureTrain(el);
+      const dblInit = Object.assign({}, eventInit, { detail: 2 });
+      el.dispatchEvent(new PointerEvent('pointerdown', dblInit));
+      el.dispatchEvent(new MouseEvent('mousedown', dblInit));
+      el.dispatchEvent(new PointerEvent('pointerup', dblInit));
+      el.dispatchEvent(new MouseEvent('mouseup', dblInit));
+      el.dispatchEvent(new MouseEvent('click', dblInit));
+      el.dispatchEvent(new MouseEvent('dblclick', dblInit));
+
+      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      return { ok: true, clientX, clientY };
+    }
+
+    async rightClick(target, options = {}) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      await this.executor.scrollIntoViewIfNeeded(el);
+      const gate = await this.executor.validateActionability(el);
+      if (!gate.ok) return { ok: false, reason: gate.reason };
+
+      const rect = el.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+      const eventInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+        button: 2,
+        buttons: 2
+      };
+      el.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+      el.dispatchEvent(new MouseEvent('mousedown', eventInit));
+      el.dispatchEvent(new PointerEvent('pointerup', eventInit));
+      el.dispatchEvent(new MouseEvent('mouseup', eventInit));
+      el.dispatchEvent(new MouseEvent('contextmenu', eventInit));
+
+      await new Promise(r => setTimeout(r, this.executor.options.settleDelayMs || 60));
+      return { ok: true, clientX, clientY };
+    }
+
+    async focus(target) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      if (typeof el.focus === 'function') {
+        el.focus();
+        return { ok: true };
+      }
+      return { ok: false, reason: 'focus_not_supported' };
+    }
+
+    async typeText(target, text, options = {}) {
+      const el = this._resolveTargetElement(target);
+      if (!el) return { ok: false, reason: 'target_not_found' };
+      return this.executor.type(el, text, options);
+    }
+
+    async pressKey(key, options = {}) {
+      const activeEl = (typeof document !== 'undefined' && document.activeElement && document.activeElement !== document.body)
+        ? document.activeElement
+        : (typeof document !== 'undefined' ? document.body : null);
+      if (!activeEl) return { ok: false, reason: 'no_active_element' };
+
+      const keyInit = {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        ctrlKey: Boolean(options.ctrlKey || options.ctrl),
+        altKey: Boolean(options.altKey || options.alt),
+        shiftKey: Boolean(options.shiftKey || options.shift),
+        metaKey: Boolean(options.metaKey || options.meta)
+      };
+      activeEl.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+      activeEl.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+      activeEl.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+      return { ok: true, key };
+    }
+
+    async scroll(direction = 'down', options = {}) {
+      if (this.engine && typeof this.engine.scroll === 'function') {
+        return this.engine.scroll(direction, options);
+      }
+      const dy = direction === 'up' ? -400 : 400;
+      if (typeof window !== 'undefined' && typeof window.scrollBy === 'function') {
+        window.scrollBy({ top: dy, behavior: 'instant' });
+      }
+      return { ok: true, dir: direction };
+    }
+  }
+
+  // ===========================================================================
   // 6. BrowserEngine (Unified Facade)
   // ===========================================================================
   class BrowserEngine {
@@ -1365,6 +1567,7 @@
       this.verifier = new StateVerifier(options.verifier);
       this.visual = new VisualFallback(options.visual);
       this.capabilityMap = new PageCapabilityMap(options.capabilityMap);
+      this.inputController = new BrowserInputController(this, options.inputController);
       this._obsCache = null;
     }
 
@@ -2515,6 +2718,211 @@
         postElementCount: postObs.elementCount
       };
     }
+
+    // =========================================================================
+    // Mode A: Goal-Based Autonomous Agent Pipeline
+    // Observe -> Plan -> Check Permissions -> Act -> Wait -> Verify -> Recover
+    // =========================================================================
+    async executeGoal(goalText, options = {}) {
+      const maxSteps = options.maxSteps || 6;
+      const stepLog = [];
+      const goal = String(goalText || '').trim();
+      if (!goal) return { status: 'ERROR', ok: false, reason: 'empty_goal' };
+
+      // 1. Observe current page state
+      let obs = this.observe(options.root || document);
+      let capMap = this.capabilityMap ? this.capabilityMap.build(options.root || document) : null;
+
+      // 2. High-level goal planning / step decomposition
+      const planSteps = this._decomposeGoal(goal, { obs, capMap, options });
+
+      let stepIndex = 0;
+      for (const step of planSteps) {
+        if (stepIndex >= maxSteps) break;
+        stepIndex++;
+
+        // Closed loop: Check Permissions / Consequential safety
+        if (this._isConsequentialAction(step)) {
+          return {
+            status: 'CONFIRMATION_REQUIRED',
+            goal,
+            stepIndex,
+            pendingStep: step,
+            reason: `Action "${step.action} ${step.target || ''}" requires user confirmation.`,
+            stepLog
+          };
+        }
+
+        // Act
+        let stepRes = await this._executeGoalStep(step, { obs, capMap });
+        let verified = Boolean(stepRes && (stepRes.verified || stepRes.ok || stepRes.status === 'SUCCESS'));
+
+        // Recovery if step failed
+        if (!verified) {
+          const recRes = await this._recoverGoalStep(step, stepRes, { obs, capMap });
+          if (recRes && (recRes.verified || recRes.ok)) {
+            stepRes = recRes;
+            verified = true;
+            stepLog.push({
+              step: stepIndex,
+              action: step.action,
+              target: step.target,
+              outcome: 'RECOVERED',
+              verified: true
+            });
+          } else {
+            stepLog.push({
+              step: stepIndex,
+              action: step.action,
+              target: step.target,
+              outcome: 'FAILED',
+              reason: (stepRes && stepRes.reason) || 'execution_failed',
+              verified: false
+            });
+            return {
+              status: 'FAILED',
+              ok: false,
+              goal,
+              failedStep: step,
+              reason: (stepRes && stepRes.reason) || 'Step failed and could not be recovered',
+              stepLog
+            };
+          }
+        } else {
+          stepLog.push({
+            step: stepIndex,
+            action: step.action,
+            target: step.target,
+            outcome: stepRes.status || 'SUCCESS',
+            verified: true
+          });
+        }
+
+        // Wait & Settle
+        await new Promise(r => setTimeout(r, options.settleDelayMs || 60));
+        obs = this.observe(options.root || document, { force: true });
+      }
+
+      return {
+        status: 'SUCCESS',
+        ok: true,
+        goal,
+        stepsExecuted: stepIndex,
+        stepLog,
+        verified: true
+      };
+    }
+
+    _decomposeGoal(goal, ctx = {}) {
+      const g = goal.toLowerCase();
+      const steps = [];
+
+      // E.g. "search for [X] and click [Y]"
+      const searchAndClickM = goal.match(/^(?:search\s+(?:for\s+)?)(.+?)\s+(?:and\s+(?:then\s+)?(?:click|open|select)\s+)(.+)$/i);
+      if (searchAndClickM) {
+        steps.push({ action: 'search', query: searchAndClickM[1].trim() });
+        steps.push({ action: 'click', target: searchAndClickM[2].trim() });
+        return steps;
+      }
+
+      // E.g. "search for [X]"
+      const searchM = goal.match(/^(?:search\s+(?:for\s+)?)(.+)$/i);
+      if (searchM && !/\band\b/i.test(searchM[1])) {
+        steps.push({ action: 'search', query: searchM[1].trim() });
+        return steps;
+      }
+
+      // E.g. "check my attendance" / "check attendance"
+      if (/\b(?:check|view|see)\s+(?:my\s+)?attendance\b/i.test(g)) {
+        steps.push({ action: 'click', target: 'attendance' });
+        steps.push({ action: 'read', scope: 'page' });
+        return steps;
+      }
+
+      // E.g. "find the latest issue in my github repo" / "view issues"
+      if (/\b(?:find|view|open|check)\s+(?:the\s+)?(?:latest\s+)?issues?\b/i.test(g)) {
+        steps.push({ action: 'click', target: 'Issues' });
+        steps.push({ action: 'read', scope: 'page' });
+        return steps;
+      }
+
+      // E.g. "click [X]" / "open [X]"
+      const clickM = goal.match(/^(?:click(?:\s+on)?|open|select|press)\s+(?:the\s+)?(.+)$/i);
+      if (clickM) {
+        steps.push({ action: 'click', target: clickM[1].trim() });
+        return steps;
+      }
+
+      // Consequential actions: delete, pay, purchase
+      if (/\b(?:delete|destroy|terminate|close|erase)\s+(?:(?:my|the|this)\s+)?(?:account|data|profile|records?)\b/i.test(g) || /\b(?:pay|purchase|buy)\b/i.test(g)) {
+        steps.push({ action: 'delete', target: goal });
+        return steps;
+      }
+
+      // E.g. "read this page" / "summarize"
+      if (/\b(?:read|summarize|explain)\b/i.test(g)) {
+        steps.push({ action: 'read', scope: 'page' });
+        return steps;
+      }
+
+      // Generic single-action fallback
+      steps.push({ action: 'navigate', target: goal });
+      return steps;
+    }
+
+    _isConsequentialAction(step) {
+      if (!step) return false;
+      const act = String(step.action || '').toLowerCase();
+      const target = String(step.target || step.query || '').toLowerCase();
+      if (act === 'delete' || act === 'pay' || act === 'submit' || act === 'purchase') {
+        return true;
+      }
+      if (/\b(?:delete\s+(?:(?:my|the|this)\s+)?account|purchase|pay\s+now|checkout|buy\s+now|confirm\s+order|transfer\s+funds|password)\b/i.test(target)) {
+        return true;
+      }
+      return false;
+    }
+
+    async navigate(targetOrQuery, options = {}) {
+      return this.click(targetOrQuery, Object.assign({ isNavigation: true }, options));
+    }
+
+    async _executeGoalStep(step, ctx = {}) {
+      const act = String(step.action || '').toLowerCase();
+      if (act === 'click' || act === 'navigate') {
+        return this.click(step.target, { isNavigation: true });
+      }
+      if (act === 'search') {
+        return this.executeSearch(step.query || step.target);
+      }
+      if (act === 'read') {
+        const rc = this.readContent(step.target || 'page');
+        return { ok: rc.verified, verified: rc.verified, status: 'READ_COMPLETE', text: rc.text };
+      }
+      if (act === 'type' || act === 'fill') {
+        return this.type(step.target, step.value || '');
+      }
+      return { ok: false, reason: 'unrecognized_goal_action' };
+    }
+
+    async _recoverGoalStep(step, previousFailure, ctx = {}) {
+      // Re-observe fresh DOM
+      this.invalidateCache();
+      const freshObs = this.observe(document, { force: true });
+      const act = String(step.action || '').toLowerCase();
+
+      if (act === 'click' || act === 'navigate') {
+        // Try locating with relaxed/fuzzy matching
+        const loc = this.locate(step.target, { root: document });
+        if (loc.status === 'FOUND' && loc.candidate) {
+          const clkRes = await this.executor.click(loc.candidate.domNode);
+          if (clkRes.ok) {
+            return { ok: true, verified: true, status: 'SUCCESS' };
+          }
+        }
+      }
+      return { ok: false, reason: 'recovery_exhausted' };
+    }
   }
 
   // Export to global scope for Manifest V3 content script isolation
@@ -2523,6 +2931,7 @@
   global.StateVerifier = StateVerifier;
   global.VisualFallback = VisualFallback;
   global.PageCapabilityMap = PageCapabilityMap;
+  global.BrowserInputController = BrowserInputController;
   global.BrowserEngine = BrowserEngine;
 
   if (typeof module !== 'undefined' && module.exports) {
@@ -2532,6 +2941,7 @@
       StateVerifier,
       VisualFallback,
       PageCapabilityMap,
+      BrowserInputController,
       BrowserEngine
     };
   }

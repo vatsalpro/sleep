@@ -8,7 +8,24 @@
   'use strict';
   if (window !== window.top) return;
 
-  const SPEECH_LANGS = { auto: 'hi-IN', 'en-IN': 'en-IN', 'hi-IN': 'hi-IN', 'ta-IN': 'ta-IN', 'te-IN': 'te-IN', 'bn-IN': 'bn-IN', 'mr-IN': 'mr-IN', 'gu-IN': 'gu-IN', 'kn-IN': 'kn-IN', 'ml-IN': 'ml-IN', 'pa-IN': 'pa-IN' };
+  const SPEECH_LANGS = {
+    auto: 'en-IN',
+    'en-IN': 'en-IN',
+    'en-US': 'en-US',
+    'hi-IN': 'hi-IN',
+    'kn-IN': 'kn-IN',
+    'ta-IN': 'ta-IN',
+    'te-IN': 'te-IN',
+    'ml-IN': 'ml-IN',
+    'bn-IN': 'bn-IN',
+    'mr-IN': 'mr-IN',
+    'gu-IN': 'gu-IN',
+    'pa-IN': 'pa-IN',
+    'fr-FR': 'fr-FR',
+    'de-DE': 'de-DE',
+    'ja-JP': 'ja-JP',
+    'es-ES': 'es-ES'
+  };
 
   class SleepwalkerController {
     constructor() {
@@ -678,9 +695,65 @@
       return { status: 'resumed', topic, message: msg };
     }
 
-    getEffectiveSpeechLang(lang) { return SPEECH_LANGS[lang] || lang || 'hi-IN'; }
+    getEffectiveSpeechLang(lang) { return SPEECH_LANGS[lang] || lang || 'en-IN'; }
     resolveReplyLang(c) { return (this.lang && this.lang !== 'auto') ? this.lang : ((c && c.lang && c.lang !== 'auto') ? c.lang : 'en-IN'); }
-    setLanguage(code) { this.lang = code || 'auto'; this.voice.setLang(this.lang); this.reader.setLang(this.getEffectiveSpeechLang(this.lang)); this.savePreferences(); }
+    setLanguage(code) {
+      this.lang = code || 'en-IN';
+      if (this.voice) {
+        if (typeof this.voice.setLanguage === 'function') this.voice.setLanguage(this.lang);
+        else if (typeof this.voice.setLang === 'function') this.voice.setLang(this.lang);
+      }
+      if (this.reader) this.reader.setLang(this.getEffectiveSpeechLang(this.lang));
+      this.savePreferences();
+    }
+
+    applyLanguageSwitch(locale, langName = '', requestId = '', taskId = 0) {
+      this.setLanguage(locale);
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({
+          sleepwalker_lang: locale,
+          preferredLanguage: locale
+        });
+      }
+
+      const localizedConfirmations = {
+        'en-IN': 'Language changed to English (India).',
+        'en-US': 'Language changed to English (US).',
+        'hi-IN': 'भाषा बदलकर हिंदी कर दी गई है।',
+        'kn-IN': 'ಭಾಷೆಯನ್ನು ಕನ್ನಡಕ್ಕೆ ಬದಲಾಯಿಸಲಾಗಿದೆ.',
+        'ta-IN': 'மொழி தமிழுக்கு மாற்றப்பட்டது.',
+        'te-IN': 'భాష తెలుగుకు మార్చబడింది.',
+        'ml-IN': 'ഭാഷ മലയാളത്തിലേക്ക് മാറ്റി.',
+        'bn-IN': 'ভাষা পরিবর্তন করে বাংলা করা হয়েছে।',
+        'mr-IN': 'भाषा बदलून मराठी केली आहे.',
+        'fr-FR': 'La langue a été changée en français.',
+        'de-DE': 'Die Sprache wurde auf Deutsch umgestellt.',
+        'ja-JP': '言語を日本語に変更しました。',
+        'es-ES': 'El idioma se ha cambiado a español.'
+      };
+
+      const msg = localizedConfirmations[locale] || `Language changed to ${langName || locale}.`;
+      this.setAssistantReply(msg);
+      if (window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({
+          type: 'answer',
+          title: 'Language / भाषा',
+          text: msg,
+          reqId: requestId
+        });
+      }
+      if (this.reader) {
+        this.reader.readText(msg);
+      }
+      if (this.agentFsm && requestId) {
+        this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'language_changed', locale });
+      }
+      if (taskId) {
+        this._finishActiveTask(taskId, 'COMPLETED', msg);
+      }
+      return { status: 'language_changed', locale, language: langName || locale, answer: msg, verified: true };
+    }
     setRate(r) { this.rate = Math.max(0.6, Math.min(1.8, Number(r) || 1.0)); this.reader.setRate(this.rate); this.savePreferences(); }
     setAssistantReply(text) { if (this.dialogue && text && !/^(?:Listening\.\.\.|Idle|Ready\b|Reading sentence \d+)/i.test(String(text))) this.dialogue.lastSpokenText = String(text); }
     syncStopButton() {}
@@ -1206,7 +1279,84 @@
         return { status: 'greeting_handled', answer: greetingMsg, verified: true, engine: this.useRebuiltBrowserEngine ? 'rebuilt_browser_engine' : 'legacy' };
       }
 
-      // 1d. Direct URL Navigation & Web Search (Issue B: distinguish direct URL navigation, Google search, and current page search)
+      // 1c2. Voice-controlled Multilingual Language Switching
+      const langSwitchMatch = raw.match(/^(?:(?:please\s+)?(?:change|switch|set)\s+(?:the\s+)?language\s+(?:to|in)\s+([a-zA-Z\u0900-\u0D7F\s]+))$/i) ||
+                              raw.match(/^(?:(?:भाषा|लैंग्वेज|language)\s+(?:बदलकर|बदलो|change|switch)\s*(?:to\s*)?([a-zA-Z\u0900-\u0D7F\s]+))$/i);
+      if (langSwitchMatch) {
+        const langKey = langSwitchMatch[1].trim().toLowerCase().replace(/[.,!?;:]+$/, '');
+        const map = (this.intentEngine && this.intentEngine.constructor && this.intentEngine.constructor.SUPPORTED_LANGUAGE_MAP) || {
+          'english': 'en-IN', 'indian english': 'en-IN', 'american english': 'en-US', 'us english': 'en-US',
+          'hindi': 'hi-IN', 'हिंदी': 'hi-IN', 'हिन्दी': 'hi-IN',
+          'kannada': 'kn-IN', 'कन्नड़': 'kn-IN', 'ಕನ್ನಡ': 'kn-IN',
+          'tamil': 'ta-IN', 'तमिल': 'ta-IN', 'தமிழ்': 'ta-IN',
+          'telugu': 'te-IN', 'तेलुगु': 'te-IN', 'తెలుగు': 'te-IN',
+          'malayalam': 'ml-IN', 'मलयालम': 'ml-IN', 'മലയാളം': 'ml-IN',
+          'bengali': 'bn-IN', 'bangla': 'bn-IN', 'बंगाली': 'bn-IN', 'বাংলা': 'bn-IN',
+          'marathi': 'mr-IN', 'मराठी': 'mr-IN',
+          'french': 'fr-FR', 'français': 'fr-FR', 'फ्रेंच': 'fr-FR',
+          'german': 'de-DE', 'deutsch': 'de-DE', 'जर्मन': 'de-DE',
+          'japanese': 'ja-JP', 'nihongo': 'ja-JP', '日本語': 'ja-JP', 'जापानी': 'ja-JP',
+          'spanish': 'es-ES', 'español': 'es-ES', 'स्पैनिश': 'es-ES'
+        };
+        const matchedLocale = map[langKey];
+        if (matchedLocale) {
+          return this.applyLanguageSwitch(matchedLocale, langKey, requestId, taskId);
+        }
+      }
+
+      // 1d. Direct URL Navigation, Common External Sites & Web Search
+      const COMMON_EXTERNAL_SITES = {
+        'github': 'https://github.com',
+        'wikipedia': 'https://www.wikipedia.org',
+        'youtube': 'https://www.youtube.com',
+        'google': 'https://www.google.com',
+        'reddit': 'https://www.reddit.com',
+        'twitter': 'https://twitter.com',
+        'x': 'https://x.com',
+        'linkedin': 'https://www.linkedin.com',
+        'amazon': 'https://www.amazon.com',
+        'facebook': 'https://facebook.com',
+        'instagram': 'https://instagram.com',
+        'stackoverflow': 'https://stackoverflow.com',
+        'stack overflow': 'https://stackoverflow.com',
+        'netflix': 'https://netflix.com',
+        'gmail': 'https://mail.google.com'
+      };
+
+      const siteNavMatch = raw.match(/^(?:(?:please\s+)?(?:go\s+to|visit|open|navigate\s+to)\s+)([a-zA-Z0-9\s]+)$/i);
+      if (siteNavMatch) {
+        const siteKey = siteNavMatch[1].trim().toLowerCase();
+        if (COMMON_EXTERNAL_SITES[siteKey]) {
+          const destUrl = COMMON_EXTERNAL_SITES[siteKey];
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_external' });
+          if (taskId) this._finishActiveTask(taskId, 'COMPLETED', `Navigating to ${siteKey}`);
+          return this._navigateToExternalUrl(destUrl, siteKey, raw);
+        }
+      }
+
+      const siteSearchMatch = raw.match(/^(?:(?:please\s+)?search\s+(wikipedia|youtube|github|google)\s+(?:for\s+)?(.+))$/i);
+      if (siteSearchMatch) {
+        const site = siteSearchMatch[1].trim().toLowerCase();
+        const query = siteSearchMatch[2].trim();
+        const currentHost = (typeof window !== 'undefined' && window.location && window.location.hostname) || '';
+        if (site === 'wikipedia' && !currentHost.includes('wikipedia.org')) {
+          const wikiUrl = `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(query)}`;
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_external_search' });
+          if (taskId) this._finishActiveTask(taskId, 'COMPLETED', `Searching Wikipedia for ${query}`);
+          return this._navigateToExternalUrl(wikiUrl, `Wikipedia: ${query}`, raw);
+        } else if (site === 'youtube' && !currentHost.includes('youtube.com')) {
+          const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_external_search' });
+          if (taskId) this._finishActiveTask(taskId, 'COMPLETED', `Searching YouTube for ${query}`);
+          return this._navigateToExternalUrl(ytUrl, `YouTube: ${query}`, raw);
+        } else if (site === 'github' && !currentHost.includes('github.com')) {
+          const ghUrl = `https://github.com/search?q=${encodeURIComponent(query)}`;
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'navigating_external_search' });
+          if (taskId) this._finishActiveTask(taskId, 'COMPLETED', `Searching GitHub for ${query}`);
+          return this._navigateToExternalUrl(ghUrl, `GitHub: ${query}`, raw);
+        }
+      }
+
       const directUrlMatch = raw.match(/^(?:(?:please\s+)?(?:go\s+to|visit|open|navigate\s+to)\s+)?(https?:\/\/[^\s]+)$/i) ||
                              raw.match(/^(?:(?:please\s+)?(?:go\s+to|visit|open|navigate\s+to)\s+)([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?)$/i);
       if (directUrlMatch) {
@@ -1479,7 +1629,10 @@
       this._setAuroraTaskUi('processing', 'Gathering context');
       const tIntent0 = performance.now();
       const tWm0 = performance.now();
-      const wmInv = this.worldModel ? await this.worldModel.observeTab(document).catch(() => null) : null;
+      const wmInv = this.worldModel ? await Promise.race([
+        this.worldModel.observeTab(document),
+        new Promise((r) => setTimeout(() => r(null), 1500))
+      ]).catch(() => null) : null;
       const wmBuildMs = Math.round((performance.now() - tWm0) * 100) / 100;
       if (this.agentFsm) {
         this.agentFsm.recordStageTiming(requestId, 'observation', wmBuildMs);
@@ -1526,10 +1679,13 @@
         !isControlOrReadOnlyCmd &&
         (!meta || meta.skipLearnedSkills !== true)
       ) {
-        learnedSkillHits = await this.memory.retrieveLearnedSkillsAsync(raw, window.location.href, {
-          topK: 3,
-          minScore: 0.44
-        }).catch(() => []);
+        learnedSkillHits = await Promise.race([
+          this.memory.retrieveLearnedSkillsAsync(raw, window.location.href, {
+            topK: 3,
+            minScore: 0.44
+          }),
+          new Promise((r) => setTimeout(() => r([]), 800))
+        ]).catch(() => []);
         if (this.teach && learnedSkillHits.length > 0 && learnedSkillHits[0].score >= 0.70) {
           const topSkill = learnedSkillHits[0].skill;
           if (this.agentFsm) this.agentFsm.transition('EXECUTING', { requestId, reason: 'learned_skill_replay' });
@@ -2914,6 +3070,16 @@
       }
 
       if (!res) return null;
+      if (res && res.verified && window.SW_UI) {
+        if (fastAction.type === 'scroll') {
+          window.SW_UI.showCard({
+            type: 'answer',
+            title: 'Scroll',
+            text: `Scrolled ${fastAction.dir || 'down'}.`,
+            reqId: requestId
+          });
+        }
+      }
       const execMs = Math.round((performance.now() - tExec0) * 100) / 100;
       const totalMs = Math.round((performance.now() - turnStart) * 100) / 100;
       if (this.agentFsm) {
@@ -3138,7 +3304,7 @@
         navigationIdentity: (wmInv && wmInv.navigationIdentity) || '',
         taskId: (this.taskLifecycle && this.taskLifecycle.activeTaskId) ? String(this.taskLifecycle.activeTaskId) : '',
         maxContextTokens: tokenBudget,
-        timeoutMs: 16500,
+        timeoutMs: 4500,
         selectionSummary: selSummary,
         relevantMemories: (resolvedContext && Array.isArray(resolvedContext.relevantMemories))
           ? resolvedContext.relevantMemories.slice(0, 3).map((m) => `${m.activity?.topic || ''}: ${m.activity?.user_command || ''}`)
@@ -3150,8 +3316,8 @@
         return await new Promise((resolve) => {
           let finished = false;
           const timer = setTimeout(() => {
-            if (!finished) { finished = true; resolve({ status: 'timeout', message: 'NLU plan request timed out after 17.8s.', _sentDigestText: digestText, _sentCandidateIds: payload.candidateIds }); }
-          }, 17800);
+            if (!finished) { finished = true; resolve({ status: 'timeout', message: 'NLU plan request timed out after 5.0s.', _sentDigestText: digestText, _sentCandidateIds: payload.candidateIds }); }
+          }, 5000);
           chrome.runtime.sendMessage({ type: 'SLEEPWALKER_NLU_PLAN_REQUEST', payload }, (res) => {
             if (finished) return;
             finished = true;
@@ -3232,7 +3398,7 @@
           };
         }),
         maxContextTokens: 1200,
-        timeoutMs: 21000
+        timeoutMs: 3500
       };
 
       try {
@@ -3240,7 +3406,7 @@
           let finished = false;
           const timer = setTimeout(() => {
             if (!finished) { finished = true; resolve({ status: 'timeout', message: 'Escalated Ollama request timed out.' }); }
-          }, 22500);
+          }, 4000);
           chrome.runtime.sendMessage({ type: 'SLEEPWALKER_NLU_ESCALATE_REQUEST', payload }, (res) => {
             if (finished) return;
             finished = true;
@@ -4539,6 +4705,16 @@
           const ms = performance.now() - t0;
           if (beRes && (beRes.status === 'SUCCESS' || beRes.verified)) {
             this._recordRolloutEvent({ action: 'search', engine: 'rebuilt_browser_engine', outcome: 'success', latencyMs: ms });
+            const sMsg = `Searched for "${query}".`;
+            this.setAssistantReply(sMsg);
+            if (window.SW_UI) {
+              window.SW_UI.showCard({
+                type: 'answer',
+                title: 'Search',
+                text: sMsg,
+                reqId: opts.requestId || (opts.meta && opts.meta.reqId)
+              });
+            }
             return {
               status: 'searched',
               ok: true,
@@ -4785,6 +4961,11 @@
       if (intent === 'FILL_PROFILE' && this.forms) { this.lastUndoableType = 'forms'; return this.forms.fillFromProfile(); }
       if (intent === 'UPLOAD') return (args.mode === 'camera' && this.camera) ? this.camera.requestCapture(args.target || rawText) : (this.upload && this.upload.requestUpload(args.target || rawText));
       if (intent === 'UNDO') return (this.lastUndoableType === 'upload' && this.upload && this.upload.uploadUndoStack.length) ? this.upload.undoLastUpload() : (this.forms && this.forms.undoLast());
+      if (intent === 'CHANGE_LANGUAGE') {
+        const locale = args.locale || 'en-IN';
+        const langName = args.language || '';
+        return this.applyLanguageSwitch(locale, langName, cmdId);
+      }
       if (intent === 'CONTROL') {
         if (args.action === 'pause') this.reader.pause();
         else if (args.action === 'resume') this.reader.resume();
@@ -4807,6 +4988,14 @@
         this._recordRolloutEvent({ action: 'read_page', engine: 'rebuilt_browser_engine', outcome: rc.verified ? 'success' : 'fallback', latencyMs: performance.now() - rT0 });
         if (rc && rc.verified && rc.text) {
           this.reader.readText(rc.text.slice(0, 1200));
+          if (window.SW_UI) {
+            window.SW_UI.setState('speaking');
+            window.SW_UI.showCard({
+              type: 'summary',
+              title: 'Reading Page',
+              text: rc.text.slice(0, 260)
+            });
+          }
           return { status: 'reading_page', verified: true, engine: 'rebuilt_browser_engine', wordCount: rc.wordCount, text: rc.text.slice(0, 400) };
         }
       }
