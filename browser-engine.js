@@ -344,12 +344,26 @@
         return `[${prefix}${num}] ${a.role} "${a.name}"${statePart}${secPart}`;
       });
 
+      const links = actionable.filter((a) => a.role === 'link').length;
+      const buttons = actionable.filter((a) => a.role === 'button').length;
+      const inputs = actionable.filter((a) => a.role === 'textbox' || a.role === 'searchbox').length;
+      const dropdowns = actionable.filter((a) => a.role === 'combobox').length;
+      const tabs = actionable.filter((a) => a.role === 'tab').length;
+
       return {
         timestamp: Date.now(),
-        url: window.location.href,
-        title: document.title,
+        url: typeof window !== 'undefined' ? window.location.href : '',
+        title: typeof document !== 'undefined' ? document.title : '',
+        viewport: typeof window !== 'undefined' ? {
+          width: window.innerWidth,
+          height: window.innerHeight,
+          scrollX: window.scrollX,
+          scrollY: window.scrollY
+        } : { width: 0, height: 0, scrollX: 0, scrollY: 0 },
+        observationSource: 'Combined (DOM + Accessibility Tree)',
         elements: actionable,
         elementCount: actionable.length,
+        summaryCounts: { links, buttons, inputs, dropdowns, tabs },
         compactTokens: tokens,
         compactPrompt: tokens.join('\n')
       };
@@ -1474,42 +1488,65 @@
       if (!indicator && document.body) {
         indicator = document.createElement('div');
         indicator.id = 'sleepwalker-pointer-indicator';
-        indicator.className = 'sleepwalker-pointer-cursor';
+        indicator.className = 'sleepwalker-pointer-cursor sw-cursor-v2';
         indicator.setAttribute('aria-hidden', 'true');
-        indicator.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none !important;z-index:2147483647;display:none;will-change:left,top,transform;transform:translate(-2px,-2px);';
+        indicator.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none !important;z-index:2147483647;display:none;will-change:left,top,transform;transform:translate(-3px,-3px);';
         indicator.innerHTML = `
-          <svg viewBox="0 0 24 24" class="sw-pointer-svg" width="28" height="28" style="pointer-events:none;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.45));">
-            <path d="M4 2 L20 10 L12 13 L8 21 Z" fill="#ffd700" stroke="#1b1714" stroke-width="1.8" stroke-linejoin="round"/>
+          <svg viewBox="0 0 28 28" class="sw-cursor-arrow" width="30" height="30" style="pointer-events:none;filter:drop-shadow(0 3px 8px rgba(0,0,0,0.45));">
+            <defs>
+              <linearGradient id="sw-ptr-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#06b6d4" />
+                <stop offset="60%" stop-color="#3b82f6" />
+                <stop offset="100%" stop-color="#8b5cf6" />
+              </linearGradient>
+            </defs>
+            <path d="M4 2 L22 11 L14 14 L9 24 Z" fill="url(#sw-ptr-grad)" stroke="#0f172a" stroke-width="1.8" stroke-linejoin="round"/>
           </svg>
-          <span class="sw-pointer-pulse" style="pointer-events:none;"></span>
-          <span class="sw-pointer-label" style="pointer-events:none;display:none;"></span>
+          <span class="sw-cursor-ring" style="pointer-events:none;"></span>
+          <span class="sw-click-shockwave" style="pointer-events:none;"></span>
+          <span class="sw-cursor-badge" style="pointer-events:none;">
+            <span class="sw-env-tag">BROWSER</span>
+            <span class="sw-cursor-state-text"></span>
+            <span class="sw-cursor-coords" style="color:#94a3b8;font-size:10px;"></span>
+          </span>
         `;
         document.documentElement.appendChild(indicator);
       }
       return indicator;
     }
 
-    _updatePointerIndicator(x, y, label = null, clicking = false) {
+    _updatePointerIndicator(x, y, label = null, state = 'default', env = 'browser') {
       if (typeof document === 'undefined') return;
       const indicator = this._ensurePointerIndicator();
       if (!indicator) return;
       indicator.style.display = 'block';
       indicator.style.left = `${Math.round(x)}px`;
       indicator.style.top = `${Math.round(y)}px`;
-      if (clicking) {
-        indicator.classList.add('sw-pointer-clicking');
-      } else {
-        indicator.classList.remove('sw-pointer-clicking');
+
+      // Remove existing state classes
+      indicator.classList.remove('sw-state-hover', 'sw-state-clicking', 'sw-state-wait', 'sw-state-type', 'sw-pointer-clicking');
+
+      if (state === 'click' || state === true) {
+        indicator.classList.add('sw-state-clicking', 'sw-pointer-clicking');
+      } else if (state === 'hover') {
+        indicator.classList.add('sw-state-hover');
+      } else if (state === 'wait') {
+        indicator.classList.add('sw-state-wait');
+      } else if (state === 'type') {
+        indicator.classList.add('sw-state-type');
       }
-      const lbl = indicator.querySelector('.sw-pointer-label');
-      if (lbl) {
-        if (label) {
-          lbl.textContent = label;
-          lbl.style.display = 'inline-block';
-        } else {
-          lbl.style.display = 'none';
-        }
+
+      const envTag = indicator.querySelector('.sw-env-tag');
+      if (envTag) envTag.textContent = env.toUpperCase();
+
+      const stateText = indicator.querySelector('.sw-cursor-state-text');
+      if (stateText) {
+        stateText.textContent = label || (state !== 'default' ? state.toUpperCase() : '');
+        stateText.style.display = (label || state !== 'default') ? 'inline' : 'none';
       }
+
+      const coords = indicator.querySelector('.sw-cursor-coords');
+      if (coords) coords.textContent = `(${Math.round(x)}, ${Math.round(y)})`;
     }
 
     _hidePointerIndicator() {
@@ -1517,7 +1554,225 @@
       const indicator = document.getElementById('sleepwalker-pointer-indicator');
       if (indicator) {
         indicator.style.display = 'none';
-        indicator.classList.remove('sw-pointer-clicking');
+        indicator.classList.remove('sw-state-clicking', 'sw-state-hover', 'sw-state-wait', 'sw-pointer-clicking');
+      }
+    }
+
+    _ensureTargetHighlighter() {
+      if (typeof document === 'undefined') return null;
+      let highlighter = document.getElementById('sleepwalker-target-highlighter');
+      if (!highlighter && document.body) {
+        highlighter = document.createElement('div');
+        highlighter.id = 'sleepwalker-target-highlighter';
+        highlighter.setAttribute('aria-hidden', 'true');
+        highlighter.innerHTML = `
+          <div class="sw-target-tag">
+            <span class="sw-target-role">TARGET</span>
+            <span class="sw-target-name">Element</span>
+            <span class="sw-target-conf" style="color:#38bdf8;font-size:10px;">CONFIRMED</span>
+          </div>
+        `;
+        document.documentElement.appendChild(highlighter);
+      }
+      return highlighter;
+    }
+
+    _highlightTarget(target, metadata = {}) {
+      if (typeof document === 'undefined') return;
+      const el = this._resolveTargetElement(target);
+      const highlighter = this._ensureTargetHighlighter();
+      if (!highlighter) return;
+
+      if (!el) {
+        highlighter.style.display = 'none';
+        return;
+      }
+
+      const rect = el.getBoundingClientRect();
+      const pad = 4;
+      highlighter.style.display = 'block';
+      highlighter.style.left = `${Math.max(0, rect.left - pad)}px`;
+      highlighter.style.top = `${Math.max(0, rect.top - pad)}px`;
+      highlighter.style.width = `${Math.max(16, rect.width + pad * 2)}px`;
+      highlighter.style.height = `${Math.max(16, rect.height + pad * 2)}px`;
+      highlighter.classList.add('sw-target-pulsing');
+
+      const roleSpan = highlighter.querySelector('.sw-target-role');
+      if (roleSpan) roleSpan.textContent = (metadata.role || el.tagName || 'ELEMENT').toUpperCase();
+
+      const nameSpan = highlighter.querySelector('.sw-target-name');
+      if (nameSpan) {
+        const name = metadata.name || el.getAttribute('aria-label') || el.placeholder || el.innerText || el.id || '';
+        nameSpan.textContent = name.length > 35 ? name.slice(0, 35) + '…' : (name || 'Element');
+      }
+
+      const confSpan = highlighter.querySelector('.sw-target-conf');
+      if (confSpan) confSpan.textContent = metadata.confidence ? `${Math.round(metadata.confidence * 100)}% MATCH` : 'CONFIRMED FOCUS';
+    }
+
+    _clearTargetHighlight() {
+      if (typeof document === 'undefined') return;
+      const highlighter = document.getElementById('sleepwalker-target-highlighter');
+      if (highlighter) {
+        highlighter.style.display = 'none';
+        highlighter.classList.remove('sw-target-pulsing');
+      }
+    }
+
+    _ensureTypingIndicator() {
+      if (typeof document === 'undefined') return null;
+      let indicator = document.getElementById('sleepwalker-typing-indicator');
+      if (!indicator && document.body) {
+        indicator = document.createElement('div');
+        indicator.id = 'sleepwalker-typing-indicator';
+        indicator.setAttribute('aria-hidden', 'true');
+        indicator.innerHTML = `
+          <div class="sw-typing-header">
+            <span class="sw-focus-tag">KEYBOARD FOCUS CONFIRMED</span>
+            <span class="sw-typing-field-name">Input Field</span>
+          </div>
+          <div class="sw-typing-body">
+            <span>Typing: "</span><span class="sw-typing-entered"></span><span style="color:#94a3b8;">"</span>
+            <span class="sw-typing-caret"></span>
+          </div>
+          <div class="sw-typing-verified" style="display:none;"></div>
+        `;
+        document.documentElement.appendChild(indicator);
+      }
+      return indicator;
+    }
+
+    _showTypingFeedback(target, fieldName, fullText, currentTyped = '') {
+      if (typeof document === 'undefined') return;
+      const el = this._resolveTargetElement(target);
+      const indicator = this._ensureTypingIndicator();
+      if (!indicator) return;
+
+      indicator.style.display = 'block';
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        indicator.style.left = `${Math.max(10, rect.left)}px`;
+        indicator.style.top = `${Math.max(10, rect.top - 58)}px`;
+      }
+
+      const fn = indicator.querySelector('.sw-typing-field-name');
+      if (fn) fn.textContent = fieldName || 'Active Input';
+
+      const entered = indicator.querySelector('.sw-typing-entered');
+      if (entered) entered.textContent = currentTyped || fullText;
+
+      const ver = indicator.querySelector('.sw-typing-verified');
+      if (ver) ver.style.display = 'none';
+    }
+
+    _showTypingVerification(target, expectedText, actualValue, verified) {
+      if (typeof document === 'undefined') return;
+      const indicator = this._ensureTypingIndicator();
+      if (!indicator) return;
+
+      const ver = indicator.querySelector('.sw-typing-verified');
+      if (ver) {
+        ver.style.display = 'block';
+        ver.className = `sw-typing-verified ${verified ? 'pass' : 'fail'}`;
+        ver.textContent = verified
+          ? `✓ VERIFIED FIELD VALUE: "${actualValue || expectedText}"`
+          : `✗ FIELD VALUE MISMATCH: "${actualValue}" (Expected: "${expectedText}")`;
+      }
+
+      // Hide after settle
+      setTimeout(() => {
+        if (indicator) indicator.style.display = 'none';
+      }, 2500);
+    }
+
+    _ensureAwarenessHud() {
+      if (typeof document === 'undefined') return null;
+      let hud = document.getElementById('sleepwalker-awareness-hud');
+      if (!hud && document.body) {
+        hud = document.createElement('div');
+        hud.id = 'sleepwalker-awareness-hud';
+        hud.setAttribute('data-sleepwalker-ui', '1');
+        hud.innerHTML = `
+          <div class="sw-hud-header">
+            <div class="sw-hud-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0284c7" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+              <span>Sleepwalker Awareness</span>
+            </div>
+            <span class="sw-hud-stage-badge sw-stage-LISTENING" id="swHudStageBadge">LISTENING</span>
+          </div>
+          <div class="sw-hud-body">
+            <div class="sw-hud-row">
+              <span class="sw-hud-label">Command:</span>
+              <span class="sw-hud-val" id="swHudCommand">—</span>
+            </div>
+            <div class="sw-hud-row">
+              <span class="sw-hud-label">Action Target:</span>
+              <span class="sw-hud-val" id="swHudTarget">—</span>
+            </div>
+            <div class="sw-hud-awareness-box" id="swHudAwarenessBox">
+              <div style="font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;">
+                <span>Page Perception</span>
+                <span id="swHudObsSource" style="color:#0284c7;font-size:9px;text-transform:uppercase;">DOM + Accessibility</span>
+              </div>
+              <div id="swHudElementsSummary" style="color:#475569;">Links: 0 • Buttons: 0 • Inputs: 0</div>
+              <div id="swHudScrollPos" style="color:#94a3b8;font-size:10px;margin-top:2px;">Scroll: (0, 0)</div>
+            </div>
+            <button class="sw-hud-emergency-btn" id="swHudEmergencyBtn">EMERGENCY STOP</button>
+          </div>
+        `;
+        document.documentElement.appendChild(hud);
+
+        const emBtn = hud.querySelector('#swHudEmergencyBtn');
+        if (emBtn) {
+          emBtn.addEventListener('click', () => {
+            if (typeof window !== 'undefined' && typeof window.__sleepwalker_emergency_stop === 'function') {
+              window.__sleepwalker_emergency_stop();
+            } else if (typeof fetch === 'function') {
+              fetch('http://127.0.0.1:4888/api/emergency-stop', { method: 'POST' }).catch(() => {});
+            }
+            alert('EMERGENCY STOP TRIGGERED: Desktop actions halted.');
+          });
+        }
+      }
+      return hud;
+    }
+
+    _updateAwarenessHud(data = {}) {
+      if (typeof document === 'undefined') return;
+      const hud = this._ensureAwarenessHud();
+      if (!hud) return;
+
+      if (data.stage) {
+        const badge = hud.querySelector('#swHudStageBadge');
+        if (badge) {
+          badge.textContent = data.stage;
+          badge.className = `sw-hud-stage-badge sw-stage-${data.stage}`;
+        }
+      }
+
+      if (data.command) {
+        const cmd = hud.querySelector('#swHudCommand');
+        if (cmd) cmd.textContent = data.command;
+      }
+
+      if (data.target) {
+        const tgt = hud.querySelector('#swHudTarget');
+        if (tgt) tgt.textContent = data.target;
+      }
+
+      if (data.source) {
+        const src = hud.querySelector('#swHudObsSource');
+        if (src) src.textContent = data.source;
+      }
+
+      if (data.elementsSummary) {
+        const es = hud.querySelector('#swHudElementsSummary');
+        if (es) es.textContent = data.elementsSummary;
+      }
+
+      if (data.scroll) {
+        const sp = hud.querySelector('#swHudScrollPos');
+        if (sp) sp.textContent = `Scroll: (${data.scroll.x || 0}, ${data.scroll.y || 0})`;
       }
     }
 
@@ -1719,7 +1974,13 @@
       const clientY = Math.round(rect.top + rect.height / 2);
       this.currentPointer = { x: clientX, y: clientY };
       if (typeof window !== 'undefined') window.__sleepwalker_pointer = this.currentPointer;
-      this._updatePointerIndicator(clientX, clientY, options.label || 'Clicking...', true);
+
+      // 1. Highlight target before interaction
+      const targetLabel = options.label || el.getAttribute('aria-label') || el.innerText || el.value || el.tagName;
+      this._highlightTarget(el, { role: el.getAttribute('role') || el.tagName, name: targetLabel, confidence: 0.96 });
+
+      // 2. Move pointer smoothly and show click animation
+      this._updatePointerIndicator(clientX, clientY, options.label || 'Clicking...', 'click');
 
       let mechanism = 'synthetic_events_and_dom_methods';
       const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
@@ -1736,7 +1997,8 @@
       }
 
       await new Promise((r) => setTimeout(r, this.executor.options.settleDelayMs || 60));
-      this._updatePointerIndicator(clientX, clientY, null, false);
+      this._updatePointerIndicator(clientX, clientY, null, 'default');
+      this._clearTargetHighlight();
       this._recordOp('click', { x: clientX, y: clientY, mechanism });
       return { ok: true, clientX, clientY, mechanism };
     }
@@ -1859,22 +2121,32 @@
       await this.executor.scrollIntoViewIfNeeded(el);
 
       const str = String(text != null ? text : '');
+      const fieldName = options.label || el.getAttribute('aria-label') || el.placeholder || el.name || el.id || 'Text Input';
+      
+      // 1. Highlight target input and show typing feedback badge
+      this._highlightTarget(el, { role: 'textbox', name: fieldName, confidence: 0.98 });
+      this._showTypingFeedback(el, fieldName, str, '');
+
       const hasCdp = !options.syntheticOnly && typeof window !== 'undefined' && typeof window.__sleepwalker_cdp_input === 'function';
       let mechanism = 'synthetic_events_and_dom_methods';
 
       if (hasCdp) {
-        const clickRes = await this.click(el, { steps: 4, label: 'Focusing input...' });
+        const clickRes = await this.click(el, { steps: 4, label: `Focusing ${fieldName}...` });
         if (!clickRes.ok && clickRes.cancelled) return clickRes;
         if (typeof el.focus === 'function') el.focus();
 
         try {
           const keyDelay = Math.max(10, options.keyDelayMs || this.options.keyDelayMs || 25);
+          let currentChars = '';
           for (const char of str) {
             if (this.interrupted) {
               this._hidePointerIndicator();
+              this._clearTargetHighlight();
               return { ok: false, reason: 'interrupted', cancelled: true };
             }
-            this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, `Typing: ${char}`);
+            currentChars += char;
+            this._showTypingFeedback(el, fieldName, str, currentChars);
+            this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, `Typing: ${char}`, 'type');
             await window.__sleepwalker_cdp_input({ type: 'keyPress', key: char });
             await new Promise((r) => setTimeout(r, keyDelay));
           }
@@ -1895,9 +2167,15 @@
         await this.executor.type(el, str, options);
       }
 
-      this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, null, false);
-      this._recordOp('typeText', { textLength: str.length, mechanism, ok: true });
-      return { ok: true, text: str, mechanism };
+      // 2. Verify actual field value
+      const actualVal = el.value !== undefined ? el.value : (el.innerText || '');
+      const verified = Boolean(actualVal && actualVal.includes(str));
+      this._showTypingVerification(el, str, actualVal, verified);
+      this._updatePointerIndicator(this.currentPointer.x, this.currentPointer.y, null, 'default');
+      this._clearTargetHighlight();
+
+      this._recordOp('typeText', { textLength: str.length, mechanism, ok: verified, actualVal });
+      return { ok: verified, text: str, actualValue: actualVal, mechanism };
     }
 
     async pressKey(key, options = {}) {

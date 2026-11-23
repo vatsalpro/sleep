@@ -1,0 +1,200 @@
+{
+  "timestamp": "2026-11-23T11:25:05.048Z",
+  "results": [
+    {
+      "id": "SCENARIO-01",
+      "name": "Simple webpage navigation",
+      "result": "PASS",
+      "durationMs": 2209,
+      "details": {
+        "steps": 1,
+        "provider": "gemini"
+      }
+    },
+    {
+      "id": "SCENARIO-02",
+      "name": "Read page headings and links",
+      "result": "PASS",
+      "durationMs": 2050,
+      "details": {
+        "steps": 2,
+        "intent": "EXTRACT"
+      }
+    },
+    {
+      "id": "SCENARIO-03",
+      "name": "Find and use a search field",
+      "result": "PASS",
+      "durationMs": 1681,
+      "details": {
+        "steps": 2
+      }
+    },
+    {
+      "id": "SCENARIO-04",
+      "name": "Search and verify results",
+      "result": "PASS",
+      "durationMs": 1935,
+      "details": {
+        "steps": 3
+      }
+    },
+    {
+      "id": "SCENARIO-05",
+      "name": "Click a specified link",
+      "result": "PASS",
+      "durationMs": 1654,
+      "details": {
+        "steps": 1
+      }
+    },
+    {
+      "id": "SCENARIO-06",
+      "name": "Fill a form",
+      "result": "PASS",
+      "durationMs": 2281,
+      "details": {
+        "steps": 3
+      }
+    },
+    {
+      "id": "SCENARIO-07",
+      "name": "Select a dropdown option",
+      "result": "PASS",
+      "durationMs": 1505,
+      "details": {
+        "steps": 1
+      }
+    },
+    {
+      "id": "SCENARIO-08",
+      "name": "Navigate tabs and menus",
+      "result": "PASS",
+      "durationMs": 2152,
+      "details": {
+        "steps": 3
+      }
+    },
+    {
+      "id": "SCENARIO-09",
+      "name": "Scroll to a specified section",
+      "result": "PASS",
+      "durationMs": 2464,
+      "details": {
+        "steps": 1
+      }
+    },
+    {
+      "id": "SCENARIO-10",
+      "name": "Extract information from a page",
+      "result": "PASS",
+      "durationMs": 18180,
+      "details": {
+        "steps": 4
+      }
+    },
+    {
+      "id": "SCENARIO-11",
+      "name": "Handle ambiguous instructions",
+      "result": "PASS",
+      "durationMs": 4615,
+      "details": {
+        "intent": "CLICK",
+        "handledGracefully": true
+      }
+    },
+    {
+      "id": "SCENARIO-12",
+      "name": "Handle missing elements",
+      "result": "PASS",
+      "durationMs": 1478,
+      "details": {
+        "caughtByVerifier": true,
+        "reason": "Click on '#nonexistent-element-xyz' did not produce detectable state change."
+      }
+    },
+    {
+      "id": "SCENARIO-13",
+      "name": "Handle dynamically loaded content",
+      "result": "PASS",
+      "durationMs": 2013,
+      "details": {
+        "dynamicHandled": true
+      }
+    },
+    {
+      "id": "SCENARIO-14",
+      "name": "Recover from failed navigation",
+      "result": "PASS",
+      "durationMs": 1617,
+      "details": {
+        "failureDetectedGracefully": true
+      }
+    },
+    {
+      "id": "SCENARIO-15",
+      "name": "Cancel an active command",
+      "result": "PASS",
+      "durationMs": 5,
+      "details": {
+        "cancelledSuccessfully": true
+      }
+    },
+    {
+      "id": "SCENARIO-16",
+      "name": "Test local Ollama model selection",
+      "result": "PASS",
+      "durationMs": 8340,
+      "details": {
+        "provider": "ollama",
+        "model": "llama3.2:3b",
+        "latencyMs": 8338
+      }
+    },
+    {
+      "id": "SCENARIO-17",
+      "name": "Test Gemini provider selection",
+      "result": "PASS",
+      "durationMs": 2557,
+      "details": {
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "latencyMs": 2553,
+        "secretScrubbed": true
+      }
+    },
+    {
+      "id": "SCENARIO-18",
+      "name": "Verify model/provider telemetry",
+      "result": "PASS",
+      "durationMs": 2150,
+      "details": {
+        "provider": "gemini",
+        "model": "gemini-3.5-flash-lite",
+        "totalLatencyMs": 2146
+      }
+    },
+    {
+      "id": "SCENARIO-19",
+      "name": "Verify both observers receive the same evidence",
+      "result": "PASS",
+      "durationMs": 2611,
+      "details": {
+        "testId": "TEST-SCN-19-1795433102434",
+        "humanObservedEvents": 50,
+        "qaObservedEvents": 11
+      }
+    },
+    {
+      "id": "SCENARIO-20",
+      "name": "Verify emergency stop and bridge revocation",
+      "result": "PASS",
+      "durationMs": 3,
+      "details": {
+        "emergencyStopVerified": true,
+        "lockoutVerified": true,
+        "resetVerified": true
+      }
+    }
+  ]
+}

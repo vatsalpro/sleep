@@ -1049,6 +1049,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true, attached: attachedDebuggerTabs.has(tabId) });
     return true;
   }
+
+  if (message.type === 'SLEEPWALKER_DESKTOP_EXECUTE') {
+    executeNativeDesktopAction(message.request || message.payload || message)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({
+        requestId: (message.request && message.request.requestId) || 'err',
+        success: false,
+        status: 'FAILED',
+        error: err.message,
+        executionTimeMs: 0
+      }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_DESKTOP_STATUS') {
+    getNativeDesktopStatus()
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ available: false, error: err.message }));
+    return true;
+  }
 });
 
 /**
@@ -1857,4 +1877,153 @@ async function dispatchCdpInputAction(tabId, action = {}) {
   }
 
   throw new Error(`Unsupported CDP input action type: ${type}`);
+}
+
+// ============================================================================
+// Sleepwalker Native Messaging Client (Windows Desktop Companion Host)
+// Host: com.sleepwalker.native_host
+// ============================================================================
+
+const NATIVE_HOST_NAME = 'com.sleepwalker.native_host';
+let nativeCompanionPort = null;
+const pendingNativeRequests = new Map(); // requestId -> { resolve, reject, timer }
+
+function getOrCreateNativePort() {
+  if (nativeCompanionPort) return nativeCompanionPort;
+
+  try {
+    if (!chrome.runtime.connectNative) {
+      console.warn('[Sleepwalker Native] chrome.runtime.connectNative is not available');
+      return null;
+    }
+
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    nativeCompanionPort = port;
+
+    port.onMessage.addListener((response) => {
+      if (!response) return;
+      const reqId = response.requestId;
+      if (reqId && pendingNativeRequests.has(reqId)) {
+        const { resolve, timer } = pendingNativeRequests.get(reqId);
+        clearTimeout(timer);
+        pendingNativeRequests.delete(reqId);
+        resolve(response);
+      }
+    });
+
+    port.onDisconnect.addListener(() => {
+      const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Port disconnected';
+      console.warn('[Sleepwalker Native] Native companion port disconnected:', lastErr);
+      nativeCompanionPort = null;
+
+      // Reject all pending requests
+      for (const [reqId, { reject, timer }] of pendingNativeRequests.entries()) {
+        clearTimeout(timer);
+        reject(new Error(`Native companion disconnected: ${lastErr}`));
+      }
+      pendingNativeRequests.clear();
+    });
+
+    return port;
+  } catch (err) {
+    console.warn('[Sleepwalker Native] Failed to initialize native port:', err);
+    nativeCompanionPort = null;
+    return null;
+  }
+}
+
+async function executeNativeDesktopAction(request = {}) {
+  const requestId = request.requestId || `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const fullRequest = {
+    requestId,
+    action: request.action,
+    target: request.target || {},
+    windowIdentity: request.windowIdentity || null,
+    timeoutMs: Math.max(200, Number(request.timeoutMs) || 5000),
+    cancellationToken: request.cancellationToken || null
+  };
+
+  const port = getOrCreateNativePort();
+
+  if (port) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingNativeRequests.delete(requestId);
+        resolve({
+          requestId,
+          success: false,
+          status: 'TIMEOUT',
+          error: `Native companion timed out after ${fullRequest.timeoutMs}ms`,
+          executionTimeMs: fullRequest.timeoutMs
+        });
+      }, fullRequest.timeoutMs + 500);
+
+      pendingNativeRequests.set(requestId, { resolve, reject, timer });
+
+      try {
+        port.postMessage(fullRequest);
+      } catch (err) {
+        clearTimeout(timer);
+        pendingNativeRequests.delete(requestId);
+        reject(err);
+      }
+    });
+  }
+
+  // Fallback to one-shot sendNativeMessage if port is not available
+  return new Promise((resolve, reject) => {
+    if (!chrome.runtime.sendNativeMessage) {
+      return reject(new Error('Native messaging is not supported in this browser context'));
+    }
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({
+          requestId,
+          success: false,
+          status: 'TIMEOUT',
+          error: `Native companion timed out after ${fullRequest.timeoutMs}ms`,
+          executionTimeMs: fullRequest.timeoutMs
+        });
+      }
+    }, fullRequest.timeoutMs + 500);
+
+    chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, fullRequest, (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (chrome.runtime.lastError) {
+        resolve({
+          requestId,
+          success: false,
+          status: 'FAILED',
+          error: chrome.runtime.lastError.message,
+          executionTimeMs: 0
+        });
+      } else {
+        resolve(response || { requestId, success: true, status: 'COMPLETED' });
+      }
+    });
+  });
+}
+
+async function getNativeDesktopStatus() {
+  try {
+    const res = await executeNativeDesktopAction({
+      action: 'ping',
+      timeoutMs: 1500
+    });
+    return {
+      available: res.success === true,
+      result: res.result || null,
+      error: res.error || null
+    };
+  } catch (err) {
+    return {
+      available: false,
+      error: err.message
+    };
+  }
 }

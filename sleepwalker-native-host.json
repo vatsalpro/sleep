@@ -1,0 +1,9 @@
+{
+  "name": "com.sleepwalker.native_host",
+  "description": "Sleepwalker 2.0 Windows Native Companion Host",
+  "path": "D:\\sleep\\sleepwalker-native\\bin\\Release\\net8.0-windows\\sleepwalker-native.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://hfkigbihnjlmlcnhdngiijlihimkijbh/"
+  ]
+}

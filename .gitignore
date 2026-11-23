@@ -7,9 +7,28 @@ desktop.ini
 .idea/
 *.tmp
 
-# Local credentials
+# Local credentials & tokens
 config.local.js
 *.local.js
 .env
 .env.*
 !.env.example
+*.token
+.bridge-token
+dual-observation/.bridge-token
+
+# Temporary test captures and artifacts
+*.png
+!icons/*.png
+!assets/*.png
+!*.example.png
+test_*.txt
+acceptance.txt
+dual-observation/evidence/screenshots/
+
+# Dependencies & Build artifacts
+node_modules/
+[Bb]in/
+[Oo]bj/
+__pycache__/
+*.pyc

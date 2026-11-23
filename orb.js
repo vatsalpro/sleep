@@ -1,16 +1,31 @@
 /**
- * Sleepwalker - orb.js (Phase P1)
- * Siri-style bottom-centre translucent orb UI and global window.SW_UI contract.
- * Keeps everything in an isolated Shadow DOM container with pointer-events: none
- * everywhere except interactive controls, and stops all animations when idle.
+ * Sleepwalker - orb.js
+ * Modern Siri-inspired circular voice assistant interface.
+ * Features an expandable circular orb with blue, cyan, violet lighting,
+ * fluid internal waveform, distinct event-driven interaction states,
+ * and zero continuous animation loops when idle.
  */
 (function (rootScope) {
   'use strict';
 
   if (rootScope.SleepwalkerOrbUI) return;
 
-  const VALID_STATES = new Set(['idle', 'silent', 'listening', 'thinking', 'speaking', 'confirm', 'error']);
-  // Symmetrical rest weights across the 7 vertical waveform bars inside the orb
+  const VALID_STATES = new Set([
+    'idle',
+    'silent',
+    'listening',
+    'processing',
+    'observing',
+    'executing',
+    'speaking',
+    'completed',
+    'error',
+    // Backward compatibility aliases
+    'thinking',
+    'confirm'
+  ]);
+
+  // Symmetrical weights across the 7 waveform bars
   const BAR_BASE_WEIGHTS = [0.28, 0.52, 0.78, 1.0, 0.78, 0.52, 0.28];
 
   class SleepwalkerOrbUI {
@@ -27,7 +42,11 @@
       this.typeBtn = null;
       this.typeForm = null;
       this.typeInput = null;
+      this.completedIcon = null;
+      this.errorIcon = null;
+      this.obsSourceEl = null;
       this._hideTimer = null;
+      this._completedTimer = null;
       this.currentRequestId = '';
       this.handlers = {
         onOrbClick: typeof options.onOrbClick === 'function' ? options.onOrbClick : null,
@@ -51,7 +70,7 @@
       this.host.className = 'sleepwalker-ignore sleepwalker-exclude';
       this.host.style.cssText = 'position:fixed !important;inset:0 !important;width:0 !important;height:0 !important;overflow:visible !important;pointer-events:none !important;z-index:2147483644 !important;border:0 !important;margin:0 !important;padding:0 !important;background:transparent !important;';
       this.shadow = this.host.attachShadow({ mode: 'open' });
-      this.injectCssText('.sw-ui-root{position:fixed;inset:0;pointer-events:none;opacity:0;visibility:hidden;}.sw-ui-root[data-active="true"],.sw-ui-root.sw-dissolving{opacity:1;visibility:visible;}.sw-threads-canvas,.sw-ui-veil,.sw-edge-aurora{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;}.sw-card[hidden],.sw-type-form[hidden],.sw-aurora-bar[hidden],.sw-edge-aurora[hidden],.sw-scan-chip[hidden],.sw-aurora-cancel[hidden],.sw-card-menu[hidden],.sw-card-controls[hidden],.sw-card-actions[hidden]{display:none;}.sw-svg{width:20px;height:20px;min-width:20px;min-height:20px;max-width:20px;max-height:20px;display:inline-block;flex-shrink:0;overflow:hidden;}.sw-sparkle .sw-svg,.sw-sparkle svg{width:16px;height:16px;min-width:16px;min-height:16px;max-width:16px;max-height:16px;}svg{flex-shrink:0;}');
+      this.injectCssText('.sw-ui-root{position:fixed;inset:0;pointer-events:none;opacity:0;visibility:hidden;}.sw-ui-root[data-active="true"],.sw-ui-root.sw-dissolving{opacity:1;visibility:visible;}.sw-card[hidden],.sw-type-form[hidden],.sw-aurora-bar[hidden],.sw-status-bar[hidden],.sw-scan-chip[hidden],.sw-aurora-cancel[hidden],.sw-status-cancel[hidden],.sw-card-menu[hidden],.sw-card-controls[hidden],.sw-card-actions[hidden],.sw-obs-source-tag[hidden],.sw-state-icon[hidden]{display:none;}.sw-svg{width:20px;height:20px;min-width:20px;min-height:20px;max-width:20px;max-height:20px;display:inline-block;flex-shrink:0;overflow:hidden;}svg{flex-shrink:0;}');
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
         const link = doc.createElement('link');
         link.rel = 'stylesheet';
@@ -63,25 +82,22 @@
       wrapper.dataset.state = 'idle';
       wrapper.dataset.active = 'false';
       wrapper.innerHTML = `
-        <div id="sw-ui-edge-aurora" class="sw-edge-aurora" data-task-state="idle" hidden aria-hidden="true">
-          <div class="sw-edge-aurora-flow"></div>
-        </div>
+        <div id="sw-ui-edge-aurora" class="sw-edge-aurora" data-task-state="idle" hidden aria-hidden="true"></div>
         <div class="sw-orb-dock">
           <div id="sw-ui-scan" class="sw-scan-chip" hidden aria-live="polite">
             <span class="sw-scan-dot" aria-hidden="true"></span>
             <span id="sw-ui-scan-label">Mapping page...</span>
           </div>
-          <div id="sw-ui-aurora" class="sw-aurora-bar" data-task-state="idle" hidden aria-live="polite">
-            <div class="sw-aurora-mist" aria-hidden="true"></div>
-            <div class="sw-aurora-row">
-              <span class="sw-aurora-dot" aria-hidden="true"></span>
-              <div class="sw-aurora-text">
-                <div id="sw-ui-aurora-stage" class="sw-aurora-stage"></div>
-                <div id="sw-ui-aurora-task" class="sw-aurora-task"></div>
+          <div id="sw-ui-aurora" class="sw-aurora-bar sw-status-bar" data-task-state="idle" hidden aria-live="polite">
+            <div class="sw-status-row sw-aurora-row">
+              <span class="sw-status-dot sw-aurora-dot" aria-hidden="true"></span>
+              <span id="sw-ui-obs-source" class="sw-obs-source-tag" hidden>DOM</span>
+              <div class="sw-status-text sw-aurora-text">
+                <div id="sw-ui-aurora-stage" class="sw-status-stage sw-aurora-stage"></div>
+                <div id="sw-ui-aurora-task" class="sw-status-task sw-aurora-task"></div>
               </div>
-              <button type="button" id="sw-ui-cancel-btn" class="sw-aurora-cancel" aria-label="Cancel active task" hidden>Cancel</button>
+              <button type="button" id="sw-ui-cancel-btn" class="sw-status-cancel sw-aurora-cancel" aria-label="Cancel active task" hidden>Cancel</button>
             </div>
-            <div class="sw-aurora-thread-track" aria-hidden="true"><span class="sw-aurora-thread"></span></div>
           </div>
           <div id="sw-ui-transcript" class="sw-transcript-chip" aria-live="polite" data-visible="false"></div>
           <form id="sw-ui-type-form" class="sw-type-form" hidden>
@@ -93,6 +109,8 @@
               <div class="sw-orb-halo" aria-hidden="true"></div>
               <button type="button" id="sw-ui-orb" class="sw-orb-btn" aria-label="Sleepwalker voice assistant orb">
                 <span class="sw-orb-bars" aria-hidden="true">${'<span class="sw-bar"></span>'.repeat(7)}</span>
+                <svg id="sw-ui-completed-icon" class="sw-state-icon sw-completed-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" hidden aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                <svg id="sw-ui-error-icon" class="sw-state-icon sw-error-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" hidden aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
               </button>
             </div>
             <button type="button" id="sw-ui-type-btn" class="sw-type-btn" aria-expanded="false" aria-label="Type command instead of speaking">Type</button>
@@ -109,9 +127,12 @@
       this.auroraEl = this.shadow.getElementById('sw-ui-aurora');
       this.auroraStageEl = this.shadow.getElementById('sw-ui-aurora-stage');
       this.auroraTaskEl = this.shadow.getElementById('sw-ui-aurora-task');
+      this.obsSourceEl = this.shadow.getElementById('sw-ui-obs-source');
       this.cancelTaskBtn = this.shadow.getElementById('sw-ui-cancel-btn');
       this.orbBtn = this.shadow.getElementById('sw-ui-orb');
       this.bars = Array.from(this.shadow.querySelectorAll('.sw-bar'));
+      this.completedIcon = this.shadow.getElementById('sw-ui-completed-icon');
+      this.errorIcon = this.shadow.getElementById('sw-ui-error-icon');
       this.transcriptEl = this.shadow.getElementById('sw-ui-transcript');
       this.typeBtn = this.shadow.getElementById('sw-ui-type-btn');
       this.typeForm = this.shadow.getElementById('sw-ui-type-form');
@@ -119,7 +140,6 @@
       this._bindEvents();
       this.threads = rootScope.SleepwalkerThreads ? new rootScope.SleepwalkerThreads(this.shadow, this.rootEl) : null;
       this.card = rootScope.SleepwalkerCard ? new rootScope.SleepwalkerCard(this.shadow, this.rootEl, this) : null;
-      this._syncGlowPreference();
       this._observeDockLayout();
       this.syncLayout();
       this.setLevel(0);
@@ -151,22 +171,6 @@
       }
       const maxClearance = Math.max(124, Math.floor(vh * 0.48));
       this.rootEl.style.setProperty('--sw-dock-clearance', `${Math.min(maxClearance, Math.ceil(clearance))}px`);
-    }
-
-    _syncGlowPreference() {
-      if (!this.threads || typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-      try {
-        chrome.storage.local.get(['sleepwalker_glow_enabled'], (d) => {
-          if (this.threads && d) this.threads.setEnabled(d.sleepwalker_glow_enabled !== false);
-        });
-        if (chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
-          chrome.storage.onChanged.addListener((changes, area) => {
-            if (area === 'local' && changes.sleepwalker_glow_enabled && this.threads) {
-              this.threads.setEnabled(changes.sleepwalker_glow_enabled.newValue !== false);
-            }
-          });
-        }
-      } catch (_e) {}
     }
 
     _bindEvents() {
@@ -209,7 +213,6 @@
           this._processingTurn = true;
           const reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
           this.beginRequest(reqId, text);
-          // Keep the command bar accessible below cards so follow-up typed commands are never obstructed.
           this.typeForm.hidden = false;
           this.typeBtn.setAttribute('aria-expanded', 'true');
           this.syncLayout();
@@ -253,44 +256,58 @@
       }
     }
 
+    setObservationSource(source = '', target = '') {
+      if (!this.obsSourceEl) return;
+      const cleanSrc = String(source || '').trim();
+      if (cleanSrc) {
+        this.obsSourceEl.textContent = cleanSrc;
+        this.obsSourceEl.hidden = false;
+      } else {
+        this.obsSourceEl.hidden = true;
+      }
+      if (target && this.auroraTaskEl) {
+        this.auroraTaskEl.textContent = String(target).slice(0, 68);
+      }
+    }
+
     setTaskStatus(status = {}) {
       if (!this.auroraEl) return;
       const safe = status && typeof status === 'object' ? status : {};
-      const validTaskStates = new Set(['idle', 'processing', 'waiting_for_clarification', 'completed', 'cancelled', 'error']);
+      const validTaskStates = new Set(['idle', 'processing', 'observing', 'executing', 'waiting_for_clarification', 'completed', 'cancelled', 'error']);
       const st = validTaskStates.has(safe.state) ? safe.state : 'idle';
       this.auroraEl.dataset.taskState = st;
-      const showEdgeAurora = st === 'processing' || st === 'waiting_for_clarification';
-      if (this.edgeAuroraEl) {
-        this.edgeAuroraEl.dataset.taskState = st;
-        this.edgeAuroraEl.hidden = !showEdgeAurora;
-        this.edgeAuroraEl.classList.toggle('sw-active', showEdgeAurora);
+
+      if (safe.observationSource !== undefined) {
+        this.setObservationSource(safe.observationSource, safe.target);
       }
-      if (this.threads && typeof this.threads.setTaskProcessing === 'function') {
-        this.threads.setTaskProcessing(showEdgeAurora);
-      }
+
       if (st === 'idle') {
         this.auroraEl.hidden = true;
         if (this.auroraStageEl) this.auroraStageEl.textContent = '';
         if (this.auroraTaskEl) this.auroraTaskEl.textContent = '';
+        if (this.obsSourceEl) this.obsSourceEl.hidden = true;
         if (this.cancelTaskBtn) this.cancelTaskBtn.hidden = true;
         this.syncLayout();
         return;
       }
+
       this.auroraEl.hidden = false;
       if (this.auroraStageEl) {
         this.auroraStageEl.textContent = String(safe.stage || (
-          st === 'processing' ? 'Understanding request'
-          : (st === 'waiting_for_clarification' ? 'Waiting for clarification'
-            : (st === 'completed' ? 'Completed' : (st === 'cancelled' ? 'Cancelled' : 'Action failed')))
+          st === 'processing' ? 'Processing with AI'
+          : (st === 'observing' ? 'Inspecting webpage'
+            : (st === 'executing' ? 'Performing action'
+              : (st === 'waiting_for_clarification' ? 'Waiting for clarification'
+                : (st === 'completed' ? 'Completed' : (st === 'cancelled' ? 'Cancelled' : 'Action failed')))))
         )).slice(0, 64);
       }
       if (this.auroraTaskEl) {
-        this.auroraTaskEl.textContent = String(safe.taskLabel || '').slice(0, 68);
+        this.auroraTaskEl.textContent = String(safe.taskLabel || safe.target || '').slice(0, 68);
       }
       if (this.cancelTaskBtn) {
         const allowCancel = safe.showCancel !== undefined
           ? Boolean(safe.showCancel)
-          : (st === 'processing' || st === 'waiting_for_clarification');
+          : (st === 'processing' || st === 'observing' || st === 'executing' || st === 'waiting_for_clarification');
         this.cancelTaskBtn.hidden = !allowCancel;
       }
       if (this.rootEl && this.rootEl.dataset.active !== 'true') {
@@ -300,7 +317,7 @@
     }
 
     setState(nextState = 'idle') {
-      const normalized = VALID_STATES.has(nextState) ? nextState : 'silent';
+      let normalized = VALID_STATES.has(nextState) ? nextState : 'silent';
       if (normalized === 'silent' && this._dissolving) {
         return this.state;
       }
@@ -309,30 +326,62 @@
         clearTimeout(this._hideTimer);
         this._hideTimer = null;
       }
+      if (this._completedTimer) {
+        clearTimeout(this._completedTimer);
+        this._completedTimer = null;
+      }
+
+      // Map aliases for internal representations
+      const mappedState = (normalized === 'thinking' || normalized === 'confirm') ? 'processing' : normalized;
 
       this.state = normalized;
-      const isActive = normalized !== 'idle';
+      const isActive = mappedState !== 'idle';
       if (this.rootEl) {
         this.rootEl.classList.remove('sw-dissolving');
-        this.rootEl.dataset.state = normalized;
+        this.rootEl.dataset.state = mappedState;
         this.rootEl.dataset.active = isActive ? 'true' : 'false';
       }
 
-      if (normalized === 'idle') {
+      // Update orb icons
+      if (this.completedIcon) {
+        this.completedIcon.hidden = mappedState !== 'completed';
+      }
+      if (this.errorIcon) {
+        this.errorIcon.hidden = mappedState !== 'error';
+      }
+      const showBars = mappedState !== 'completed' && mappedState !== 'error';
+      const barsWrap = this.shadow ? this.shadow.querySelector('.sw-orb-bars') : null;
+      if (barsWrap) {
+        barsWrap.style.display = showBars ? 'flex' : 'none';
+      }
+
+      if (mappedState === 'idle') {
         if (this.card) this.card.hide({ restoreFocus: true });
         this.setTaskStatus({ state: 'idle' });
         this.setLevel(0);
         this.setTranscript('');
         if (this.typeForm) this.typeForm.hidden = true;
         if (this.typeBtn) this.typeBtn.setAttribute('aria-expanded', 'false');
-      } else if (normalized === 'silent') {
+      } else if (mappedState === 'silent') {
         this.setLevel(0.12);
-      } else if (normalized === 'listening' && this.level < 0.2) {
+      } else if (mappedState === 'listening' && this.level < 0.2) {
         this.setLevel(0.28);
-      } else if (normalized === 'thinking' || normalized === 'confirm') {
+      } else if (mappedState === 'processing') {
         this.setLevel(0.36);
+      } else if (mappedState === 'completed') {
+        this.setLevel(0);
+        // Automatically return smoothly to idle after brief confirmation
+        this._completedTimer = setTimeout(() => {
+          this._completedTimer = null;
+          if (this.state === 'completed') {
+            this.setState('idle');
+          }
+        }, 1250);
+      } else if (mappedState === 'error') {
+        this.setLevel(0.15);
       }
-      if (this.threads) this.threads.setMode(normalized);
+
+      if (this.threads) this.threads.setMode(mappedState);
       this.syncLayout();
       return normalized;
     }
@@ -363,7 +412,7 @@
       if (this.card && typeof this.card.reset === 'function') {
         this.card.reset();
       }
-      this.setState('thinking');
+      this.setState('processing');
       if (text) {
         this.setTranscript(text);
       }
@@ -381,6 +430,7 @@
         if (label) this.setTranscript(label.slice(0, 140));
       }
     }
+
     updateCard(spec = {}) {
       if (spec && spec.reqId && this.currentRequestId && spec.reqId !== this.currentRequestId) {
         return;
@@ -391,6 +441,7 @@
       }
       this.showCard(spec);
     }
+
     highlightTopic(index) { if (this.card) this.card.highlightTopic(index); }
     highlightSentence(index) { if (this.card) this.card.highlightSentence(index); }
     notifySpeechEnd() { if (this.card) this.card.setSpeechFinished(); }
@@ -418,8 +469,10 @@
       if (this.threads && this.orbBtn) {
         const rect = this.orbBtn.getBoundingClientRect();
         this.threads.triggerDissolve(rect, finish);
+      } else {
+        finish();
       }
-      this._hideTimer = setTimeout(finish, 540);
+      this._hideTimer = setTimeout(finish, 220);
     }
 
     injectCssText(cssText) {
@@ -441,12 +494,24 @@
     const api = {
       beginRequest: (reqId, text) => orb.beginRequest(reqId, text),
       getCurrentRequestId: () => orb.currentRequestId,
-      setState: (s) => orb.setState(s), setLevel: (l) => orb.setLevel(l), setTranscript: (t) => orb.setTranscript(t),
-      setTaskStatus: (st) => orb.setTaskStatus(st), setScanning: (on, lbl) => orb.setScanning(on, lbl),
-      showCard: (c) => orb.showCard(c), updateCard: (c) => orb.updateCard(c), highlightTopic: (i) => orb.highlightTopic(i), highlightSentence: (i) => orb.highlightSentence(i),
-      notifySpeechEnd: () => orb.notifySpeechEnd(), hideCard: () => orb.hideCard(), positionForTarget: (t) => orb.positionForTarget(t),
+      setState: (s) => orb.setState(s),
+      setLevel: (l) => orb.setLevel(l),
+      setTranscript: (t) => orb.setTranscript(t),
+      setTaskStatus: (st) => orb.setTaskStatus(st),
+      setObservationSource: (src, tgt) => orb.setObservationSource(src, tgt),
+      setScanning: (on, lbl) => orb.setScanning(on, lbl),
+      showCard: (c) => orb.showCard(c),
+      updateCard: (c) => orb.updateCard(c),
+      highlightTopic: (i) => orb.highlightTopic(i),
+      highlightSentence: (i) => orb.highlightSentence(i),
+      notifySpeechEnd: () => orb.notifySpeechEnd(),
+      hideCard: () => orb.hideCard(),
+      positionForTarget: (t) => orb.positionForTarget(t),
       getCardType: () => (orb.card && orb.card.visible && orb.card.spec ? orb.card.spec.type : null),
-      hide: (o) => orb.hide(o), getState: () => orb.state, setHandlers: (h) => orb.setHandlers(h), _orb: orb
+      hide: (o) => orb.hide(o),
+      getState: () => orb.state,
+      setHandlers: (h) => orb.setHandlers(h),
+      _orb: orb
     };
     rootScope.SW_UI = api;
     rootScope.__SW_UI_DEMO__ = (arg) => {
@@ -464,8 +529,21 @@
         };
         if (cardDemos[arg]) { api.setState(arg === 'confirm' || arg === 'critical' ? 'confirm' : 'speaking'); api.showCard(cardDemos[arg]); return arg; }
         api.setState(arg);
-        const p = { silent: [0.1, ''], listening: [0.62, 'Listening...'], thinking: [0.35, 'Thinking...'], speaking: [0.78, 'Speaking...'], confirm: [0.4, 'Say Yes or No'], error: [0.25, 'Action failed'] }[arg] || [0.3, ''];
-        api.setLevel(p[0]); if (p[1]) api.setTranscript(p[1]); return api.getState();
+        const p = {
+          silent: [0.1, ''],
+          listening: [0.62, 'Listening...'],
+          thinking: [0.35, 'Thinking...'],
+          processing: [0.35, 'Processing...'],
+          observing: [0.3, 'Inspecting webpage...'],
+          executing: [0.45, 'Executing action...'],
+          speaking: [0.78, 'Speaking...'],
+          confirm: [0.4, 'Say Yes or No'],
+          completed: [0, 'Completed'],
+          error: [0.25, 'Action failed']
+        }[arg] || [0.3, ''];
+        api.setLevel(p[0]);
+        if (p[1]) api.setTranscript(p[1]);
+        return api.getState();
       }
       if (typeof arg === 'object') {
         if (arg.state) api.setState(arg.state);

@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sleepwalker — Dual Live Observation Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #141c2e;
+      --card-border: #1e293b;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      padding: 24px;
+      line-height: 1.5;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+    .brand .badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+      box-shadow: 0 0 15px rgba(239, 68, 68, 0.4);
+    }
+    .btn-danger:hover {
+      background: #dc2626;
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.6);
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #0b0f19;
+    }
+    .btn-primary:hover { background: #0284c7; color: white; }
+
+    /* State indicator */
+    .state-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .state-pulse {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { opacity: 0.4; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.2); }
+      100% { opacity: 0.4; transform: scale(0.9); }
+    }
+    .state-IDLE { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+    .state-LISTENING { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+    .state-THINKING { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+    .state-PLANNING { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .state-OPERATING { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .state-STOPPED { background: rgba(239, 68, 68, 0.25); color: #f87171; }
+
+    /* Grid layout */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--text-muted);
+    }
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .metric-box {
+      background: #0f1524;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric-label { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; margin-bottom: 4px; }
+    .metric-value { font-size: 14px; font-weight: 600; word-break: break-all; }
+
+    /* Timeline */
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 480px;
+      overflow-y: auto;
+      padding-right: 6px;
+    }
+    .timeline-item {
+      background: #0f1524;
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+    .timeline-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .timeline-desc { font-weight: 500; }
+
+    /* Preview */
+    .preview-box {
+      background: #000;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      min-height: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .preview-img {
+      width: 100%;
+      height: auto;
+      display: block;
+      object-fit: contain;
+    }
+    .preview-placeholder {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* Bug Reporting */
+    .bug-section {
+      grid-column: 1 / -1;
+      margin-top: 10px;
+    }
+    .bug-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .form-group label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .form-control {
+      background: #0f1524;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .form-control:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .bug-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 380px;
+      overflow-y: auto;
+    }
+    .bug-card {
+      background: #0f1524;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+    }
+    .bug-card.human { border-left: 4px solid var(--purple); }
+    .bug-card.antigravity { border-left: 4px solid var(--accent); }
+    .bug-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 11px;
+    }
+    .reporter-tag {
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .reporter-tag.human { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+    .reporter-tag.antigravity { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+
+    /* 9-Stage Execution Stepper */
+    .stage-stepper-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+    }
+    .stage-stepper-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .sw-env-pill {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .stage-stepper {
+      display: grid;
+      grid-template-columns: repeat(9, 1fr);
+      gap: 6px;
+    }
+    .stage-step {
+      background: #0f1524;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 8px 4px;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 600;
+      color: #64748b;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.2s;
+    }
+    .stage-step .step-num {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #1e293b;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .stage-step.active {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: #38bdf8;
+      color: #f8fafc;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
+    }
+    .stage-step.active .step-num {
+      background: #38bdf8;
+      color: #0b0f19;
+      box-shadow: 0 0 8px #38bdf8;
+    }
+    .stage-step.completed {
+      background: rgba(16, 185, 129, 0.1);
+      border-color: rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+    .stage-step.completed .step-num {
+      background: #10b981;
+      color: #0b0f19;
+    }
+
+    /* Awareness & Typing feedback boxes */
+    .awareness-box {
+      background: #0f1524;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .awareness-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .source-tag {
+      background: rgba(168, 85, 247, 0.2);
+      color: #c084fc;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .element-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .element-counts b { color: var(--text-main); }
+    .typing-box {
+      background: #0f1524;
+      border: 1.5px solid #8b5cf6;
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 0 14px rgba(139, 92, 246, 0.2);
+    }
+    .typing-status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      margin-top: 6px;
+    }
+    .typing-status-pill.pass { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .typing-status-pill.fail { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .typing-status-pill.typing { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <h1>Sleepwalker 2.0</h1>
+      <span class="badge">Dual Live Observation Hub</span>
+      <div id="stateBadge" class="state-badge state-IDLE">
+        <span class="state-pulse"></span>
+        <span id="stateText">IDLE</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="btnEmergencyStop" class="btn btn-danger" onclick="triggerEmergencyStop()">🛑 EMERGENCY STOP</button>
+    </div>
+  </header>
+
+  <!-- 9-Stage Execution Stepper -->
+  <div class="stage-stepper-card">
+    <div class="stage-stepper-title">
+      <span>Live Computer Awareness & 9-Stage Action Pipeline</span>
+      <span class="sw-env-pill" id="valEnvTag">BROWSER VIEWPORT</span>
+    </div>
+    <div class="stage-stepper" id="stageStepper">
+      <div class="stage-step" data-stage="LISTENING"><span class="step-num">1</span> LISTENING</div>
+      <div class="stage-step" data-stage="COMMAND_RECEIVED"><span class="step-num">2</span> CMD RECV</div>
+      <div class="stage-step" data-stage="UNDERSTANDING"><span class="step-num">3</span> UNDERSTAND</div>
+      <div class="stage-step" data-stage="OBSERVING_PAGE"><span class="step-num">4</span> OBSERVE</div>
+      <div class="stage-step" data-stage="TARGET_IDENTIFIED"><span class="step-num">5</span> TARGET</div>
+      <div class="stage-step" data-stage="PLANNING_ACTION"><span class="step-num">6</span> PLAN</div>
+      <div class="stage-step" data-stage="EXECUTING"><span class="step-num">7</span> EXECUTE</div>
+      <div class="stage-step" data-stage="VERIFYING"><span class="step-num">8</span> VERIFY</div>
+      <div class="stage-step" data-stage="COMPLETED"><span class="step-num">9</span> DONE</div>
+    </div>
+  </div>
+
+  <div class="dashboard-grid">
+    <!-- Active State & Telemetry Card -->
+    <div class="card">
+      <div class="card-title">
+        <span>Active Execution Context</span>
+        <span id="lastUpdated" style="font-size: 12px;">--:--:--</span>
+      </div>
+      <div class="metric-row">
+        <div class="metric-box">
+          <div class="metric-label">Test ID</div>
+          <div class="metric-value" id="valTestId">—</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Command ID</div>
+          <div class="metric-value" id="valCommandId">—</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Cursor (X, Y)</div>
+          <div class="metric-value" id="valCursor">(0, 0)</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Active Step</div>
+          <div class="metric-value" id="valStep">Step 0</div>
+        </div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-label">Active Foreground Window / Field Focus</div>
+        <div class="metric-value" id="valActiveWindow">None</div>
+      </div>
+
+      <!-- AI Webpage Perception & Awareness Box -->
+      <div class="awareness-box">
+        <div class="awareness-header">
+          <span>AI Webpage Perception</span>
+          <span class="source-tag" id="valObsSource">Combined (DOM + Accessibility)</span>
+        </div>
+        <div style="font-size: 13px; font-weight: 600;" id="valObsPageTitle">Page: —</div>
+        <div class="element-counts" id="valElementCounts">
+          <span>Links: <b>0</b></span>
+          <span>Buttons: <b>0</b></span>
+          <span>Inputs: <b>0</b></span>
+          <span>Dropdowns: <b>0</b></span>
+        </div>
+        <div style="font-size: 11px; color: #64748b;" id="valScrollPos">Scroll Position: (0, 0)</div>
+      </div>
+
+      <!-- Live Typing Feedback Pill -->
+      <div class="typing-box" id="typingBox" style="display:none;">
+        <div style="font-size: 11px; color: #94a3b8; display:flex; justify-content:space-between; margin-bottom:4px;">
+          <span style="font-weight:700; color:#c084fc;">⌨️ KEYBOARD INPUT</span>
+          <span id="typingTargetField" style="font-family:monospace; color:#38bdf8;">#searchInput</span>
+        </div>
+        <div style="font-size: 14px; font-weight: 600; color:#fff;" id="typingTextPreview">"..."</div>
+        <div class="typing-status-pill typing" id="typingStatusPill">Typing...</div>
+      </div>
+
+      <div class="card-title" style="margin-top: 8px;">
+        <span>Live Execution Timeline</span>
+        <span id="eventCount" style="font-size: 12px;">0 events</span>
+      </div>
+      <div class="timeline" id="timelineList">
+        <div class="timeline-item" style="color: var(--text-muted);">Awaiting Sleepwalker commands...</div>
+      </div>
+    </div>
+
+    <!-- Live Desktop Observation Card -->
+    <div class="card">
+      <div class="card-title">
+        <span>Actual Windows Desktop Observation</span>
+        <span id="screenMeta" style="font-size: 12px;">1920x1200</span>
+      </div>
+      <div class="preview-box">
+        <img id="desktopPreview" class="preview-img" style="display:none;" alt="Live Desktop View" />
+        <div id="previewPlaceholder" class="preview-placeholder">
+          <div>Desktop Screen Capture</div>
+          <div style="font-size: 11px; margin-top: 4px;">Refreshes on each execution step</div>
+        </div>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted); display: flex; justify-content: space-between;">
+        <span>Snapshot Ref: <code id="refScreenshot">none</code></span>
+        <button class="btn" style="background:#1e293b; color:#fff; padding:4px 10px; font-size:11px;" onclick="refreshState()">Refresh Now</button>
+      </div>
+    </div>
+
+    <!-- Shared Bug Tracker Section -->
+    <div class="card bug-section">
+      <div class="card-title">
+        <span>Independent Bug Reporting & Dispute Resolution</span>
+        <span style="font-size: 12px;">Shared Test Context • Independent Observations</span>
+      </div>
+      <div class="bug-columns">
+        <!-- Human Bug Report Form -->
+        <div style="background: #0f1524; padding: 16px; border-radius: 8px; border: 1px solid var(--card-border);">
+          <h3 style="font-size: 14px; margin-bottom: 12px; color: #c084fc;">👤 Human Observer Bug Report</h3>
+          <form id="humanBugForm" onsubmit="submitHumanBug(event)">
+            <div class="form-group">
+              <label>Associated Test ID</label>
+              <input type="text" id="bugTestId" class="form-control" required placeholder="e.g. TEST-DUAL-001" />
+            </div>
+            <div class="form-group">
+              <label>Bug Description</label>
+              <input type="text" id="bugDesc" class="form-control" required placeholder="What failed or looked incorrect on your desktop?" />
+            </div>
+            <div class="form-group">
+              <label>Expected Behavior</label>
+              <input type="text" id="bugExpected" class="form-control" required placeholder="What should have happened?" />
+            </div>
+            <div class="form-group">
+              <label>Actual Behavior</label>
+              <input type="text" id="bugActual" class="form-control" required placeholder="What did you actually observe?" />
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+              <div class="form-group">
+                <label>Severity</label>
+                <select id="bugSeverity" class="form-control">
+                  <option value="Low">Low</option>
+                  <option value="Medium" selected>Medium</option>
+                  <option value="High">High</option>
+                  <option value="Critical">Critical</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Reproducibility</label>
+                <select id="bugReproducibility" class="form-control">
+                  <option value="Always" selected>Always</option>
+                  <option value="Sometimes">Sometimes</option>
+                  <option value="Rare">Rare</option>
+                </select>
+              </div>
+            </div>
+            <button type="submit" class="btn" style="background: #9333ea; color: white; width: 100%; margin-top: 8px;">Submit Human Observation</button>
+          </form>
+        </div>
+
+        <!-- Shared Bug Feed -->
+        <div>
+          <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-muted);">📋 Shared Bug Feed (<span id="bugCount">0</span>)</h3>
+          <div class="bug-list" id="bugList">
+            <div style="color: var(--text-muted); font-size: 13px;">No bugs filed yet for this session.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentTestId = "";
+
+    async function fetchState() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateUI(data);
+      } catch (e) {
+        console.error("Failed to fetch status:", e);
+      }
+    }
+
+    function updateUI(data) {
+      if (!data) return;
+      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+
+      // State badge
+      const stateBadge = document.getElementById('stateBadge');
+      const stateText = document.getElementById('stateText');
+      stateText.textContent = data.state || "IDLE";
+      stateBadge.className = `state-badge state-${data.state || "IDLE"}`;
+
+      // Environment Tag
+      const envTag = document.getElementById('valEnvTag');
+      if (envTag) {
+        const isDesktop = data.executionEnvironment === 'desktop';
+        envTag.textContent = isDesktop ? 'NATIVE DESKTOP' : 'BROWSER VIEWPORT';
+        envTag.style.background = isDesktop ? 'rgba(168, 85, 247, 0.2)' : 'rgba(56, 189, 248, 0.15)';
+        envTag.style.color = isDesktop ? '#c084fc' : '#38bdf8';
+      }
+
+      // 9-Stage Stepper
+      const stages = [
+        'LISTENING',
+        'COMMAND_RECEIVED',
+        'UNDERSTANDING',
+        'OBSERVING_PAGE',
+        'TARGET_IDENTIFIED',
+        'PLANNING_ACTION',
+        'EXECUTING',
+        'VERIFYING',
+        'COMPLETED'
+      ];
+      const curStage = data.stage || (data.state === 'IDLE' ? 'LISTENING' : (data.state === 'RUNNING' || data.state === 'OPERATING' ? 'EXECUTING' : 'LISTENING'));
+      const activeIdx = stages.indexOf(curStage);
+
+      document.querySelectorAll('.stage-step').forEach((el) => {
+        const stepStage = el.getAttribute('data-stage');
+        const stepIdx = stages.indexOf(stepStage);
+        el.classList.remove('active', 'completed');
+        if (stepStage === curStage) {
+          el.classList.add('active');
+        } else if (activeIdx !== -1 && stepIdx < activeIdx) {
+          el.classList.add('completed');
+        }
+      });
+
+      // Metrics
+      currentTestId = data.testId || currentTestId;
+      document.getElementById('valTestId').textContent = data.testId || "—";
+      document.getElementById('bugTestId').value = data.testId || currentTestId || "TEST-DUAL-001";
+      document.getElementById('valCommandId').textContent = data.commandId || "—";
+      document.getElementById('valCursor').textContent = data.cursor ? `(${data.cursor.x}, ${data.cursor.y})` : "(0, 0)";
+      document.getElementById('valStep').textContent = data.step ? `Step ${data.step}` : "Step 0";
+
+      // Focus & Window
+      if (data.focus && data.focus.field) {
+        document.getElementById('valActiveWindow').innerHTML = `<span style="color:#34d399;font-weight:700;">[FOCUS CONFIRMED]</span> ${data.focus.field} <i>(${data.focus.window || 'Active Window'})</i>`;
+      } else if (data.activeWindow) {
+        document.getElementById('valActiveWindow').textContent = `[${data.activeWindow.hwnd || 0}] ${data.activeWindow.processName || ''} — "${data.activeWindow.title || ''}"`;
+      }
+
+      // Awareness & Perception Data
+      if (data.observation) {
+        const obs = data.observation;
+        if (obs.source) document.getElementById('valObsSource').textContent = obs.source;
+        if (obs.title || obs.url) {
+          document.getElementById('valObsPageTitle').textContent = `Page: "${obs.title || 'Untitled'}" (${obs.url || ''})`;
+        }
+        if (obs.summaryCounts) {
+          const c = obs.summaryCounts;
+          document.getElementById('valElementCounts').innerHTML = `
+            <span>Links: <b>${c.links || 0}</b></span>
+            <span>Buttons: <b>${c.buttons || 0}</b></span>
+            <span>Inputs: <b>${c.inputs || 0}</b></span>
+            <span>Dropdowns: <b>${c.dropdowns || 0}</b></span>
+          `;
+        }
+        if (obs.scroll) {
+          document.getElementById('valScrollPos').textContent = `Scroll Position: (${obs.scroll.x || 0}, ${obs.scroll.y || 0})`;
+        }
+      }
+
+      // Live Typing Feedback Box
+      const typingBox = document.getElementById('typingBox');
+      if (data.typing && data.typing.field) {
+        typingBox.style.display = 'block';
+        document.getElementById('typingTargetField').textContent = data.typing.field;
+        document.getElementById('typingTextPreview').textContent = `"${data.typing.text}"`;
+        const pill = document.getElementById('typingStatusPill');
+        if (data.typing.verified === true) {
+          pill.className = 'typing-status-pill pass';
+          pill.textContent = `✓ VERIFIED VALUE: "${data.typing.actualValue || data.typing.text}"`;
+        } else if (data.typing.verified === false) {
+          pill.className = 'typing-status-pill fail';
+          pill.textContent = `✗ VALUE MISMATCH: "${data.typing.actualValue}"`;
+        } else {
+          pill.className = 'typing-status-pill typing';
+          pill.textContent = 'Typing keystrokes in progress...';
+        }
+      } else {
+        typingBox.style.display = 'none';
+      }
+
+      // Screenshot preview
+      if (data.latestScreenshot) {
+        const img = document.getElementById('desktopPreview');
+        const ph = document.getElementById('previewPlaceholder');
+        img.src = `${data.latestScreenshot}?t=${Date.now()}`;
+        img.style.display = 'block';
+        ph.style.display = 'none';
+        document.getElementById('refScreenshot').textContent = data.latestScreenshotRef || data.latestScreenshot;
+      }
+
+      // Events
+      if (Array.isArray(data.events)) {
+        document.getElementById('eventCount').textContent = `${data.events.length} events`;
+        const list = document.getElementById('timelineList');
+        if (data.events.length > 0) {
+          list.innerHTML = data.events.slice().reverse().map(ev => `
+            <div class="timeline-item">
+              <div class="timeline-header">
+                <span>[${ev.step ? 'Step ' + ev.step : 'SYS'}] ${ev.type || 'EVENT'}</span>
+                <span>${new Date(ev.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <div class="timeline-desc">${ev.description || JSON.stringify(ev.payload || {})}</div>
+              ${ev.cursor ? `<div style="font-size: 11px; color:#94a3b8; margin-top:2px;">Cursor: (${ev.cursor.x}, ${ev.cursor.y}) | Window: ${ev.window || 'None'}</div>` : ''}
+              ${ev.screenshotRef ? `<div style="font-size: 11px; color:#38bdf8; margin-top:2px;">📸 Evidence: ${ev.screenshotRef}</div>` : ''}
+            </div>
+          `).join('');
+        }
+      }
+
+      // Bugs
+      if (Array.isArray(data.bugs)) {
+        document.getElementById('bugCount').textContent = data.bugs.length;
+        const bugContainer = document.getElementById('bugList');
+        if (data.bugs.length > 0) {
+          bugContainer.innerHTML = data.bugs.slice().reverse().map(b => `
+            <div class="bug-card ${b.reporter.toLowerCase()}">
+              <div class="bug-header">
+                <span class="reporter-tag ${b.reporter.toLowerCase()}">${b.reporter}</span>
+                <span>Test: <b>${b.testId}</b> • ${new Date(b.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <div style="font-weight: 600; font-size: 14px; margin-bottom: 4px;">${b.description}</div>
+              <div style="font-size: 12px; color: #94a3b8;"><b>Expected:</b> ${b.expectedBehavior}</div>
+              <div style="font-size: 12px; color: #f87171;"><b>Actual:</b> ${b.actualBehavior}</div>
+              <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Severity: ${b.severity} • Repro: ${b.reproducibility} • Evidence: ${b.evidenceRef || 'None'}</div>
+            </div>
+          `).join('');
+        }
+      }
+    }
+
+    async function triggerEmergencyStop() {
+      if (!confirm("Are you sure you want to trigger EMERGENCY STOP? All desktop actions will halt immediately.")) return;
+      try {
+        const res = await fetch('/api/emergency-stop', { method: 'POST' });
+        const data = await res.json();
+        alert("Emergency stop triggered: " + (data.message || "Halted."));
+        fetchState();
+      } catch (e) {
+        alert("Error triggering emergency stop: " + e.message);
+      }
+    }
+
+    async function submitHumanBug(e) {
+      e.preventDefault();
+      const payload = {
+        reporter: "Human",
+        testId: document.getElementById('bugTestId').value.trim(),
+        description: document.getElementById('bugDesc').value.trim(),
+        expectedBehavior: document.getElementById('bugExpected').value.trim(),
+        actualBehavior: document.getElementById('bugActual').value.trim(),
+        severity: document.getElementById('bugSeverity').value,
+        reproducibility: document.getElementById('bugReproducibility').value
+      };
+
+      try {
+        const res = await fetch('/api/bugs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          document.getElementById('bugDesc').value = '';
+          document.getElementById('bugExpected').value = '';
+          document.getElementById('bugActual').value = '';
+          fetchState();
+          alert("Human bug report successfully recorded!");
+        } else {
+          const err = await res.json();
+          alert("Failed to report bug: " + (err.error || "Unknown"));
+        }
+      } catch (err) {
+        alert("Network error submitting bug report: " + err.message);
+      }
+    }
+
+    function refreshState() {
+      fetchState();
+    }
+
+    // Auto-refresh state every 1 second
+    setInterval(fetchState, 1000);
+    fetchState();
+  </script>
+</body>
+</html>

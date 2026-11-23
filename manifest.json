@@ -9,7 +9,8 @@
     "storage",
     "offscreen",
     "alarms",
-    "debugger"
+    "debugger",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*",
