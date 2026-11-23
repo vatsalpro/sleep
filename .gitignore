@@ -1,34 +1,11 @@
-# OS & Editor artifacts
-.DS_Store
-Thumbs.db
-desktop.ini
-*.log
-.vscode/
-.idea/
-*.tmp
-
-# Local credentials & tokens
-config.local.js
-*.local.js
+# Environment & Local Secrets (Excluded to protect credentials & pass GitHub push protection)
 .env
 .env.*
 !.env.example
-*.token
-.bridge-token
-dual-observation/.bridge-token
+config.local.js
+*.local.js
 
-# Temporary test captures and artifacts
-*.png
-!icons/*.png
-!assets/*.png
-!*.example.png
-test_*.txt
-acceptance.txt
-dual-observation/evidence/screenshots/
-
-# Dependencies & Build artifacts
-node_modules/
-[Bb]in/
+# Temporary automated test browser profiles & build cache
+tests/chrome-*/
 [Oo]bj/
-__pycache__/
-*.pyc
+*.log
