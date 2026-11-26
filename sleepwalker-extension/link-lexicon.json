@@ -1,0 +1,80 @@
+{
+  "version": "1.0.0",
+  "fillers": [
+    "please", "can you", "could you", "would you", "i want to", "i want", "i need",
+    "link", "links", "button", "buttons", "btn",
+    "the", "a", "an", "on", "par", "pe", "ko", "ka", "ki", "ke", "ek", "zara",
+    "kindly", "wala", "wali", "wale",
+    "कृपया", "ज़रा", "जरा", "लिंक", "बटन", "पर", "पे", "को", "का", "की", "के",
+    "एक", "वाला", "वाली", "वाले"
+  ],
+  "actions": {
+    "LIST": [
+      "what links are there", "what links", "read the links", "read links",
+      "list the links", "list links", "show all links", "show links",
+      "kaun se links hain", "kaun kaun se links hain", "links batao", "links padho",
+      "कौन से लिंक हैं", "कौन कौन से लिंक हैं", "लिंक बताओ", "लिंक्स बताओ", "सभी लिंक पढ़ो"
+    ],
+    "MORE_INFO": [
+      "tell me more about", "learn more about", "know more about",
+      "more information about", "more information on", "more info about", "more info on",
+      "more info", "more information", "more about", "details about", "details on", "details",
+      "learn more", "tell me more", "know more",
+      "ke baare mein aur batao", "ke bare mein aur batao", "ke baare mein batao",
+      "ke baare mein", "ke bare mein", "ki jaankari chahiye", "ki jankari chahiye",
+      "jaankari chahiye", "jankari chahiye", "jaankari", "jankari", "aur batao",
+      "के बारे में और बताओ", "के बारे में बताओ", "के बारे में", "की जानकारी चाहिए",
+      "जानकारी चाहिए", "अधिक जानकारी", "जानकारी", "और बताओ", "विवरण"
+    ],
+    "FIND_THEN_CLICK": [
+      "find and click", "find and open", "locate and open", "locate and click", "show me and click",
+      "dhundo aur kholo", "dhundho aur kholo", "dhundo aur click karo",
+      "ढूंढो और खोलो", "ढूंढो और क्लिक करो", "खोजो और खोलो"
+    ],
+    "FIND": [
+      "where is", "show me", "find", "locate", "highlight",
+      "kahan hai", "kaha hai", "dhundo", "dhundho", "dikhao", "batana",
+      "कहाँ है", "कहां है", "ढूंढो", "ढूँढो", "दिखाओ"
+    ],
+    "CLICK": [
+      "click on", "click", "open", "press", "tap", "go to", "take me to",
+      "navigate to", "visit", "select", "launch",
+      "click karo", "open karo", "kholo", "kholna", "khol do",
+      "dabao", "daba do", "jao", "le chalo",
+      "क्लिक करो", "क्लिक", "ओपन करो", "खोलो", "खोलना", "खोल दो",
+      "दबाओ", "दबा दो", "जाओ", "ले चलो"
+    ],
+    "CANCEL": [
+      "cancel", "never mind", "nevermind", "abort", "forget it", "stop",
+      "rehne do", "chhodo", "mat karo", "nahi", "nhi", "band karo",
+      "रद्द करो", "रद्द", "कैंसल", "रहने दो", "छोड़ो", "मत करो", "नहीं", "बंद करो"
+    ],
+    "OTHER_CHOICE": [
+      "no the other one", "no other one", "the other one", "other one",
+      "doosra wala", "dusra wala", "koi aur", "अगला वाला", "दूसरा वाला", "कोई और"
+    ],
+    "PREV_CHOICE_REF": [
+      "wo wala", "woh wala", "वह वाला", "वो वाला"
+    ]
+  },
+  "areas": {
+    "nav": ["in the main menu", "in main menu", "in the menu", "in menu", "on the menu", "main menu", "navigation bar", "nav bar", "navbar", "navigation", "menu", "nav", "मेनू", "मेन्यू"],
+    "header": ["in the header", "in header", "top bar", "header", "banner", "हेडर"],
+    "footer": ["in the footer", "in footer", "at the bottom", "footer", "bottom", "फुटर"],
+    "main": ["in main content", "in the main content", "main content", "main section", "article", "मुख्य"],
+    "card": ["in the card", "in this card", "card", "कार्ड"],
+    "list": ["in the list", "in list", "लिस्ट"]
+  },
+  "ordinals": {
+    "1": 1, "1st": 1, "first": 1, "one": 1, "ek": 1, "pehla": 1, "pahla": 1, "पहला": 1, "एक": 1,
+    "2": 2, "2nd": 2, "second": 2, "two": 2, "do": 2, "doosra": 2, "dusra": 2, "दूसरा": 2, "दो": 2,
+    "3": 3, "3rd": 3, "third": 3, "three": 3, "teen": 3, "teesra": 3, "tisra": 3, "तीसरा": 3, "तीन": 3,
+    "4": 4, "4th": 4, "fourth": 4, "four": 4, "char": 4, "chaar": 4, "chautha": 4, "चौथा": 4, "चार": 4,
+    "5": 5, "5th": 5, "fifth": 5, "five": 5, "paanch": 5, "panch": 5, "paanchva": 5, "पांचवां": 5, "पांचवा": 5, "पांच": 5,
+    "6": 6, "6th": 6, "sixth": 6, "six": 6, "chhah": 6, "छठा": 6,
+    "7": 7, "7th": 7, "seventh": 7, "seven": 7, "saat": 7, "सातवां": 7,
+    "8": 8, "8th": 8, "eighth": 8, "eight": 8, "aath": 8, "आठवां": 8,
+    "9": 9, "9th": 9, "ninth": 9, "nine": 9, "nau": 9, "नौवां": 9,
+    "10": 10, "10th": 10, "tenth": 10, "ten": 10, "das": 10, "दसवां": 10
+  }
+}

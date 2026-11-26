@@ -1,0 +1,110 @@
+{
+  "manifest_version": 3,
+  "name": "Sleepwalker — AI Browser Copilot",
+  "version": "2.0.0",
+  "description": "General-purpose AI browser copilot with natural-language navigation, Shadow DOM & hierarchical control understanding, multi-tab context, local Ollama and Gemini support.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "offscreen",
+    "alarms",
+    "debugger",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*",
+    "http://localhost:4892/*",
+    "http://127.0.0.1:4892/*"
+  ],
+  "optional_host_permissions": [
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Sleepwalker (Alt+S)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      }
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "reader.js",
+        "outline.js",
+        "diagnostics.js",
+        "ai-comm.js",
+        "voice-pipeline.js",
+        "voice.js",
+        "memory.js",
+        "task-planner.js",
+        "personal-intel.js",
+        "digest.js",
+        "explain.js",
+        "confirm.js",
+        "link-index.js",
+        "match.js",
+        "link-intent.js",
+        "intent.js",
+        "nav-engine.js",
+        "navigate.js",
+        "form-index.js",
+        "form-fill.js",
+        "forms.js",
+        "element-select.js",
+        "world-model.js",
+        "shelf-db.js",
+        "upload.js",
+        "camera.js",
+        "dialogue.js",
+        "threads.js",
+        "card.js",
+        "orb-canvas.js",
+        "orb.js",
+        "teach.js",
+        "browser-engine.js",
+        "stagehand-browser-adapter.js",
+        "extension-intelligence.js",
+        "unified-task-contract.js",
+        "unified-orchestrator.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "ui.css",
+        "mic-setup.html",
+        "lexicon.json",
+        "link-lexicon.json"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
