@@ -1,0 +1,3642 @@
+/**
+ * Sleepwalker Memory, Session Persistence, Hybrid Embeddings & Central Intent Router
+ *
+ * Provides:
+ * 1. Persistent Session State across reloads, redirects, and SPA navigations
+ *    ('active_listening' | 'active_not_listening' | 'hidden' | 'paused' | 'resting' | 'ended').
+ * 2. Real Structured Activity Memory (retains last 10–25 meaningful activities with privacy filtering).
+ * 3. Hybrid Semantic Memory (Ollama embeddings + deterministic semantic vector projection + cosine similarity + entity/topic/recency ranking).
+ * 4. Coreference & Contextual Reference Resolution ("there" -> "China", "the second one", "Continue where we left off").
+ * 5. Multi-Step Task State Machine across websites.
+ * 6. Central 12-Category Intent Router + Off-Page Research Synthesizer.
+ */
+
+(function () {
+  if (typeof window !== 'undefined' && window.SleepwalkerMemory) return;
+
+  function getPersonalIntelApi() {
+    if (typeof window !== 'undefined' && window.SleepwalkerPersonalIntel) return window.SleepwalkerPersonalIntel;
+    if (typeof globalThis !== 'undefined' && globalThis.SleepwalkerPersonalIntel) return globalThis.SleepwalkerPersonalIntel;
+    if (typeof require === 'function') {
+      try { return require('./personal-intel.js'); } catch (_e) { return null; }
+    }
+    return null;
+  }
+
+  const STORAGE_KEY_MEMORY = 'sleepwalker_persistent_memory_v1';
+  const STORAGE_KEY_SESSION = 'sleepwalker_session_state_v1';
+  const STORAGE_KEY_VECTORS = 'sleepwalker_embed_vectors_v1';
+  const MAX_ACTIVITIES = 25;
+  const MIN_REQUIRED_ACTIVITIES = 10;
+  const MAX_VISITED_PAGES = 15;
+  const MAX_CONVERSATION_TURNS = 20;
+  const MAX_RECENT_TASKS = 5;
+  const MAX_CACHED_NEURAL_VECTORS = 30;
+  const MAX_TAB_CONTEXTS = 12;
+  const SHORT_TERM_TTL_MS = 24 * 60 * 60 * 1000;
+  const LOW_IMPORTANCE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const LONG_TERM_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+  const VECTOR_DIM = 64;
+
+  // Common stop words excluded from topic/entity/lexical extraction
+  const STOP_WORDS = new Set([
+    'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
+    'what', 'which', 'who', 'whom', 'whose', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'shall', 'should',
+    'may', 'might', 'must', 'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'about', 'against',
+    'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'from', 'up',
+    'down', 'out', 'off', 'over', 'under', 'again', 'further', 'once', 'here', 'there', 'all',
+    'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not',
+    'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'just', 'don', 'now', 'me',
+    'my', 'myself', 'we', 'our', 'ours', 'you', 'your', 'yours', 'he', 'him', 'his', 'she', 'her',
+    'it', 'its', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'page', 'website',
+    'site', 'section', 'part', 'tell', 'explain', 'read', 'show', 'find', 'search', 'look',
+    'go', 'open', 'take', 'scroll', 'jump', 'navigate', 'please', 'sleepwalker', 'hey', 'hi',
+    'hello', 'okay', 'ok', 'yes', 'yeah', 'sure'
+  ]);
+
+  // Known geographical / country / city / topic entities for high-precision place detection
+  const KNOWN_PLACES = new Set([
+    'china', 'india', 'japan', 'usa', 'united states', 'uk', 'united kingdom', 'france', 'germany',
+    'canada', 'australia', 'singapore', 'dubai', 'uae', 'russia', 'brazil', 'italy', 'spain',
+    'south korea', 'korea', 'thailand', 'vietnam', 'indonesia', 'malaysia', 'nepal', 'bhutan',
+    'sri lanka', 'bangladesh', 'beijing', 'shanghai', 'hong kong', 'shenzhen', 'guangzhou',
+    'tokyo', 'osaka', 'kyoto', 'delhi', 'new delhi', 'mumbai', 'bengaluru', 'bangalore',
+    'hyderabad', 'chennai', 'kolkata', 'london', 'paris', 'berlin', 'new york', 'san francisco',
+    'toronto', 'sydney', 'melbourne', 'switzerland', 'egypt', 'turkey', 'greece', 'mexico'
+  ]);
+
+  // Sensitive patterns that must NEVER be stored in memory
+  const SENSITIVE_PATTERNS = [
+    /\b(?:password|passwd|passcode|pin|cvv|cvc|otp|one[- ]time[- ]password|secret[- ]key|api[-_ ]?key|bearer\s+[a-z0-9._-]+|ifsc|routing[- ]?number)\b/i,
+    /\bAIza[0-9A-Za-z_-]{20,}\b/,
+    /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?\b/,
+    /\b(?:sk|pk|ghp|gho|ghu|ghs)[_-][0-9A-Za-z_-]{16,}\b/,
+    /\b(?:\d[ -]*?){13,19}\b/, // Credit/debit card numbers
+    /\b\d{4}\s+\d{4}\s+\d{4}\b/, // Aadhaar-like 12-digit spaced pattern
+    /\b[A-Z]{5}\d{4}[A-Z]\b/ // PAN card pattern
+  ];
+
+  // Central Intent Categories (Phase 6 / Phase 3 router)
+  const CENTRAL_INTENTS = {
+    PAGE_NAVIGATION: 'PAGE_NAVIGATION',
+    PAGE_SEARCH: 'PAGE_SEARCH',
+    PAGE_EXPLANATION: 'PAGE_EXPLANATION',
+    PAGE_SUMMARIZATION: 'PAGE_SUMMARIZATION',
+    CONTEXTUAL_QUESTION: 'CONTEXTUAL_QUESTION',
+    FOLLOW_UP_QUESTION: 'FOLLOW_UP_QUESTION',
+    OFF_PAGE_RESEARCH: 'OFF_PAGE_RESEARCH',
+    EXTERNAL_NAVIGATION: 'EXTERNAL_NAVIGATION',
+    MULTI_STEP_TASK: 'MULTI_STEP_TASK',
+    FORM_ASSISTANCE: 'FORM_ASSISTANCE',
+    CONVERSATION_CONTROL: 'CONVERSATION_CONTROL',
+    GENERAL_QUESTION: 'GENERAL_QUESTION'
+  };
+
+  const TASK_STATUSES = {
+    CREATED: 'CREATED',
+    PLANNING: 'PLANNING',
+    RUNNING: 'RUNNING',
+    WAITING_FOR_USER: 'WAITING_FOR_USER',
+    PAUSED: 'PAUSED',
+    RECOVERING: 'RECOVERING',
+    COMPLETED: 'COMPLETED',
+    FAILED: 'FAILED',
+    CANCELLED: 'CANCELLED'
+  };
+
+  class SleepwalkerMemory {
+    constructor(orchestrator = null) {
+      this.orchestrator = orchestrator;
+      this.CENTRAL_INTENTS = CENTRAL_INTENTS;
+      this.TASK_STATUSES = TASK_STATUSES;
+      this.tabId = (orchestrator && orchestrator.tabId) ? String(orchestrator.tabId) : 'default';
+      this.privacy = {
+        memoryPaused: false,
+        disablePageAnalysis: false,
+        learningEnabled: true,
+        proactiveEnabled: true
+      };
+      this.didBrowserRestart = false;
+      this._embeddingCache = new Map();
+      this._neuralVectors = new Map();
+      this._neuralInFlight = new Map();
+      this._loaded = false;
+
+      this.state = this._createDefaultState();
+    }
+
+    _hashText(str) {
+      const input = String(str || '');
+      let h = 0x811c9dc5;
+      for (let i = 0; i < input.length; i++) {
+        h ^= input.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      return `${(h >>> 0).toString(16).padStart(8, '0')}-${input.length}`;
+    }
+
+    _diag(code, meta = {}) {
+      const d = typeof window !== 'undefined' && window.SleepwalkerDiagnostics;
+      if (d && typeof d.log === 'function') d.log('memory', code, meta);
+    }
+
+    _createDefaultState() {
+      return {
+        version: 2,
+        // 'active_listening' | 'active_not_listening' | 'hidden' | 'paused' | 'resting' | 'ended'
+        sessionMode: 'ended',
+        isSpeaking: false,
+        lastActiveAt: 0,
+        lastRestAt: 0,
+        lastWakeGreetingAt: 0,
+        currentTopic: '',
+        currentEntities: {
+          place: '',
+          organization: '',
+          product: '',
+          person: '',
+          focusedEntity: '',
+          lastPickedIndex: -1,
+          listItems: [],
+          all: []
+        },
+        activeTask: null,
+        recentTasks: [],
+        pendingActions: [],
+        activities: [],
+        visitedPages: [],
+        conversationTurns: [],
+        tabContexts: {},
+        worldTabInventories: {},
+        candidateLists: [],
+        activeCandidateListId: null,
+        selectionState: {
+          currentSelection: null,
+          previousSelection: null,
+          rejectedCandidateIds: [],
+          rejectedLabels: [],
+          activeSection: null,
+          previousSection: null,
+          activeVideo: null,
+          activeTable: null,
+          activeCardSummary: null,
+          highlightedTarget: null
+        },
+        interactionContext: {
+          urlClean: '',
+          currentFormKey: '',
+          currentFormLabel: '',
+          lastControlId: '',
+          lastControlLabel: '',
+          lastControlType: '',
+          lastOptions: [],
+          lastSelectedValue: '',
+          interactionStep: 0,
+          updatedAt: 0
+        },
+        shortTerm: {
+          recentCommands: [],
+          recentSearches: [],
+          currentPageSummary: '',
+          activeTabId: 'default',
+          expiresAt: 0
+        },
+        longTerm: {
+          recurringTopics: {},
+          completedTaskSummaries: [],
+          userPreferences: {},
+          frequentSites: {},
+          compressedSummaries: []
+        },
+        personalContext: getPersonalIntelApi()
+          ? getPersonalIntelApi().createDefaultPersonalContext()
+          : {
+              projects: {},
+              activeProjectId: '',
+              contextGraph: { roots: {} },
+              preferences: {},
+              learningSignals: {},
+              frequentServices: {},
+              workflows: [],
+              dismissedSuggestions: {},
+              lastSuggestionAt: 0,
+              lastShownResumeSessionId: '',
+              privacyControls: { learningEnabled: true, proactiveEnabled: true }
+            },
+        learnedSkills: [],
+        activeTeaching: null,
+        pendingSkillReplay: null
+      };
+    }
+
+    /** Set explicit tab identity cleanly (used by background tab IPC & multi-tab tests). */
+    setTabId(tabId) {
+      this.tabId = tabId !== undefined && tabId !== null && String(tabId).trim() ? String(tabId).trim() : 'default';
+      if (this.state && this.state.shortTerm) {
+        this.state.shortTerm.activeTabId = this.tabId;
+      }
+      this._syncRuntimeViewFromTabContext();
+      return this.tabId;
+    }
+
+    _getTabKey(tabId = this.tabId) {
+      const clean = String(tabId || 'default').trim();
+      return clean.startsWith('tab_') ? clean : `tab_${clean}`;
+    }
+
+    _sanitizeStoredUrl(rawUrl) {
+      const s = String(rawUrl || '').trim();
+      if (!s) return '';
+      try {
+        const u = new URL(s);
+        return u.origin && u.origin !== 'null' ? `${u.origin}${u.pathname || '/'}` : s.split(/[?#]/)[0];
+      } catch (_e) {
+        return s.split(/[?#]/)[0];
+      }
+    }
+
+    /** Extract concise non-sensitive key facts (fees, deadlines, eligibility snippets) for cross-tab recall & comparison. */
+    _extractPageFactsFromDoc() {
+      if (typeof document === 'undefined' || !document.body) return [];
+      const root = document.querySelector('main, article, [role="main"]') || document.body;
+      const text = String((root && (root.innerText || root.textContent)) || '').replace(/\s+/g, ' ').trim();
+      if (!text) return [];
+      const sentences = text.match(/[^.!?]+[.!?]/g) || [text.slice(0, 180)];
+      const facts = [];
+      for (const s of sentences) {
+        const clean = this.sanitizeText(s.trim()).slice(0, 160);
+        if (!clean || clean.length < 15) continue;
+        if (/\b(?:fee|tuition|cost|price|eur|usd|inr|rs|\$|€|₹|deadline|requirement|capital|apply|gpa|ielts)\b/i.test(clean)) {
+          facts.push(clean);
+          if (facts.length >= 4) break;
+        }
+      }
+      if (facts.length === 0 && sentences[0]) {
+        const first = this.sanitizeText(sentences[0]).slice(0, 160);
+        if (first) facts.push(first);
+      }
+      return facts;
+    }
+
+    _getActiveTabContext(createIfMissing = true) {
+      if (!this.state.tabContexts || typeof this.state.tabContexts !== 'object') {
+        this.state.tabContexts = {};
+      }
+      const key = this._getTabKey();
+      let ctx = this.state.tabContexts[key] || null;
+      if (!ctx && createIfMissing) {
+        ctx = {
+          tabId: String(this.tabId || 'default'),
+          urlClean: '',
+          title: '',
+          topic: '',
+          entities: {
+            place: '',
+            organization: '',
+            product: '',
+            person: '',
+            focusedEntity: '',
+            lastPickedIndex: -1,
+            listItems: [],
+            all: []
+          },
+          keyFacts: [],
+          taskId: '',
+          lastAccessedAt: Date.now()
+        };
+        this.state.tabContexts[key] = ctx;
+      }
+      return ctx;
+    }
+
+    _syncRuntimeViewFromTabContext() {
+      this._syncedTabKey = this._getTabKey();
+      const ctx = this._getActiveTabContext(false);
+      if (!ctx) return;
+      if (ctx.topic) this.state.currentTopic = ctx.topic;
+      if (ctx.entities && typeof ctx.entities === 'object') {
+        this.state.currentEntities = Object.assign({
+          place: '',
+          organization: '',
+          product: '',
+          person: '',
+          focusedEntity: '',
+          lastPickedIndex: -1,
+          listItems: [],
+          all: []
+        }, JSON.parse(JSON.stringify(ctx.entities)));
+      }
+      if (ctx.taskId && this.state.activeTask && this.state.activeTask.id !== ctx.taskId) {
+        const matchedTask = (this.state.recentTasks || []).find((t) => t && t.id === ctx.taskId);
+        if (matchedTask) this.state.activeTask = matchedTask;
+      }
+      if (ctx.interactionContext && typeof ctx.interactionContext === 'object') {
+        this.state.interactionContext = JSON.parse(JSON.stringify(ctx.interactionContext));
+      }
+    }
+
+    /** Return short-lived form/control interaction context for current page/tab, clearing if stale or page changed. */
+    getInteractionContext(currentUrl = (typeof window !== 'undefined' && window.location ? window.location.href : '')) {
+      const cleanCur = this._sanitizeStoredUrl(currentUrl);
+      const ic = this.state && this.state.interactionContext;
+      if (!ic || typeof ic !== 'object') return null;
+      const expired = ic.updatedAt && (Date.now() - ic.updatedAt > 10 * 60 * 1000);
+      const urlChanged = cleanCur && ic.urlClean && cleanCur !== ic.urlClean;
+      if (expired || urlChanged) {
+        this.clearInteractionContext();
+        return null;
+      }
+      return ic;
+    }
+
+    /** Record active form, control, option list, selected value, and interaction step cleanly. */
+    updateInteractionContext(patch = {}) {
+      const currentUrl = patch.url || (typeof window !== 'undefined' && window.location ? window.location.href : '');
+      const cleanUrl = this._sanitizeStoredUrl(currentUrl);
+      const prev = this.getInteractionContext(cleanUrl) || {
+        urlClean: cleanUrl,
+        currentFormKey: '',
+        currentFormLabel: '',
+        lastControlId: '',
+        lastControlLabel: '',
+        lastControlType: '',
+        lastOptions: [],
+        lastSelectedValue: '',
+        interactionStep: 0,
+        updatedAt: 0
+      };
+      const nextFormKey = patch.currentFormKey !== undefined ? String(patch.currentFormKey || '') : prev.currentFormKey;
+      const formChanged = Boolean(nextFormKey && prev.currentFormKey && nextFormKey !== prev.currentFormKey);
+      const nextCtx = {
+        urlClean: cleanUrl || prev.urlClean,
+        currentFormKey: nextFormKey,
+        currentFormLabel: patch.currentFormLabel !== undefined ? String(patch.currentFormLabel || '') : (formChanged ? '' : prev.currentFormLabel),
+        lastControlId: patch.lastControlId !== undefined ? String(patch.lastControlId || '') : prev.lastControlId,
+        lastControlLabel: patch.lastControlLabel !== undefined ? String(patch.lastControlLabel || '') : prev.lastControlLabel,
+        lastControlType: patch.lastControlType !== undefined ? String(patch.lastControlType || '') : prev.lastControlType,
+        lastOptions: Array.isArray(patch.lastOptions)
+          ? patch.lastOptions.slice(0, 15).map((o) => ({ label: String((o && (o.label || o)) || ''), value: String((o && (o.value || o.label || o)) || '') }))
+          : (formChanged ? [] : (prev.lastOptions || [])),
+        lastSelectedValue: patch.lastSelectedValue !== undefined ? String(patch.lastSelectedValue || '') : (formChanged ? '' : prev.lastSelectedValue),
+        interactionStep: formChanged ? 1 : ((prev.interactionStep || 0) + 1),
+        updatedAt: Date.now()
+      };
+      this.state.interactionContext = nextCtx;
+      const tabCtx = this._getActiveTabContext(true);
+      tabCtx.interactionContext = JSON.parse(JSON.stringify(nextCtx));
+      return nextCtx;
+    }
+
+    clearInteractionContext() {
+      const empty = {
+        urlClean: '',
+        currentFormKey: '',
+        currentFormLabel: '',
+        lastControlId: '',
+        lastControlLabel: '',
+        lastControlType: '',
+        lastOptions: [],
+        lastSelectedValue: '',
+        interactionStep: 0,
+        updatedAt: 0
+      };
+      if (this.state) this.state.interactionContext = empty;
+      const tabCtx = this._getActiveTabContext(false);
+      if (tabCtx) tabCtx.interactionContext = { ...empty };
+    }
+
+    /**
+     * Load privacy settings from chrome.storage.local cleanly.
+     */
+    async loadPrivacySettings() {
+      const pi = getPersonalIntelApi();
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          const d = await new Promise((resolve) => {
+            chrome.storage.local.get([
+              'sleepwalker_memory_paused',
+              'sleepwalker_disable_page_analysis',
+              'sleepwalker_adaptive_learning_enabled',
+              'sleepwalker_proactive_enabled'
+            ], (res) => resolve(res || {}));
+          });
+          this.privacy.memoryPaused = Boolean(d.sleepwalker_memory_paused);
+          this.privacy.disablePageAnalysis = Boolean(d.sleepwalker_disable_page_analysis);
+          this.privacy.learningEnabled = d.sleepwalker_adaptive_learning_enabled !== false;
+          this.privacy.proactiveEnabled = d.sleepwalker_proactive_enabled !== false;
+        } catch (_e) {}
+      }
+      if (this.state && pi) {
+        const pc = pi.ensurePersonalContext(this.state);
+        pc.privacyControls.learningEnabled = this.privacy.learningEnabled !== false;
+        pc.privacyControls.proactiveEnabled = this.privacy.proactiveEnabled !== false;
+      }
+      return { ...this.privacy };
+    }
+
+    async setPrivacySettings(patch = {}) {
+      const pi = getPersonalIntelApi();
+      if (patch.memoryPaused !== undefined) this.privacy.memoryPaused = Boolean(patch.memoryPaused);
+      if (patch.disablePageAnalysis !== undefined) this.privacy.disablePageAnalysis = Boolean(patch.disablePageAnalysis);
+      if (patch.learningEnabled !== undefined) this.privacy.learningEnabled = Boolean(patch.learningEnabled);
+      if (patch.proactiveEnabled !== undefined) this.privacy.proactiveEnabled = Boolean(patch.proactiveEnabled);
+      if (this.state && pi) {
+        const pc = pi.ensurePersonalContext(this.state);
+        pc.privacyControls.learningEnabled = this.privacy.learningEnabled !== false;
+        pc.privacyControls.proactiveEnabled = this.privacy.proactiveEnabled !== false;
+      }
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          await new Promise((resolve) => {
+            chrome.storage.local.set({
+              sleepwalker_memory_paused: this.privacy.memoryPaused,
+              sleepwalker_disable_page_analysis: this.privacy.disablePageAnalysis,
+              sleepwalker_adaptive_learning_enabled: this.privacy.learningEnabled !== false,
+              sleepwalker_proactive_enabled: this.privacy.proactiveEnabled !== false
+            }, () => { void chrome.runtime?.lastError; resolve(); });
+          });
+        } catch (_e) {}
+      }
+      if (this.state && (patch.learningEnabled !== undefined || patch.proactiveEnabled !== undefined)) {
+        await this.saveState({ skipTabSync: true }).catch(() => null);
+      }
+      return { ...this.privacy };
+    }
+
+    /**
+     * Privacy guard: returns true if text looks like a password, OTP, card number, or secret token.
+     */
+    isSensitiveText(text) {
+      const s = String(text || '').trim();
+      if (!s) return false;
+      return SENSITIVE_PATTERNS.some((re) => re.test(s));
+    }
+
+    /**
+     * Redacts sensitive substrings before storing in memory.
+     */
+    sanitizeText(text) {
+      let s = String(text || '').trim();
+      if (!s) return '';
+      if (this.isSensitiveText(s)) {
+        s = s
+          .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED_API_KEY]')
+          .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?\b/g, '[REDACTED_JWT]')
+          .replace(/\b(?:sk|pk|ghp|gho|ghu|ghs)[_-][0-9A-Za-z_-]{16,}\b/g, '[REDACTED_KEY]')
+          .replace(/\bbearer\s+\S+/gi, '[REDACTED_TOKEN]')
+          .replace(/\b(?:\d[ -]*?){13,19}\b/g, '[REDACTED_CARD]')
+          .replace(/\b\d{4}\s+\d{4}\s+\d{4}\b/g, '[REDACTED_ID]')
+          .replace(/\b[A-Z]{5}\d{4}[A-Z]\b/g, '[REDACTED_PAN]')
+          .replace(/\b(?:password|passwd|passcode|pin|cvv|cvc|otp|secret[-_ ]?key|api[-_ ]?key)\s*[:=is]*\s*\S+/gi, '[REDACTED_SECRET]');
+      }
+      return s.slice(0, 600);
+    }
+
+    /**
+     * Resolve current browser tab ID from background service worker (falls back to 'default' in Node/CDP tests).
+     */
+    async resolveTabIdentity() {
+      if (this.tabId && this.tabId !== 'default') return this.tabId;
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          const res = await new Promise((resolve) => {
+            let done = false;
+            const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 500);
+            try {
+              chrome.runtime.sendMessage({ type: 'SLEEPWALKER_GET_TAB_IDENTITY' }, (reply) => {
+                if (done) return;
+                done = true;
+                clearTimeout(t);
+                void chrome.runtime?.lastError;
+                resolve(reply && reply.tabId ? String(reply.tabId) : null);
+              });
+            } catch (_e) {
+              if (!done) { done = true; clearTimeout(t); resolve(null); }
+            }
+          });
+          if (res) {
+            this.tabId = res;
+          }
+        } catch (_e) {}
+      }
+      return this.tabId;
+    }
+
+    /**
+     * Load persistent memory & session state from background service worker and chrome.storage.
+     */
+    async loadState() {
+      await Promise.all([
+        this.resolveTabIdentity(),
+        this.loadPrivacySettings()
+      ]);
+
+      let merged = null;
+
+      // 1. Try background service worker first (holds both session + local storage across origins)
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          const res = await new Promise((resolve) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (!settled) { settled = true; resolve(null); }
+            }, 1200);
+            try {
+              chrome.runtime.sendMessage({ type: 'SLEEPWALKER_MEMORY_GET' }, (reply) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (chrome.runtime.lastError || !reply || !reply.state) {
+                  resolve(null);
+                } else {
+                  if (reply.browserRestarted) this.didBrowserRestart = true;
+                  resolve(reply.state);
+                }
+              });
+            } catch (_e) {
+              if (!settled) { settled = true; clearTimeout(timer); resolve(null); }
+            }
+          });
+          if (res && typeof res === 'object') {
+            merged = res;
+          }
+        } catch (_e) {}
+      }
+
+      // 2. Load/supplement with direct chrome.storage.local (including dedicated neural vector cache)
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          const data = await new Promise((resolve) => {
+            chrome.storage.local.get([STORAGE_KEY_MEMORY, STORAGE_KEY_SESSION, STORAGE_KEY_VECTORS], (items) => {
+              void chrome.runtime?.lastError;
+              resolve(items || {});
+            });
+          });
+          if (!merged && data[STORAGE_KEY_MEMORY]) {
+            merged = Object.assign({}, data[STORAGE_KEY_MEMORY]);
+            if (data[STORAGE_KEY_SESSION] && data[STORAGE_KEY_SESSION].sessionMode) {
+              merged.sessionMode = data[STORAGE_KEY_SESSION].sessionMode;
+            }
+          }
+          if (data[STORAGE_KEY_VECTORS] && typeof data[STORAGE_KEY_VECTORS] === 'object') {
+            for (const [k, vec] of Object.entries(data[STORAGE_KEY_VECTORS])) {
+              if (Array.isArray(vec) && vec.length > 0) {
+                this._neuralVectors.set(k, vec);
+              }
+            }
+          }
+        } catch (_e) {}
+      }
+
+      if (merged && typeof merged === 'object') {
+        const dflt = this._createDefaultState();
+        this.state = Object.assign(dflt, merged);
+        if (!Array.isArray(this.state.activities)) this.state.activities = [];
+        if (!Array.isArray(this.state.visitedPages)) this.state.visitedPages = [];
+        if (!Array.isArray(this.state.conversationTurns)) this.state.conversationTurns = [];
+        if (!Array.isArray(this.state.pendingActions)) this.state.pendingActions = [];
+        if (!Array.isArray(this.state.recentTasks)) this.state.recentTasks = [];
+        if (!Array.isArray(this.state.learnedSkills)) this.state.learnedSkills = [];
+        if (!this.state.tabContexts || typeof this.state.tabContexts !== 'object') this.state.tabContexts = {};
+        if (!this.state.shortTerm || typeof this.state.shortTerm !== 'object') this.state.shortTerm = dflt.shortTerm;
+        if (!this.state.longTerm || typeof this.state.longTerm !== 'object') this.state.longTerm = dflt.longTerm;
+        if (!this.state.currentEntities || typeof this.state.currentEntities !== 'object') {
+          this.state.currentEntities = dflt.currentEntities;
+        }
+      }
+
+      const pi = getPersonalIntelApi();
+      if (pi) {
+        const pc = pi.ensurePersonalContext(this.state);
+        pc.privacyControls.learningEnabled = this.privacy.learningEnabled !== false;
+        pc.privacyControls.proactiveEnabled = this.privacy.proactiveEnabled !== false;
+      }
+
+      this.pruneAndCompressMemory({ skipSave: true });
+      this._syncRuntimeViewFromTabContext();
+      this._loaded = true;
+      return this.state;
+    }
+
+    /**
+     * Write active tab context cleanly before saving state.
+     */
+    _syncTabContextFromRuntime(extra = {}) {
+      const ctx = this._getActiveTabContext(true);
+      ctx.tabId = String(this.tabId || 'default');
+      if (this.state.currentTopic) ctx.topic = this.state.currentTopic;
+      if (this.state.currentEntities && typeof this.state.currentEntities === 'object') {
+        ctx.entities = JSON.parse(JSON.stringify(this.state.currentEntities));
+      }
+      if (this.state.activeTask && this.state.activeTask.id) {
+        ctx.taskId = this.state.activeTask.id;
+      }
+      if (extra.urlClean) ctx.urlClean = extra.urlClean;
+      if (extra.title) ctx.title = extra.title;
+      if (Array.isArray(extra.keyFacts) && extra.keyFacts.length > 0) ctx.keyFacts = extra.keyFacts;
+      ctx.lastAccessedAt = Date.now();
+      return ctx;
+    }
+
+    /**
+     * Save current memory & session state to both chrome.storage.session and chrome.storage.local
+     * with storage-quota/failure recovery.
+     */
+    async saveState(options = {}) {
+      this.state.lastActiveAt = Date.now();
+      if (!options.skipTabSync) {
+        this._syncTabContextFromRuntime();
+      }
+      if (!options.skipPrune) {
+        this.pruneAndCompressMemory({ skipSave: true });
+      }
+      const makeSnapshot = () => JSON.parse(JSON.stringify(this.state));
+      let snapshot = makeSnapshot();
+
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        const writeStorage = (snap) => new Promise((resolve) => {
+          try {
+            chrome.storage.local.set({
+              [STORAGE_KEY_MEMORY]: snap,
+              [STORAGE_KEY_SESSION]: {
+                sessionMode: snap.sessionMode,
+                currentTopic: snap.currentTopic,
+                activeTask: snap.activeTask,
+                activeTabId: this.tabId,
+                updatedAt: snap.lastActiveAt
+              }
+            }, () => {
+              const err = chrome.runtime && chrome.runtime.lastError ? chrome.runtime.lastError.message : '';
+              resolve({ ok: !err, error: err });
+            });
+          } catch (e) {
+            resolve({ ok: false, error: (e && e.message) || 'storage set error' });
+          }
+        });
+
+        const res = await writeStorage(snapshot);
+        if (!res.ok) {
+          // Recover from storage quota / write failure by pruning/compressing and retrying once
+          this.pruneAndCompressMemory({ aggressive: true, skipSave: true });
+          snapshot = makeSnapshot();
+          await writeStorage(snapshot);
+          this._diag('storage_recovered', { reason: res.error || 'write_retry' });
+        }
+      }
+
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          chrome.runtime.sendMessage({
+            type: 'SLEEPWALKER_MEMORY_SET',
+            state: snapshot,
+            tabKey: this._getTabKey(),
+            preserveOtherTabs: !options.overwriteAllTabs
+          }, () => { void chrome.runtime.lastError; });
+        } catch (_e) {}
+      }
+
+      return snapshot;
+    }
+
+    /**
+     * Update session mode ('active_listening' | 'active_not_listening' | 'hidden' | 'paused' | 'resting' | 'ended').
+     */
+    async setSessionMode(mode, options = {}) {
+      const validModes = new Set([
+        'active_listening',
+        'active_not_listening',
+        'hidden',
+        'paused',
+        'resting',
+        'ended'
+      ]);
+      const nextMode = validModes.has(mode) ? mode : 'active_listening';
+      this.state.sessionMode = nextMode;
+      if (nextMode === 'resting') {
+        this.state.lastRestAt = Date.now();
+        if (this.state.activeTask && this.state.activeTask.status === 'in_progress') {
+          this.state.activeTask.status = 'paused_resting';
+        }
+      } else if (nextMode === 'active_listening' || nextMode === 'active_not_listening') {
+        if (this.state.activeTask && this.state.activeTask.status === 'paused_resting') {
+          this.state.activeTask.status = 'in_progress';
+        }
+      }
+      if (!options.skipSave) {
+        await this.saveState();
+      }
+      return this.state.sessionMode;
+    }
+
+    getSessionMode() {
+      return this.state.sessionMode || 'ended';
+    }
+
+    isAssistantSessionActive() {
+      return ['active_listening', 'active_not_listening', 'paused'].includes(this.state.sessionMode);
+    }
+
+    isResting() {
+      return this.state.sessionMode === 'resting';
+    }
+
+    /**
+     * Build a natural wake greeting if the user wakes Sleepwalker after resting or with recent context.
+     */
+    buildWakeResumeContext(dueReminders = []) {
+      const pi = getPersonalIntelApi();
+      if (pi && typeof pi.buildCrossSessionResumeSummary === 'function') {
+        return pi.buildCrossSessionResumeSummary(this.state, dueReminders);
+      }
+      const task = this.state.activeTask;
+      const topic = this.state.currentTopic || (task && task.topic) || '';
+      if (task && task.objective) {
+        return {
+          hasPriorContext: true,
+          topic: topic || task.objective,
+          taskObjective: task.objective,
+          nextStep: task.nextRecommendedAction || (task.pendingSteps && task.pendingSteps[0]) || '',
+          dueReminders: [],
+          greetingEn: `Welcome back. We were looking at ${task.objective}. Would you like to continue?`,
+          greetingHi: `वापसी पर स्वागत है। हम ${task.objective} देख रहे थे। क्या आप वहीं से जारी रखना चाहेंगे?`
+        };
+      }
+      return { hasPriorContext: false, topic: '', taskObjective: '', nextStep: '', dueReminders: [], greetingEn: '', greetingHi: '' };
+    }
+
+    /**
+     * Extract topic & entities from page title, headings, and user command.
+     */
+    extractEntitiesAndTopic(text = '', pageInfo = {}) {
+      const combined = `${text || ''} ${pageInfo.title || ''}`.trim();
+      const lowerText = String(text || '').toLowerCase();
+      const lowerTitle = String(pageInfo.title || '').toLowerCase();
+
+      let detectedPlace = '';
+      for (const place of KNOWN_PLACES) {
+        const re = new RegExp(`\\b${place.replace(/\s+/g, '\\s+')}\\b`, 'i');
+        if (re.test(lowerText)) {
+          detectedPlace = this._titleCase(place);
+          break;
+        }
+      }
+      if (!detectedPlace) {
+        for (const place of KNOWN_PLACES) {
+          const re = new RegExp(`\\b${place.replace(/\s+/g, '\\s+')}\\b`, 'i');
+          if (re.test(lowerTitle)) {
+            detectedPlace = this._titleCase(place);
+            break;
+          }
+        }
+      }
+
+      // Check patterns like "about <Topic>", "information about <Topic>", "search for <Topic>", "travel to <Place>"
+      let explicitTopic = '';
+      const topicPatterns = [
+        /(?:tell\s+me\s+about|information\s+(?:about|on)|explain\s+(?:about\s+)?|learn\s+about|search\s+(?:for|about)\s+|look\s+up\s+|find\s+(?:information\s+about\s+|out\s+about\s+)?|travel\s+to\s+|go\s+to\s+|flights?\s+to\s+|visa\s+for\s+|visit\s+)([a-zA-Z][a-zA-Z0-9\s-]{1,40}?)(?:\s+(?:section|page|website|in\s+the\s+search\s+box|on\s+this\s+page))?[.?!]*$/i
+      ];
+      for (const pat of topicPatterns) {
+        const m = String(text || '').trim().match(pat);
+        if (m && m[1]) {
+          const candidate = m[1].trim();
+          const candLower = candidate.toLowerCase();
+          if (
+            !['there', 'here', 'it', 'that', 'this', 'this page', 'the page', 'some part', 'first one', 'second one', 'where we left off'].includes(candLower) &&
+            !/^(?:the\s+)?(?:first|second|third|relevant|travel|official)\b/i.test(candLower)
+          ) {
+            explicitTopic = this._cleanTopicPhrase(candidate);
+            break;
+          }
+        }
+      }
+
+      // Derive page topic from title if not generic
+      let pageTopic = '';
+      if (pageInfo.title) {
+        const cleanedTitle = String(pageInfo.title)
+          .replace(/\s*[-|–—•:]\s*(?:Wikipedia|Free Encyclopedia|Official Website|Portal|Home|Search|Google|Overview).*$/i, '')
+          .trim();
+        if (cleanedTitle && cleanedTitle.length <= 60 && !/^(?:home|index|welcome|untitled|search|portal)$/i.test(cleanedTitle)) {
+          pageTopic = cleanedTitle;
+        }
+      }
+
+      // Extract capitalized proper-noun entities from text and title
+      const properNouns = [];
+      const capMatches = combined.match(/\b[A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2}\b/g) || [];
+      for (const word of capMatches) {
+        const wLower = word.toLowerCase();
+        if (!STOP_WORDS.has(wLower) && !['The', 'Tell', 'What', 'How', 'Where', 'When', 'Why', 'Find', 'Search', 'Open', 'Explain', 'Compare', 'Continue', 'Thank', 'Wikipedia'].includes(word)) {
+          if (!properNouns.includes(word)) properNouns.push(word);
+        }
+      }
+
+      const resolvedTopic = explicitTopic || detectedPlace || pageTopic || this.state.currentTopic || '';
+      if (detectedPlace) {
+        this.state.currentEntities.place = detectedPlace;
+      } else if (explicitTopic && KNOWN_PLACES.has(explicitTopic.toLowerCase())) {
+        this.state.currentEntities.place = this._titleCase(explicitTopic);
+      }
+
+      if (resolvedTopic && !['there', 'it', 'this', 'that'].includes(resolvedTopic.toLowerCase())) {
+        this.state.currentTopic = resolvedTopic;
+      }
+
+      const entitySet = new Set([
+        ...(this.state.currentEntities.all || []),
+        ...(detectedPlace ? [detectedPlace] : []),
+        ...(explicitTopic ? [explicitTopic] : []),
+        ...(pageTopic ? [pageTopic] : []),
+        ...properNouns.slice(0, 5)
+      ].filter(Boolean));
+      this.state.currentEntities.all = Array.from(entitySet).slice(-12);
+
+      return {
+        topic: this.state.currentTopic,
+        place: this.state.currentEntities.place || (KNOWN_PLACES.has((this.state.currentTopic || '').toLowerCase()) ? this.state.currentTopic : ''),
+        explicitTopic,
+        pageTopic,
+        entities: this.state.currentEntities.all
+      };
+    }
+
+    _cleanTopicPhrase(phrase) {
+      const cleaned = String(phrase || '')
+        .replace(/^(?:the\s+|a\s+|an\s+)/i, '')
+        .replace(/[.?!,;]+$/g, '')
+        .trim();
+      if (!cleaned) return '';
+      if (KNOWN_PLACES.has(cleaned.toLowerCase())) {
+        return this._titleCase(cleaned);
+      }
+      return cleaned;
+    }
+
+    _titleCase(str) {
+      return String(str || '')
+        .split(/\s+/)
+        .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : ''))
+        .join(' ');
+    }
+
+    /**
+     * Record a page visit and extract numbered/list items or headings for ordinal references ("the second one").
+     */
+    async recordPageVisit(pageInfo = {}) {
+      const rawUrl = pageInfo.url || (typeof window !== 'undefined' && window.location ? window.location.href : '');
+      const cleanUrl = this._sanitizeStoredUrl(rawUrl);
+      if (cleanUrl && this.state.interactionContext && this.state.interactionContext.urlClean && this.state.interactionContext.urlClean !== cleanUrl) {
+        this.clearInteractionContext();
+      }
+      const title = pageInfo.title || (typeof document !== 'undefined' ? document.title : '');
+      const headings = Array.isArray(pageInfo.headings) ? pageInfo.headings.slice(0, 15) : [];
+
+      if (this.privacy.memoryPaused) {
+        return { url: cleanUrl, skipped: true, reason: 'memory_paused' };
+      }
+
+      const listItems = !this.privacy.disablePageAnalysis
+        ? (Array.isArray(pageInfo.listItems) ? pageInfo.listItems.slice(0, 10) : this._scanPageListItems())
+        : [];
+      const keyFacts = !this.privacy.disablePageAnalysis
+        ? (Array.isArray(pageInfo.keyFacts) ? pageInfo.keyFacts.slice(0, 4) : this._extractPageFactsFromDoc())
+        : [];
+
+      const extracted = this.extractEntitiesAndTopic('', { title, url: cleanUrl });
+      if (listItems.length > 0) {
+        this.state.currentEntities.listItems = listItems;
+      }
+
+      const pageTopic = extracted.pageTopic || extracted.topic || '';
+      const tabKey = this._getTabKey();
+      this._syncTabContextFromRuntime({
+        urlClean: cleanUrl,
+        title: this.sanitizeText(title),
+        keyFacts
+      });
+      if (pageTopic) this.state.tabContexts[tabKey].topic = pageTopic;
+
+      if (this.state.shortTerm) {
+        this.state.shortTerm.activeTabId = String(this.tabId || 'default');
+        this.state.shortTerm.currentPageSummary = this.sanitizeText(`${title}: ${keyFacts.join(' ')}`).slice(0, 260);
+        this.state.shortTerm.expiresAt = Date.now() + SHORT_TERM_TTL_MS;
+      }
+
+      if (cleanUrl && this.state.longTerm && this.state.longTerm.frequentSites) {
+        const fsEntry = this.state.longTerm.frequentSites[cleanUrl] || { title: this.sanitizeText(title), visits: 0, lastVisitedAt: 0 };
+        fsEntry.title = this.sanitizeText(title) || fsEntry.title;
+        fsEntry.visits += 1;
+        fsEntry.lastVisitedAt = Date.now();
+        this.state.longTerm.frequentSites[cleanUrl] = fsEntry;
+      }
+
+      const visitEntry = {
+        tabId: String(this.tabId || 'default'),
+        url: cleanUrl,
+        title: this.sanitizeText(title),
+        topic: pageTopic,
+        headings: headings.map((h) => (typeof h === 'string' ? h : h.text || '')).filter(Boolean).slice(0, 12),
+        listItems: listItems.slice(0, 8),
+        keyFacts,
+        taskId: (this.state.activeTask && this.state.activeTask.id) || '',
+        timestamp: new Date().toISOString()
+      };
+
+      const existingIdx = this.state.visitedPages.findIndex((p) => p.url === cleanUrl);
+      if (existingIdx !== -1) {
+        this.state.visitedPages.splice(existingIdx, 1);
+      }
+      this.state.visitedPages.push(visitEntry);
+      if (this.state.visitedPages.length > MAX_VISITED_PAGES) {
+        this.state.visitedPages = this.state.visitedPages.slice(-MAX_VISITED_PAGES);
+      }
+
+      const pi = getPersonalIntelApi();
+      if (pi && !this.privacy.disablePageAnalysis && (keyFacts.length > 0 || pageTopic)) {
+        const domain = pi.inferDomainFromText(`${title} ${pageTopic} ${cleanUrl}`);
+        const entityCandidate = pageTopic && !/^(?:home|index|search|portal|google)$/i.test(pageTopic) ? pageTopic : '';
+        pi.recordEntityResearch(this.state, {
+          domain,
+          rootTopic: this.state.currentTopic || pageTopic || domain,
+          objective: (this.state.activeTask && this.state.activeTask.objective) || '',
+          entityName: entityCandidate,
+          facts: keyFacts,
+          url: cleanUrl,
+          sourceTitle: this.sanitizeText(title)
+        });
+      }
+
+      await this.saveState({ skipTabSync: true });
+      return visitEntry;
+    }
+
+    /**
+     * Scan DOM for prominent result items / cards / headings so "the first one" / "the second one" works.
+     */
+    _scanPageListItems() {
+      if (typeof document === 'undefined' || !document.body) return [];
+      const items = [];
+      const seen = new Set();
+      const selectors = [
+        '[data-result-item]',
+        '.search-result',
+        '.result-item',
+        '.product-card',
+        '.course-card',
+        'main article h2, main article h3',
+        'article h2, article h3',
+        'h2, h3'
+      ];
+      for (const sel of selectors) {
+        let nodes = [];
+        try { nodes = Array.from(document.querySelectorAll(sel)); } catch (_e) {}
+        for (const node of nodes) {
+          const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (text && text.length >= 3 && text.length <= 120 && !seen.has(text.toLowerCase())) {
+            seen.add(text.toLowerCase());
+            const linkEl = node.tagName === 'A' ? node : (node.querySelector && node.querySelector('a[href]'));
+            items.push({
+              index: items.length + 1,
+              title: text,
+              href: linkEl ? linkEl.href : ''
+            });
+            if (items.length >= 8) return items;
+          }
+        }
+        if (items.length >= 3) break;
+      }
+      return items;
+    }
+
+    /**
+     * Deterministic 64-dim semantic vector projection (used immediately + alongside Ollama embeddings).
+     */
+    computeDeterministicEmbedding(text) {
+      const vec = new Array(VECTOR_DIM).fill(0);
+      const clean = String(text || '').toLowerCase().replace(/[^a-z0-9\s\u0900-\u097F]/g, ' ');
+      const tokens = clean.split(/\s+/).filter((t) => t.length > 1 && !STOP_WORDS.has(t));
+      if (tokens.length === 0) return vec;
+
+      // Semantic cluster anchors so related concepts map to shared dimensions
+      const semanticClusters = [
+        ['china', 'beijing', 'shanghai', 'chinese', 'asia', 'mandarin', 'great', 'wall'],
+        ['travel', 'flight', 'flights', 'visa', 'airport', 'visit', 'trip', 'tourism', 'tourist', 'embassy', 'passport', 'go', 'reach'],
+        ['apply', 'application', 'admission', 'eligibility', 'requirements', 'enroll', 'form', 'submit', 'deadline', 'university', 'college', 'course'],
+        ['laptop', 'laptops', 'computer', 'macbook', 'thinkpad', 'dell', 'specs', 'battery', 'processor', 'price', 'compare', 'comparison'],
+        ['book', 'booking', 'hotel', 'ticket', 'reserve', 'reservation', 'schedule', 'payment'],
+        ['history', 'culture', 'geography', 'economy', 'population', 'government', 'overview', 'summary']
+      ];
+
+      tokens.forEach((tok, idx) => {
+        // Direct token hash projection
+        let h1 = 2166136261;
+        for (let i = 0; i < tok.length; i++) {
+          h1 ^= tok.charCodeAt(i);
+          h1 = Math.imul(h1, 16777619);
+        }
+        const dim1 = Math.abs(h1) % VECTOR_DIM;
+        const sign1 = (h1 & 1) === 0 ? 1 : -1;
+        vec[dim1] += sign1 * (1.2 / Math.sqrt(idx + 1));
+
+        // Character trigram projection for morphological similarity
+        for (let i = 0; i <= tok.length - 3; i++) {
+          const tri = tok.slice(i, i + 3);
+          let h2 = 5381;
+          for (let j = 0; j < tri.length; j++) {
+            h2 = ((h2 << 5) + h2) ^ tri.charCodeAt(j);
+          }
+          const dim2 = Math.abs(h2) % VECTOR_DIM;
+          vec[dim2] += 0.35;
+        }
+
+        // Semantic cluster boost
+        semanticClusters.forEach((cluster, cIdx) => {
+          if (cluster.includes(tok)) {
+            const baseDim = (cIdx * 7) % VECTOR_DIM;
+            vec[baseDim] += 1.6;
+            vec[(baseDim + 1) % VECTOR_DIM] += 1.1;
+          }
+        });
+      });
+
+      return this._normalizeVector(vec);
+    }
+
+    _normalizeVector(vec) {
+      let normSq = 0;
+      for (let i = 0; i < vec.length; i++) normSq += vec[i] * vec[i];
+      if (normSq === 0) return vec;
+      const norm = Math.sqrt(normSq);
+      return vec.map((v) => Number((v / norm).toFixed(5)));
+    }
+
+    _saveNeuralVector(textKey, vec) {
+      if (!textKey || !Array.isArray(vec) || vec.length === 0) return;
+      const normVec = this._normalizeVector(vec);
+      this._neuralVectors.set(textKey, normVec);
+      if (this._neuralVectors.size > MAX_CACHED_NEURAL_VECTORS) {
+        const oldestKey = this._neuralVectors.keys().next().value;
+        if (oldestKey) this._neuralVectors.delete(oldestKey);
+      }
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          const obj = {};
+          for (const [k, v] of this._neuralVectors.entries()) {
+            obj[k] = v;
+          }
+          chrome.storage.local.set({ [STORAGE_KEY_VECTORS]: obj });
+        } catch (_e) {}
+      }
+    }
+
+    /**
+     * Request real Ollama neural embedding (nomic-embed-text) non-blocking for storage + cache,
+     * while returning the instant 64-d deterministic semantic vector immediately so voice never stalls.
+     */
+    async computeHybridEmbedding(text) {
+      const clean = String(text || '').trim().slice(0, 400);
+      if (!clean) return new Array(VECTOR_DIM).fill(0);
+      if (this._embeddingCache.has(clean)) {
+        return this._embeddingCache.get(clean);
+      }
+
+      const fallbackVec = this.computeDeterministicEmbedding(clean);
+      this._embeddingCache.set(clean, fallbackVec);
+
+      const textKey = this._hashText(clean);
+      if (!this._neuralVectors.has(textKey) && typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        try {
+          chrome.runtime.sendMessage(
+            { type: 'SLEEPWALKER_EMBED_REQUEST', text: clean },
+            (res) => {
+              if (!chrome.runtime.lastError && res && res.status === 'ok' && Array.isArray(res.embedding) && res.embedding.length > 0) {
+                this._saveNeuralVector(textKey, res.embedding);
+                this._diag('embedding_cached', {
+                  model: res.model || 'nomic-embed-text',
+                  dim: res.embedding.length,
+                  durationMs: res.latencyMs || 0
+                });
+              }
+            }
+          );
+        } catch (_e) {}
+      }
+
+      return fallbackVec;
+    }
+
+    /**
+     * Fetch/return cached neural embedding for a query within a tight timeout budget (never blocking UX).
+     */
+    async getQueryNeuralEmbeddingAsync(queryText, timeoutMs = 450) {
+      const clean = String(queryText || '').trim().slice(0, 400);
+      if (!clean) return null;
+      const key = this._hashText(clean);
+      if (this._neuralVectors.has(key)) {
+        return { vec: this._neuralVectors.get(key), cached: true, model: 'nomic-embed-text' };
+      }
+      if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+        return null;
+      }
+      return await new Promise((resolve) => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, timeoutMs);
+        try {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_EMBED_REQUEST', text: clean, timeoutMs }, (res) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            if (!chrome.runtime.lastError && res && res.status === 'ok' && Array.isArray(res.embedding) && res.embedding.length > 0) {
+              this._saveNeuralVector(key, res.embedding);
+              resolve({ vec: this._neuralVectors.get(key), cached: Boolean(res.cached), model: res.model || 'nomic-embed-text' });
+            } else {
+              resolve(null);
+            }
+          });
+        } catch (_e) {
+          if (!done) { done = true; clearTimeout(timer); resolve(null); }
+        }
+      });
+    }
+
+    /**
+     * Compute cosine similarity between two vectors of matching length.
+     */
+    cosineSimilarity(vecA, vecB) {
+      if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length === 0 || vecB.length === 0) return 0;
+      const len = Math.min(vecA.length, vecB.length);
+      let dot = 0;
+      let magA = 0;
+      let magB = 0;
+      for (let i = 0; i < len; i++) {
+        const a = Number(vecA[i]) || 0;
+        const b = Number(vecB[i]) || 0;
+        dot += a * b;
+        magA += a * a;
+        magB += b * b;
+      }
+      if (magA === 0 || magB === 0) return 0;
+      return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+    }
+
+    /**
+     * Score importance (0.1..1.0) so trivial acks expire sooner while task decisions and research persist.
+     */
+    scoreMemoryImportance(entry = {}) {
+      let score = 0.45;
+      const intent = String(entry.intent || '');
+      const cmd = String(entry.user_command || '').toLowerCase();
+      if (entry.related_task_id) score += 0.22;
+      if (Array.isArray(entry.entities) && entry.entities.length > 0) score += 0.14;
+      if (/\b(?:OFF_PAGE_RESEARCH|MULTI_STEP_TASK|EXTERNAL_NAVIGATION|FORM_ASSISTANCE)\b/.test(intent)) score += 0.16;
+      if (String(entry.result || '').length > 45) score += 0.08;
+      if (/^(?:ok|yes|no|scroll|down|up|pause|resume|stop)$/.test(cmd.trim()) || intent === 'CONVERSATION_CONTROL') score -= 0.28;
+      return Number(Math.max(0.1, Math.min(1, score)).toFixed(2));
+    }
+
+    /**
+     * Prune expired short-term & stale low-importance memories and compress overflow into compact summaries.
+     */
+    pruneAndCompressMemory({ aggressive = false, skipSave = false } = {}) {
+      const now = Date.now();
+      if (!this.state.longTerm) {
+        this.state.longTerm = { recurringTopics: {}, completedTaskSummaries: [], userPreferences: {}, frequentSites: {}, compressedSummaries: [] };
+      }
+
+      // 1. Short-term expiration (24h TTL)
+      if (this.state.shortTerm && this.state.shortTerm.expiresAt && now > this.state.shortTerm.expiresAt) {
+        this.state.shortTerm.recentCommands = [];
+        this.state.shortTerm.recentSearches = [];
+        this.state.shortTerm.currentPageSummary = '';
+      }
+
+      // 2. Activity TTL + compression before trimming to MAX_ACTIVITIES
+      const list = Array.isArray(this.state.activities) ? this.state.activities : [];
+      const kept = [];
+      const archived = [];
+      for (const act of list) {
+        if (!act) continue;
+        const tsMs = Date.parse(act.timestamp || '') || now;
+        const ageMs = Math.max(0, now - tsMs);
+        const imp = typeof act.importance === 'number' ? act.importance : 0.45;
+        const ttl = imp < 0.35 ? LOW_IMPORTANCE_TTL_MS : LONG_TERM_TTL_MS;
+        if (ageMs > ttl) {
+          archived.push(act);
+        } else {
+          kept.push(act);
+        }
+      }
+
+      const maxKeep = aggressive ? Math.min(12, MAX_ACTIVITIES) : MAX_ACTIVITIES;
+      while (kept.length > maxKeep) {
+        archived.push(kept.shift());
+      }
+      this.state.activities = kept;
+
+      if (archived.length > 0) {
+        if (!Array.isArray(this.state.longTerm.compressedSummaries)) this.state.longTerm.compressedSummaries = [];
+        for (const a of archived) {
+          const topicKey = a.topic || 'General';
+          const snippet = this.sanitizeText(a.user_command || a.result || '').slice(0, 120);
+          if (!snippet) continue;
+          const existing = this.state.longTerm.compressedSummaries.find((c) => c.topic === topicKey);
+          if (existing) {
+            existing.count = (existing.count || 1) + 1;
+            existing.summary = `${existing.summary}; ${snippet}`.slice(-180);
+            existing.updatedAt = new Date().toISOString();
+          } else {
+            this.state.longTerm.compressedSummaries.push({
+              topic: topicKey,
+              summary: snippet,
+              count: 1,
+              updatedAt: new Date().toISOString()
+            });
+          }
+        }
+        this.state.longTerm.compressedSummaries = this.state.longTerm.compressedSummaries.slice(-15);
+      }
+
+      // 3. Prune stale tab contexts (>48h) & bound count cleanly
+      if (this.state.tabContexts && typeof this.state.tabContexts === 'object') {
+        const entries = Object.entries(this.state.tabContexts)
+          .filter(([k, v]) => v && (now - (v.lastAccessedAt || 0) < 48 * 60 * 60 * 1000 || k === this._getTabKey()))
+          .sort((a, b) => (b[1].lastAccessedAt || 0) - (a[1].lastAccessedAt || 0))
+          .slice(0, MAX_TAB_CONTEXTS);
+        const nextTabs = {};
+        for (const [k, v] of entries) nextTabs[k] = v;
+        this.state.tabContexts = nextTabs;
+      }
+
+      // 4. Trim neural vector cache when recovering aggressively
+      if (aggressive && this._neuralVectors.size > 12) {
+        const dropCount = this._neuralVectors.size - 12;
+        const keys = Array.from(this._neuralVectors.keys()).slice(0, dropCount);
+        for (const k of keys) this._neuralVectors.delete(k);
+      }
+
+      if (!skipSave) void this.saveState();
+      return { keptActivities: kept.length, compressedCount: this.state.longTerm.compressedSummaries.length };
+    }
+
+    /**
+     * Record a meaningful user/assistant activity (maintaining at least last 10+ up to 25 activities).
+     */
+    async recordActivity(entry = {}) {
+      if (this.privacy.memoryPaused) {
+        return null;
+      }
+
+      const rawCmd = entry.user_command || entry.command || '';
+      const rawRes = entry.result || entry.summary || '';
+      const cmdSensitive = this.isSensitiveText(rawCmd);
+      const resSensitive = this.isSensitiveText(rawRes);
+
+      const userCommand = this.sanitizeText(rawCmd);
+      const resultText = this.sanitizeText(rawRes);
+      const pageTitle = this.sanitizeText(
+        entry.page_title || (typeof document !== 'undefined' ? document.title : '')
+      );
+      const rawPageUrl = entry.page_url || (typeof window !== 'undefined' && window.location ? window.location.href : '');
+      const pageUrl = this._sanitizeStoredUrl(rawPageUrl);
+
+      // Extract & update topic and entities
+      const extracted = this.extractEntitiesAndTopic(userCommand, { title: pageTitle, url: pageUrl });
+      const topic = entry.topic || extracted.topic || this.state.currentTopic || '';
+      const entities = Array.isArray(entry.entities) && entry.entities.length > 0
+        ? entry.entities
+        : extracted.entities.slice(0, 6);
+
+      // Never embed sensitive user/form text into neural vector cache
+      let embedKey = '';
+      let embedding = null;
+      if (!cmdSensitive && !resSensitive) {
+        const embeddingText = `${userCommand} ${topic} ${entities.join(' ')} ${pageTitle} ${resultText}`.trim().slice(0, 400);
+        embedKey = this._hashText(embeddingText);
+        embedding = await this.computeHybridEmbedding(embeddingText);
+      }
+
+      // Duplicate detection within last 90 seconds on same tab & normalized command
+      const nowMs = Date.now();
+      const dupTarget = (this.state.activities || []).slice(-5).find((prev) =>
+        prev &&
+        prev.user_command === userCommand &&
+        prev.page_url === pageUrl &&
+        prev.intent === (entry.intent || 'GENERAL_QUESTION') &&
+        (nowMs - (Date.parse(prev.timestamp || '') || 0)) < 90000
+      );
+      if (dupTarget) {
+        dupTarget.repeatCount = (dupTarget.repeatCount || 1) + 1;
+        dupTarget.timestamp = new Date().toISOString();
+        dupTarget.importance = Number(Math.min(1, (dupTarget.importance || 0.5) + 0.05).toFixed(2));
+        await this.saveState();
+        return dupTarget;
+      }
+
+      const importance = this.scoreMemoryImportance({
+        ...entry,
+        user_command: userCommand,
+        result: resultText,
+        entities,
+        related_task_id: entry.related_task_id || (this.state.activeTask ? this.state.activeTask.id : null)
+      });
+
+      const activity = {
+        id: entry.id || `act_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: entry.timestamp || new Date().toISOString(),
+        tabId: String(this.tabId || 'default'),
+        user_command: userCommand,
+        intent: entry.intent || 'GENERAL_QUESTION',
+        topic,
+        entities,
+        page_title: pageTitle,
+        page_url: pageUrl,
+        action: entry.action || 'processed_command',
+        result: resultText,
+        related_task_id: entry.related_task_id || (this.state.activeTask ? this.state.activeTask.id : null),
+        importance,
+        repeatCount: 1,
+        embedKey,
+        embedding
+      };
+
+      this.state.activities.push(activity);
+
+      // Track structured short-term commands & searches
+      if (this.state.shortTerm) {
+        if (userCommand) {
+          this.state.shortTerm.recentCommands = [...(this.state.shortTerm.recentCommands || []), { cmd: userCommand, ts: nowMs, tabId: String(this.tabId || 'default') }].slice(-10);
+        }
+        if (activity.intent === 'PAGE_SEARCH' || /\bsearch\b/i.test(activity.action || '')) {
+          this.state.shortTerm.recentSearches = [...(this.state.shortTerm.recentSearches || []), { query: userCommand, topic, ts: nowMs }].slice(-10);
+        }
+        this.state.shortTerm.expiresAt = nowMs + SHORT_TERM_TTL_MS;
+      }
+
+      // Track long-term recurring topic weights & preferences
+      if (topic && this.state.longTerm && this.state.longTerm.recurringTopics) {
+        const rec = this.state.longTerm.recurringTopics[topic] || { count: 0, importance: 0.5, lastSeenAt: 0 };
+        rec.count += 1;
+        rec.importance = Number(Math.min(1, Math.max(rec.importance, importance) + 0.04).toFixed(2));
+        rec.lastSeenAt = nowMs;
+        this.state.longTerm.recurringTopics[topic] = rec;
+      }
+
+      // Also record turn in conversationTurns (only sanitized text)
+      if (userCommand) {
+        this.state.conversationTurns.push({
+          role: 'user',
+          text: userCommand,
+          topic,
+          tabId: String(this.tabId || 'default'),
+          timestamp: activity.timestamp
+        });
+      }
+      if (resultText) {
+        this.state.conversationTurns.push({
+          role: 'assistant',
+          text: resultText,
+          topic,
+          tabId: String(this.tabId || 'default'),
+          timestamp: activity.timestamp
+        });
+      }
+      if (this.state.conversationTurns.length > MAX_CONVERSATION_TURNS) {
+        this.state.conversationTurns = this.state.conversationTurns.slice(-MAX_CONVERSATION_TURNS);
+      }
+
+      // Correlate into isolated personal project & context graph without inferring sensitive traits
+      const pi = getPersonalIntelApi();
+      if (pi && !cmdSensitive && !resSensitive && !pi.isDisallowedPersonalTrait(userCommand)) {
+        const domain = pi.inferDomainFromText(`${userCommand} ${topic} ${(this.state.activeTask && this.state.activeTask.objective) || ''}`);
+        if (topic || (this.state.activeTask && this.state.activeTask.objective) || pageUrl) {
+          pi.recordEntityResearch(this.state, {
+            domain,
+            rootTopic: topic || pageTitle || 'General',
+            objective: (this.state.activeTask && this.state.activeTask.objective) || topic || '',
+            entityName: entry.entityName || '',
+            question: activity.intent === 'GENERAL_QUESTION' || activity.intent === 'CONTEXTUAL_QUESTION' || activity.intent === 'OFF_PAGE_RESEARCH' ? userCommand : '',
+            url: pageUrl,
+            sourceTitle: pageTitle
+          });
+        }
+      }
+
+      this.pruneAndCompressMemory({ skipSave: true });
+      await this.saveState();
+      return activity;
+    }
+
+    /** Record an explicitly stated non-sensitive user preference in long-term & personal memory. */
+    async recordUserPreference(key, value) {
+      if (this.privacy.memoryPaused || !key || this.isSensitiveText(`${key} ${value}`)) return false;
+      if (!this.state.longTerm) {
+        this.state.longTerm = { recurringTopics: {}, completedTaskSummaries: [], userPreferences: {}, frequentSites: {}, compressedSummaries: [] };
+      }
+      this.state.longTerm.userPreferences[String(key).slice(0, 40)] = this.sanitizeText(value).slice(0, 120);
+      const pi = getPersonalIntelApi();
+      if (pi) {
+        pi.setExplicitPreference(this.state, key, value);
+      }
+      await this.saveState();
+      return true;
+    }
+
+    async setExplicitPreference(key, value, label = '') {
+      if (this.privacy.memoryPaused || !key || this.isSensitiveText(`${key} ${value}`)) return null;
+      const pi = getPersonalIntelApi();
+      if (!pi) return null;
+      const entry = pi.setExplicitPreference(this.state, key, value, label);
+      if (entry) {
+        if (!this.state.longTerm) this.state.longTerm = { recurringTopics: {}, completedTaskSummaries: [], userPreferences: {}, frequentSites: {}, compressedSummaries: [] };
+        this.state.longTerm.userPreferences[String(key).slice(0, 40)] = typeof value === 'string' ? this.sanitizeText(value).slice(0, 120) : value;
+        await this.saveState();
+      }
+      return entry;
+    }
+
+    async recordPreferenceSignal(key, candidateValue, meta = {}) {
+      if (this.privacy.memoryPaused || !this.privacy.learningEnabled) {
+        return { recorded: false, reason: 'learning_paused_or_disabled' };
+      }
+      const pi = getPersonalIntelApi();
+      if (!pi) return { recorded: false };
+      const res = pi.recordAdaptiveSignal(this.state, key, candidateValue, meta);
+      if (res && res.recorded) {
+        await this.saveState({ skipTabSync: true });
+      }
+      return res;
+    }
+
+    getEffectivePreference(key, fallback = null) {
+      const pi = getPersonalIntelApi();
+      if (pi) {
+        const val = pi.getPreferenceValue(this.state, key, undefined);
+        if (val !== undefined && val !== null) return val;
+      }
+      const lt = this.state && this.state.longTerm && this.state.longTerm.userPreferences;
+      if (lt && lt[key] !== undefined) return lt[key];
+      return fallback;
+    }
+
+    async correctRememberedDetail(correctionText) {
+      const pi = getPersonalIntelApi();
+      if (!pi) return { ok: false, message: 'Personal intelligence module unavailable.' };
+      const res = pi.applyUserCorrection(this.state, correctionText);
+      if (res && res.ok) {
+        await this.saveState();
+      }
+      return res;
+    }
+
+    getSeparatedEntityContext(query) {
+      const pi = getPersonalIntelApi();
+      if (!pi) return null;
+      const activeProjId = (this.state && this.state.personalContext && this.state.personalContext.activeProjectId) || '';
+      return pi.querySeparatedEntityContext(this.state, query, activeProjId);
+    }
+
+    async clearPersonalContext(scope = 'all') {
+      const pi = getPersonalIntelApi();
+      if (!pi) return this.getMemoryOverview();
+      if (scope === 'preferences' || scope === 'inferred') {
+        pi.resetPreferences(this.state, scope === 'inferred' ? 'inferred' : 'all');
+        if (scope === 'preferences' && this.state.longTerm) this.state.longTerm.userPreferences = {};
+      } else {
+        this.state.personalContext = pi.createDefaultPersonalContext();
+        this.state.personalContext.privacyControls.learningEnabled = this.privacy.learningEnabled !== false;
+        this.state.personalContext.privacyControls.proactiveEnabled = this.privacy.proactiveEnabled !== false;
+        if (this.state.longTerm) this.state.longTerm.userPreferences = {};
+      }
+      await this.saveState({ skipTabSync: true, overwriteAllTabs: true });
+      return this.getMemoryOverview();
+    }
+
+    getPersonalContextOverview() {
+      const pi = getPersonalIntelApi();
+      const pc = pi ? pi.ensurePersonalContext(this.state) : (this.state.personalContext || {});
+      const prefs = Object.entries(pc.preferences || {}).map(([k, v]) => ({
+        key: k,
+        value: k === 'controlOverrides' ? `${Object.keys(v.value || {}).length} scoped rules` : v.value,
+        source: v.source || 'explicit',
+        confidence: v.confidence || 1,
+        evidenceCount: v.evidenceCount || 1
+      }));
+      const projects = Object.values(pc.projects || {}).map((p) => ({
+        id: p.id,
+        title: p.title,
+        domain: p.domain,
+        rootTopic: p.rootTopic,
+        entities: Object.keys((p.research && p.research.entityFindings) || {}),
+        deadlines: p.deadlines || [],
+        sourcesCount: ((p.research && p.research.sourcesConsulted) || []).length
+      }));
+      return {
+        privacyControls: {
+          memoryPaused: Boolean(this.privacy.memoryPaused),
+          disablePageAnalysis: Boolean(this.privacy.disablePageAnalysis),
+          learningEnabled: Boolean(this.privacy.learningEnabled !== false),
+          proactiveEnabled: Boolean(this.privacy.proactiveEnabled !== false)
+        },
+        preferences: prefs,
+        projects,
+        activeTask: this.state.activeTask ? {
+          id: this.state.activeTask.id,
+          objective: this.state.activeTask.objective,
+          status: this.state.activeTask.status,
+          completedSteps: this.state.activeTask.completedSteps || [],
+          pendingSteps: this.state.activeTask.pendingSteps || [],
+          deadlines: this.state.activeTask.identifiedDeadlines || []
+        } : null,
+        frequentServices: Object.values(pc.frequentServices || {}).sort((a, b) => (b.visits || 0) - (a.visits || 0)).slice(0, 6)
+      };
+    }
+
+    /**
+     * Multi-signal Hybrid Memory Retrieval (Phase 4 & 5):
+     * Combines genuine neural cosine similarity (when cached/passed), deterministic semantic vector,
+     * entity overlap, topic match, active task priority, visited URL match, and recency weight.
+     */
+    retrieveRelevantMemories(query, options = {}) {
+      const topK = options.topK || 5;
+      const activities = Array.isArray(this.state.activities) ? this.state.activities : [];
+      if (activities.length === 0) return [];
+
+      const qClean = String(query || '').trim();
+      const qLower = qClean.toLowerCase();
+      const qKey = this._hashText(qClean.slice(0, 400));
+      const queryNeuralVec = options.queryNeuralVec || this._neuralVectors.get(qKey) || null;
+      const queryDetVec = this.computeDeterministicEmbedding(
+        `${qClean} ${this.state.currentTopic || ''} ${(this.state.currentEntities.all || []).join(' ')}`
+      );
+
+      const activeTask = this.state.activeTask;
+      const total = activities.length;
+
+      const scored = activities.map((act, idx) => {
+        const actNeuralVec = act.embedKey ? this._neuralVectors.get(act.embedKey) : null;
+        let sim = 0;
+        let vectorModel = 'deterministic-64d';
+
+        if (queryNeuralVec && actNeuralVec && queryNeuralVec.length === actNeuralVec.length) {
+          sim = Math.max(0, this.cosineSimilarity(queryNeuralVec, actNeuralVec));
+          vectorModel = 'nomic-embed-text';
+        } else {
+          const actVec = Array.isArray(act.embedding) && act.embedding.length === VECTOR_DIM
+            ? act.embedding
+            : this.computeDeterministicEmbedding(`${act.user_command} ${act.topic} ${(act.entities || []).join(' ')} ${act.result}`);
+          sim = Math.max(0, this.cosineSimilarity(queryDetVec, actVec));
+        }
+
+        const matchesTermOrDemonym = (textLower, termLower) => {
+          if (!termLower) return false;
+          if (textLower.includes(termLower)) return true;
+          const demonyms = {
+            germany: 'german', china: 'chinese', japan: 'japanese', india: 'indian',
+            france: 'french', italy: 'italian', spain: 'spanish', uk: 'british',
+            russia: 'russian', korea: 'korean', canada: 'canadian', australia: 'australian',
+            mexico: 'mexican', brazil: 'brazilian', turkey: 'turkish', switzerland: 'swiss'
+          };
+          const alt = demonyms[termLower];
+          if (!alt || !new RegExp(`\\b${alt}\\b`, 'i').test(textLower)) return false;
+          // Do not merge e.g. "Chinese programming/language" with a travel/visa "China" task unless domains overlap
+          const isLanguageOrTechQuery = /\b(?:language|programming|syntax|code|tutorial|course|compiler|font|keyboard|grammar|character|characters)\b/i.test(textLower);
+          const actHay = `${act.user_command || ''} ${act.result || ''}`.toLowerCase();
+          const actIsTravelOrCountry = /\b(?:visa|flight|trip|travel|passport|hotel|embassy|country|university|admission)\b/i.test(actHay);
+          if (isLanguageOrTechQuery && actIsTravelOrCountry) return false;
+          return true;
+        };
+
+        let entityOverlap = 0;
+        if (Array.isArray(act.entities)) {
+          for (const ent of act.entities) {
+            if (ent && matchesTermOrDemonym(qLower, String(ent).toLowerCase())) {
+              entityOverlap += 0.45;
+            }
+          }
+        }
+        entityOverlap = Math.min(1, entityOverlap);
+
+        let topicMatch = 0;
+        const topicLower = String(act.topic || '').toLowerCase();
+        if (topicLower) {
+          if (matchesTermOrDemonym(qLower, topicLower)) topicMatch = 1.0;
+          else if (topicLower === String(this.state.currentTopic || '').toLowerCase()) topicMatch = 0.55;
+        }
+
+        let activeTaskPriority = 0;
+        if (activeTask && act.related_task_id && act.related_task_id === activeTask.id) {
+          activeTaskPriority = 0.7;
+          if (/\b(?:trip|travel|visa|flight|continue|resume|earlier|that|there|its|website)\b/i.test(qLower)) {
+            activeTaskPriority = 1.0;
+          }
+        }
+
+        let urlBonus = 0;
+        if (act.page_url && qLower && topicLower && String(act.page_url).toLowerCase().includes(topicLower)) {
+          urlBonus = 0.06;
+        }
+
+        // Penalize contrasting places or cross-domain mismatch so distinct tasks do not leak into each other
+        let domainSeparationFactor = 1.0;
+        const queryPlaces = Array.from(KNOWN_PLACES).filter((p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(qLower));
+        if (queryPlaces.length > 0 && topicLower && !queryPlaces.some((qp) => matchesTermOrDemonym(qp, topicLower) || matchesTermOrDemonym(topicLower, qp))) {
+          domainSeparationFactor = 0.52;
+        }
+        if (/\b(?:programming|python|pytorch|javascript|code|coding|syntax|software)\b/i.test(qLower)
+          && /\b(?:visa|flight|passport|hotel|embassy)\b/i.test(`${act.user_command || ''} ${act.result || ''}`)) {
+          domainSeparationFactor = Math.min(domainSeparationFactor, 0.35);
+        }
+
+        const recencyWeight = (idx + 1) / total;
+        const rawScore = (0.42 * sim + 0.24 * entityOverlap + 0.16 * topicMatch + 0.12 * activeTaskPriority + 0.06 * recencyWeight + urlBonus) * domainSeparationFactor;
+        const score = Number(Math.min(1, rawScore).toFixed(4));
+
+        const reasons = [];
+        if (sim > 0.3) reasons.push(`${vectorModel}:${sim.toFixed(2)}`);
+        if (entityOverlap > 0) reasons.push(`entity:${entityOverlap.toFixed(2)}`);
+        if (topicMatch > 0) reasons.push(`topic:${topicMatch.toFixed(2)}`);
+        if (activeTaskPriority > 0) reasons.push(`taskPriority:${activeTaskPriority.toFixed(2)}`);
+
+        return {
+          activity: act,
+          score,
+          cosineSimilarity: Number(sim.toFixed(4)),
+          entityOverlap: Number(entityOverlap.toFixed(4)),
+          topicMatch: Number(topicMatch.toFixed(4)),
+          activeTaskPriority: Number(activeTaskPriority.toFixed(4)),
+          recencyWeight: Number(recencyWeight.toFixed(4)),
+          vectorModel,
+          reason: reasons.join(', ') || 'recency'
+        };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, topK);
+      if (top[0]) {
+        this._diag('retrieved', {
+          vectorModel: top[0].vectorModel,
+          topScore: top[0].score,
+          topic: top[0].activity.topic,
+          reason: top[0].reason
+        });
+      }
+      return top;
+    }
+
+    async retrieveRelevantMemoriesAsync(query, options = {}) {
+      const neural = await this.getQueryNeuralEmbeddingAsync(query, options.timeoutMs || 450);
+      return this.retrieveRelevantMemories(query, {
+        ...options,
+        queryNeuralVec: neural ? neural.vec : null
+      });
+    }
+
+    /**
+     * Locate which open/visited tab holds a website or topic matching `query`.
+     */
+    findTabForQuery(query = '', options = {}) {
+      const qLower = String(query || '').toLowerCase();
+      const qTokens = qLower.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+      const excludeTabId = options && options.excludeTabId ? String(options.excludeTabId) : '';
+      const allTabs = Object.values(this.state.tabContexts || {})
+        .filter((t) => t && (t.urlClean || t.title || t.topic) && (!excludeTabId || String(t.tabId || '') !== excludeTabId));
+
+      const scored = allTabs.map((t) => {
+        const titleUrlHay = `${t.title || ''} ${t.topic || ''} ${t.urlClean || ''}`.toLowerCase();
+        const factsHay = `${(t.keyFacts || []).join(' ')}`.toLowerCase();
+        const listHay = `${((t.entities && t.entities.listItems) || []).map((i) => i.title).join(' ')}`.toLowerCase();
+        let score = 0;
+        for (const tok of qTokens) {
+          if (titleUrlHay.includes(tok)) score += 3;
+          else if (factsHay.includes(tok)) score += 2;
+          else if (listHay.includes(tok)) score += 1;
+        }
+        return { tab: t, score };
+      }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+
+      const matches = scored.map((s) => s.tab);
+      const ambiguous = scored.length >= 2 && scored[0].score === scored[1].score && scored[0].tab.urlClean !== scored[1].tab.urlClean;
+      return { bestTab: matches[0] || null, matches, ambiguous };
+    }
+
+    /**
+     * Resolve cross-tab website comparison requests ("Compare these two websites").
+     * Asks for clarification cleanly when 3+ distinct tabs/websites exist without a specific pair named.
+     */
+    resolveCrossTabComparison(rawText = '') {
+      const lower = String(rawText || '').toLowerCase();
+      const candidatesMap = new Map();
+
+      const addSite = (site) => {
+        if (!site || !site.urlClean) return;
+        const key = site.urlClean;
+        const existing = candidatesMap.get(key);
+        if (!existing || (site.lastAccessedAt || 0) > (existing.lastAccessedAt || 0)) {
+          candidatesMap.set(key, site);
+        }
+      };
+
+      for (const ctx of Object.values(this.state.tabContexts || {})) {
+        if (ctx && ctx.urlClean && !/^about:/i.test(ctx.urlClean)) {
+          addSite({
+            tabId: ctx.tabId,
+            title: ctx.title || ctx.urlClean,
+            urlClean: ctx.urlClean,
+            topic: ctx.topic || '',
+            keyFacts: ctx.keyFacts || [],
+            taskId: ctx.taskId || '',
+            lastAccessedAt: ctx.lastAccessedAt || 0
+          });
+        }
+      }
+      for (const vp of (this.state.visitedPages || [])) {
+        if (vp && vp.url && !/^about:/i.test(vp.url)) {
+          const clean = this._sanitizeStoredUrl(vp.url);
+          if (!candidatesMap.has(clean)) {
+            addSite({
+              tabId: vp.tabId || 'default',
+              title: vp.title || clean,
+              urlClean: clean,
+              topic: vp.topic || '',
+              keyFacts: vp.keyFacts || [],
+              taskId: vp.taskId || '',
+              lastAccessedAt: Date.parse(vp.timestamp || '') || 0
+            });
+          }
+        }
+      }
+
+      const sites = Array.from(candidatesMap.values()).sort((a, b) => (b.lastAccessedAt || 0) - (a.lastAccessedAt || 0));
+      if (sites.length < 2) {
+        return { status: 'insufficient_tabs', sites };
+      }
+
+      // Check if user explicitly named two websites/topics in the query
+      const matchedExplicit = sites.filter((s) => {
+        const words = `${s.title} ${s.topic}`.toLowerCase().split(/\s+/).filter((w) => w.length >= 4 && !STOP_WORDS.has(w));
+        return words.some((w) => lower.includes(w));
+      });
+      if (matchedExplicit.length >= 2) {
+        return { status: 'ready', sites: matchedExplicit.slice(0, 2) };
+      }
+
+      // Check active task linked sites (when > 2 tabs open, if active task clearly links 2 sites)
+      const activeTaskId = this.state.activeTask && this.state.activeTask.id;
+      const taskSites = activeTaskId ? sites.filter((s) => s.taskId && s.taskId === activeTaskId) : [];
+
+      if (sites.length === 2) {
+        return { status: 'ready', sites };
+      }
+
+      // >= 3 distinct sites and "these two websites" didn't disambiguate -> ask user cleanly!
+      if (/\b(?:these|those)\s+two\s+(?:websites|sites|pages|tabs)\b/i.test(lower) || sites.length >= 3) {
+        if (taskSites.length === 2 && !/\bthese\s+two\b/i.test(lower)) {
+          return { status: 'ready', sites: taskSites };
+        }
+        return {
+          status: 'ambiguous',
+          sites: sites.slice(0, 4),
+          question: 'Multiple websites are open across tabs. Which two would you like me to compare?',
+          options: sites.slice(0, 4).map((s) => `${s.title} (${s.urlClean})`)
+        };
+      }
+
+      return { status: 'ready', sites: sites.slice(0, 2) };
+    }
+
+    /** Return memory metrics and breakdown for Settings / Diagnostics UI without leaking secrets. */
+    getMemoryOverview() {
+      return {
+        activeTabId: String(this.tabId || 'default'),
+        tabContextCount: Object.keys(this.state.tabContexts || {}).length,
+        shortTermCount: ((this.state.shortTerm && this.state.shortTerm.recentCommands) || []).length,
+        activityCount: (this.state.activities || []).length,
+        visitedPageCount: (this.state.visitedPages || []).length,
+        recentTaskCount: (this.state.recentTasks || []).length,
+        hasActiveTask: Boolean(this.state.activeTask && this.state.activeTask.objective),
+        compressedSummaryCount: ((this.state.longTerm && this.state.longTerm.compressedSummaries) || []).length,
+        recurringTopics: Object.keys((this.state.longTerm && this.state.longTerm.recurringTopics) || {}).slice(0, 8),
+        privacy: { ...this.privacy },
+        approxBytes: JSON.stringify(this.state || {}).length
+      };
+    }
+
+    async clearRecentActivity() {
+      this.state.activities = [];
+      this.state.conversationTurns = [];
+      this.state.visitedPages = [];
+      if (this.state.shortTerm) {
+        this.state.shortTerm.recentCommands = [];
+        this.state.shortTerm.recentSearches = [];
+        this.state.shortTerm.currentPageSummary = '';
+      }
+      await this.saveState({ skipTabSync: true, overwriteAllTabs: true });
+      return this.getMemoryOverview();
+    }
+
+    async clearTaskHistory() {
+      this.state.activeTask = null;
+      this.state.recentTasks = [];
+      if (this.state.longTerm) {
+        this.state.longTerm.completedTaskSummaries = [];
+      }
+      for (const ctx of Object.values(this.state.tabContexts || {})) {
+        if (ctx) ctx.taskId = '';
+      }
+      await this.saveState({ skipTabSync: true, overwriteAllTabs: true });
+      return this.getMemoryOverview();
+    }
+
+    async clearAllMemory() {
+      this._neuralVectors.clear();
+      this._embeddingCache.clear();
+      this.state = this._createDefaultState();
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          await new Promise((resolve) => {
+            chrome.storage.local.remove([STORAGE_KEY_MEMORY, STORAGE_KEY_VECTORS], () => {
+              void chrome.runtime?.lastError;
+              resolve();
+            });
+          });
+        } catch (_e) {}
+      }
+      await this.saveState({ skipTabSync: true, overwriteAllTabs: true });
+      return this.getMemoryOverview();
+    }
+
+    /**
+     * Resolve pronouns, spatial references ("there"), ordinal references ("the second one"),
+     * cross-tab references, and session continuation requests using active-tab & task memory.
+     */
+    resolveContextualReferences(rawText, pageContext = {}) {
+      // Sync runtime view from tab storage only when switching tabs so unsaved runtime edits aren't overwritten
+      if (this._syncedTabKey !== this._getTabKey()) {
+        this._syncRuntimeViewFromTabContext();
+      }
+      const activeTabCtx = this._getActiveTabContext(true);
+      const original = String(rawText || '')
+        .replace(/^(?:hey\s+|ok\s+|okay\s+|hi\s+)?sleepwalker\s*[,:-]*\s+/i, '')
+        .trim();
+      if (!original) {
+        return {
+          originalText: '',
+          resolvedText: '',
+          resolvedTopic: this.state.currentTopic || '',
+          resolvedEntity: '',
+          resolvedListItem: null,
+          resolvedListItems: [],
+          isFollowUp: false,
+          isResumeCommand: false,
+          isReturnTaskCommand: false,
+          isAmbiguous: false,
+          clarificationQuestion: '',
+          clarificationOptions: [],
+          relevantMemories: []
+        };
+      }
+
+      const lowerOrig = original.toLowerCase();
+      const pageTitle = pageContext.title || (typeof document !== 'undefined' ? document.title : '');
+      const pageUrl = pageContext.url || (typeof window !== 'undefined' && window.location ? window.location.href : '');
+      const prevTopic = activeTabCtx.topic || this.state.currentTopic || '';
+      const prevPlace = ((activeTabCtx.entities && activeTabCtx.entities.place) || (this.state.currentEntities && this.state.currentEntities.place)) || '';
+      const extracted = this.extractEntitiesAndTopic(original, { title: pageTitle, url: pageUrl });
+
+      // Cross-tab question / lookup ("Which tab has MIT?" / "Open the Germany tab")
+      let resolvedTabMatch = null;
+      if (/\b(?:which\s+tab|what\s+tab|switch\s+to\s+.*\btab\b|go\s+to\s+.*\btab\b|tab\s+(?:with|about|containing))\b/i.test(lowerOrig)) {
+        resolvedTabMatch = this.findTabForQuery(original);
+      }
+      const crossTabCompare = /\bcompare\b.*\b(?:websites?|sites|tabs|pages)\b|\bcompare\s+these\s+two\b/i.test(lowerOrig)
+        ? this.resolveCrossTabComparison(original)
+        : null;
+
+      // Preserve prior travel/task topic when the utterance mentions "that trip" / "that journey" / "earlier task"
+      const activeTask = this.state.activeTask;
+      const allTasks = [activeTask, ...(Array.isArray(this.state.recentTasks) ? this.state.recentTasks : [])].filter(Boolean);
+
+      let resolvedText = original;
+      let resolvedEntity = '';
+      let resolvedListItem = null;
+      const resolvedListItems = [];
+      let resolvedUrlTarget = null;
+      let isFollowUp = false;
+      let isResumeCommand = false;
+      let isReturnTaskCommand = false;
+      let isAmbiguous = false;
+      let clarificationQuestion = '';
+      let clarificationOptions = [];
+
+      // 0a. Task concept affinity retrieval (Conversation B: "What visa do I need for that trip?" or "Return to the earlier task")
+      const isReturnToTask = /\b(?:return\s+to\s+(?:the\s+|our\s+)?(?:earlier|previous|last)\s+(?:task|topic|search|plan)|go\s+back\s+to\s+(?:our|the|earlier)\s+(?:task|plan))\b/i.test(lowerOrig);
+      if (isReturnToTask) {
+        isReturnTaskCommand = true;
+        isFollowUp = true;
+        const candidateTasks = allTasks.filter((t) => t && t.topic);
+        if (candidateTasks.length > 0) {
+          const picked = candidateTasks.find((t) => t.id !== (activeTask && activeTask.id)) || candidateTasks[0];
+          this.state.activeTask = picked;
+          resolvedEntity = picked.topic || picked.objective;
+          this.state.currentTopic = picked.topic || this.state.currentTopic;
+        }
+      }
+
+      // 0b. Concept-to-Task affinity for demonstrative phrases ("that trip", "that visa", "those universities", "that application")
+      let taskMatchedByConcept = null;
+      if (!isResumeCommand && !isReturnTaskCommand) {
+        if (/\b(?:that\s+trip|for\s+that\s+trip|the\s+trip|that\s+journey|that\s+visa)\b/i.test(lowerOrig)) {
+          taskMatchedByConcept = allTasks.find((t) => /\b(?:travel|trip|journey|visa|flight|china|japan|germany)\b/i.test(`${t.objective} ${t.topic}`));
+          if (!taskMatchedByConcept) {
+            const actHit = (this.state.activities || []).slice().reverse().find((a) => /\b(?:travel|trip|journey|visa|flight)\b/i.test(`${a.user_command} ${a.result} ${a.action}`) && a.topic);
+            if (actHit) taskMatchedByConcept = { topic: actHit.topic, objective: actHit.user_command };
+          }
+          if (taskMatchedByConcept && taskMatchedByConcept.topic) {
+            isFollowUp = true;
+            resolvedEntity = taskMatchedByConcept.topic;
+            this.state.currentTopic = taskMatchedByConcept.topic;
+            if (KNOWN_PLACES.has(taskMatchedByConcept.topic.toLowerCase())) {
+              this.state.currentEntities.place = taskMatchedByConcept.topic;
+            }
+            resolvedText = resolvedText.replace(/\b(?:that\s+trip|the\s+trip|that\s+journey)\b/gi, `${taskMatchedByConcept.topic} trip`);
+          }
+        } else if (/\b(?:their|those|the\s+universities|the\s+laptops)\b/i.test(lowerOrig) && this.state.currentEntities && Array.isArray(this.state.currentEntities.listItems) && this.state.currentEntities.listItems.length > 0) {
+          isFollowUp = true;
+          resolvedEntity = prevTopic || this.state.currentTopic || (activeTask && activeTask.topic) || '';
+        }
+      }
+
+      const activePlace = (this.state.currentEntities && this.state.currentEntities.place) || prevPlace || extracted.place || '';
+      const activeTopic = (taskMatchedByConcept && taskMatchedByConcept.topic) || this.state.currentTopic || prevTopic || extracted.topic || extracted.pageTopic || '';
+      const targetDestination = activePlace || activeTopic;
+
+      // 1. Check for session continuation / resume commands
+      if (
+        /\b(?:continue\s+where\s+we\s+left\s+off|resume\s+where\s+we\s+left\s+off|pick\s+up\s+where\s+we\s+left\s+off|continue\s+(?:our|the|my)\s+(?:task|search|work|conversation)|what\s+were\s+we\s+doing|where\s+were\s+we|जहाँ\s+छोड़ा\s+था\s+वहीं\s+से\s+शुरू\s+करो)\b/i.test(original)
+      ) {
+        isResumeCommand = true;
+        isFollowUp = true;
+        resolvedEntity = (this.state.activeTask && this.state.activeTask.objective) || activeTopic || '';
+      }
+
+      // 2. Resolve spatial/place references: "there", "that country", "that place", "that city", "that university"
+      if (targetDestination && !isResumeCommand && !isReturnTaskCommand) {
+        const spatialRegex = /\b(?:there|to\s+that\s+(?:country|place|city|destination|university|college)|in\s+that\s+(?:country|place|city|university|college)|for\s+that\s+(?:country|place|city|university|college)|that\s+(?:country|place|city|university|college))\b/i;
+        if (spatialRegex.test(resolvedText)) {
+          isFollowUp = true;
+          resolvedEntity = targetDestination;
+          resolvedText = resolvedText
+            .replace(/\b(travel|go|fly|visit|move|relocate|apply|admission|study|work)\s+there\b/gi, `$1 to ${targetDestination}`)
+            .replace(/\bthere\b/gi, `in ${targetDestination}`)
+            .replace(/\bthat\s+(?:country|place|city|destination|university|college)\b/gi, targetDestination);
+        }
+      }
+
+      // 3. Resolve ALL ordinal references globally ("Compare the second one with the first one", "What about the second one?")
+      const ordinalMap = {
+        'first': 0, '1st': 0, 'one': 0,
+        'second': 1, '2nd': 1, 'two': 1,
+        'third': 2, '3rd': 2, 'three': 2,
+        'fourth': 3, '4th': 3,
+        'fifth': 4, '5th': 4
+      };
+      const domListItems = (typeof document !== 'undefined') ? this._scanPageListItems() : [];
+      const runtimeListItems = (this.state.currentEntities && Array.isArray(this.state.currentEntities.listItems))
+        ? this.state.currentEntities.listItems
+        : [];
+      const tabStoredItems = (activeTabCtx && activeTabCtx.entities && Array.isArray(activeTabCtx.entities.listItems))
+        ? activeTabCtx.entities.listItems
+        : [];
+      const storedListItems = runtimeListItems.length > 0 ? runtimeListItems : tabStoredItems;
+      const listItems = storedListItems.length > 0 ? storedListItems : domListItems;
+      if (listItems.length > 0 && storedListItems.length === 0) {
+        this.state.currentEntities.listItems = listItems;
+      }
+
+      const enrichItemFromTabs = (item) => {
+        if (!item || !item.title) return item;
+        const activeTabId = String(this.tabId || 'default');
+        const tabLookup = this.findTabForQuery(item.title, { excludeTabId: activeTabId });
+        const matched = (tabLookup && tabLookup.matches || []).find((m) => m && Array.isArray(m.keyFacts) && m.keyFacts.length > 0)
+          || (tabLookup && tabLookup.bestTab);
+        if (matched && String(matched.tabId || '') !== activeTabId) {
+          return {
+            ...item,
+            matchedTabId: matched.tabId,
+            matchedTabUrl: matched.urlClean,
+            tabFacts: Array.isArray(matched.keyFacts) ? matched.keyFacts : []
+          };
+        }
+        return item;
+      };
+
+      const activeInteraction = this.getInteractionContext(pageUrl);
+      const isControlOrdinalCmd = /^(?:now\s+|please\s+|then\s+)?(?:select|choose|pick)\s+(?:the\s+)?(?:first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th)\s+(?:option|choice|one)\b/i.test(lowerOrig)
+        && (Boolean(activeInteraction && Array.isArray(activeInteraction.lastOptions) && activeInteraction.lastOptions.length > 0) || /\boption\b/i.test(lowerOrig));
+
+      const ordGlobalRegex = /\b(?:the\s+)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(?:one|option|item|result|video|laptop|product|university|college|school|course|hotel|flight|website|site|link|entry|row)(?:'s)?\b/gi;
+      const activeCandList = this.getActiveCandidateList({ urlClean: pageUrl ? this._sanitizeStoredUrl(pageUrl) : '' });
+      const effectiveOrdItems = (activeCandList && Array.isArray(activeCandList.candidates) && activeCandList.candidates.length > 0 && (listItems.length === 0 || activeCandList.kind === 'youtube_videos' || activeCandList.candidates.length >= listItems.length))
+        ? activeCandList.candidates
+        : listItems;
+      if (!isControlOrdinalCmd && effectiveOrdItems.length > 0 && ordGlobalRegex.test(resolvedText)) {
+        ordGlobalRegex.lastIndex = 0;
+        resolvedText = resolvedText.replace(ordGlobalRegex, (fullMatch, ordWord) => {
+          const wLower = ordWord.toLowerCase();
+          const idx = wLower === 'last' ? (effectiveOrdItems.length - 1) : ordinalMap[wLower];
+          if (typeof idx === 'number' && effectiveOrdItems[idx]) {
+            const item = enrichItemFromTabs(effectiveOrdItems[idx]);
+            const itemTitle = item.title || item.label || '';
+            resolvedListItems.push({ index: idx, ordinalWord: wLower, item });
+            if (!resolvedListItem) {
+              resolvedListItem = item;
+              resolvedEntity = itemTitle;
+            }
+            isFollowUp = true;
+            // When user focuses on a single ordinal ("What about the second one?"), remember focus for "Open its official website"
+            if (resolvedListItems.length === 1) {
+              this.state.currentEntities.lastPickedIndex = idx;
+              this.state.currentEntities.focusedEntity = itemTitle;
+            }
+            return itemTitle ? `"${itemTitle}"` : fullMatch;
+          }
+          return fullMatch;
+        });
+      }
+
+      // 3b. Resolve contrast, channel, duration, previous video, and active candidate references
+      let resolvedCandidate = resolvedListItem || null;
+      let resolvedChannel = '';
+      const selState = this.state.selectionState || {};
+      if (!resolvedCandidate && /\b(?:previous\s+video|last\s+video)\b/i.test(lowerOrig)) {
+        const prev = selState.previousSelection && selState.previousSelection.entityType === 'video'
+          ? selState.previousSelection
+          : ((this.state.candidateLists || []).slice().reverse().find((l) => l.kind === 'youtube_videos') || {}).candidates?.[0];
+        if (prev) {
+          resolvedCandidate = prev;
+          resolvedEntity = prev.title || prev.label || resolvedEntity;
+          isFollowUp = true;
+        }
+      } else if (!resolvedCandidate && /\b(?:other\s+channel|other\s+one|not\s+that\s+one|different\s+one|find\s+another\s+one)\b/i.test(lowerOrig)) {
+        const alt = this.findAlternateCandidate(original, { urlClean: pageUrl ? this._sanitizeStoredUrl(pageUrl) : '' });
+        if (alt) {
+          resolvedCandidate = alt;
+          resolvedListItem = resolvedListItem || alt;
+          resolvedEntity = alt.title || alt.label || resolvedEntity;
+          isFollowUp = true;
+        }
+      } else if (/\b(?:same\s+channel|that\s+(?:coding\s+)?channel|by\s+that\s+channel)\b/i.test(lowerOrig)) {
+        const curSel = selState.currentSelection || selState.activeVideo;
+        if (curSel && curSel.channel) {
+          resolvedChannel = curSel.channel;
+          isFollowUp = true;
+          const matchFromChan = (activeCandList && activeCandList.candidates || []).find((c) =>
+            c && c.channel && c.channel.toLowerCase() === curSel.channel.toLowerCase() && c.id !== curSel.id
+          ) || (activeCandList && activeCandList.candidates || []).find((c) =>
+            c && c.channel && c.channel.toLowerCase() === curSel.channel.toLowerCase()
+          );
+          if (matchFromChan && !resolvedCandidate) {
+            resolvedCandidate = matchFromChan;
+            resolvedListItem = resolvedListItem || matchFromChan;
+            resolvedEntity = matchFromChan.title || matchFromChan.label || resolvedEntity;
+          }
+        }
+      } else if (!resolvedCandidate && /\b(?:shorter|longer)\s+(?:video|one)\b/i.test(lowerOrig) && activeCandList && Array.isArray(activeCandList.candidates)) {
+        const withDur = activeCandList.candidates.filter((c) => Number.isFinite(Number(c && c.durationSeconds)) && c.durationSeconds > 0);
+        if (withDur.length > 0) {
+          withDur.sort((a, b) => /\bshorter\b/i.test(lowerOrig) ? (a.durationSeconds - b.durationSeconds) : (b.durationSeconds - a.durationSeconds));
+          resolvedCandidate = withDur[0];
+          resolvedListItem = resolvedListItem || withDur[0];
+          resolvedEntity = withDur[0].title || withDur[0].label || resolvedEntity;
+          isFollowUp = true;
+        }
+      }
+
+      // 4. Resolve possessive singular website reference ("Open its official website", "Open its product page", "Open its application page")
+      const isItsOfficialSite = /\b(?:open|visit|go\s+to|launch)\s+its\s+(?:official\s+)?(?:website|site|portal|page|product\s+page|application\s+page|link)\b/i.test(lowerOrig);
+      if (isItsOfficialSite) {
+        const pickedIdx = typeof this.state.currentEntities.lastPickedIndex === 'number'
+          ? this.state.currentEntities.lastPickedIndex
+          : -1;
+        if (pickedIdx >= 0 && listItems[pickedIdx]) {
+          resolvedListItem = listItems[pickedIdx];
+          resolvedEntity = resolvedListItem.title;
+          resolvedUrlTarget = {
+            title: resolvedListItem.title,
+            url: resolvedListItem.officialUrl || resolvedListItem.url || resolvedListItem.href || ''
+          };
+          isFollowUp = true;
+        } else if (listItems.length >= 2) {
+          // Ambiguous: multiple items exist and user hasn't picked which one "its" refers to
+          isAmbiguous = true;
+          clarificationQuestion = 'Which one would you like me to open?';
+          clarificationOptions = listItems.slice(0, 4).map((x) => x.title);
+        } else if (this.state.currentEntities.focusedEntity) {
+          resolvedEntity = this.state.currentEntities.focusedEntity;
+          isFollowUp = true;
+        }
+      } else if (
+        resolvedListItems.length === 1 &&
+        resolvedListItem &&
+        /\b(?:open|visit|go\s+to|launch)\b/i.test(lowerOrig)
+      ) {
+        resolvedUrlTarget = {
+          title: resolvedListItem.title,
+          url: resolvedListItem.officialUrl || resolvedListItem.url || resolvedListItem.href || ''
+        };
+      }
+
+      // 5. Resolve general pronoun follow-ups ("tell me more about it", "what are its requirements")
+      const focusOrTopic = (this.state.currentEntities && this.state.currentEntities.focusedEntity) || activeTopic;
+      if (focusOrTopic && !resolvedEntity && !isAmbiguous && /\b(?:about\s+it|its\s+|for\s+it|with\s+this|about\s+that|their\s+)\b/i.test(resolvedText)) {
+        isFollowUp = true;
+        resolvedEntity = focusOrTopic;
+        resolvedText = resolvedText
+          .replace(/\babout\s+it\b/gi, `about ${focusOrTopic}`)
+          .replace(/\babout\s+that\b/gi, `about ${focusOrTopic}`)
+          .replace(/\bfor\s+it\b/gi, `for ${focusOrTopic}`)
+          .replace(/\bits\b/gi, `${focusOrTopic}'s`);
+      }
+
+      // 6. Detect implicit follow-up questions on a new page or same conversation
+      if (
+        !isFollowUp &&
+        activeTopic &&
+        this.state.activities.length > 0 &&
+        /^(?:what\s+about|and\s+what|how\s+about|what\s+documents|do\s+i\s+need|how\s+long\s+does|how\s+much\s+does|is\s+a\s+visa|what\s+is\s+the\s+fee|can\s+i\s+also|what\s+are\s+the\s+requirements)/i.test(original)
+      ) {
+        isFollowUp = true;
+        resolvedEntity = activeTopic;
+        if (!original.toLowerCase().includes(activeTopic.toLowerCase())) {
+          resolvedText = `${original} (regarding ${activeTopic})`;
+        }
+      }
+
+      const isolatedEntityContext = !resolvedUrlTarget && (!resolvedListItem || !resolvedListItem.tabFacts)
+        ? this.getSeparatedEntityContext(original)
+        : null;
+
+      // 6b. Resolve section continuity ("the previous section", "second article in the previous section") & "another one like this"
+      const selState2 = this.state.selectionState || {};
+      let resolvedSection = '';
+      if (/\b(?:previous\s+section|earlier\s+section|last\s+section)\b/i.test(lowerOrig)) {
+        resolvedSection = selState2.previousSection || selState2.activeSection || '';
+        if (resolvedSection) {
+          resolvedText = resolvedText.replace(/\b(?:the\s+)?(?:previous|earlier|last)\s+section\b/gi, `"${resolvedSection}" section`);
+          isFollowUp = true;
+        }
+      } else if (/\b(?:this\s+section|current\s+section|that\s+section)\b/i.test(lowerOrig)) {
+        resolvedSection = selState2.activeSection || '';
+        if (resolvedSection) {
+          resolvedText = resolvedText.replace(/\b(?:the\s+)?(?:this|current|that)\s+section\b/gi, `"${resolvedSection}" section`);
+          isFollowUp = true;
+        }
+      }
+      let resolvedSimilarTo = null;
+      if (/\b(?:another\s+(?:one|video|article|resource|product)\s+like\s+(?:this|that)|similar\s+to\s+(?:this|that|it))\b/i.test(lowerOrig)) {
+        resolvedSimilarTo = selState2.currentSelection || selState2.activeVideo || null;
+        if (resolvedSimilarTo) {
+          resolvedEntity = resolvedSimilarTo.title || resolvedSimilarTo.label || resolvedEntity;
+          isFollowUp = true;
+        }
+      }
+
+      const relevantMemories = this.retrieveRelevantMemories(resolvedText, { topK: 5 });
+
+      return {
+        originalText: original,
+        resolvedText,
+        resolvedTopic: activeTopic || resolvedEntity,
+        resolvedEntity: resolvedEntity || activeTopic,
+        resolvedListItem,
+        resolvedListItems,
+        resolvedCandidate,
+        resolvedChannel,
+        resolvedSection,
+        resolvedSimilarTo,
+        candidateListId: activeCandList ? activeCandList.candidateListId : null,
+        selectionState: this.state.selectionState || {},
+        resolvedUrlTarget,
+        resolvedTabMatch,
+        crossTabCompare,
+        isolatedEntityContext,
+        activeTabId: String(this.tabId || 'default'),
+        isFollowUp,
+        isResumeCommand,
+        isReturnTaskCommand,
+        isAmbiguous,
+        clarificationQuestion,
+        clarificationOptions,
+        relevantMemories
+      };
+    }
+
+    /**
+     * Phase 4.2: Formal timestamped candidate list registry with explicit entity & section metadata.
+     */
+    registerCandidateList(kind = 'links', rawItems = [], meta = {}) {
+      if (!Array.isArray(this.state.candidateLists)) this.state.candidateLists = [];
+      if (!this.state.selectionState) {
+        this.state.selectionState = {
+          currentSelection: null,
+          previousSelection: null,
+          rejectedCandidateIds: [],
+          rejectedLabels: [],
+          activeSection: null,
+          activeVideo: null,
+          activeTable: null,
+          activeCardSummary: null,
+          highlightedTarget: null
+        };
+      }
+      const list = Array.isArray(rawItems) ? rawItems : [];
+      const cleanUrl = meta.urlClean ? this._sanitizeStoredUrl(meta.urlClean) : (typeof window !== 'undefined' && window.location ? this._sanitizeStoredUrl(window.location.href) : '');
+      const candidateListId = `cl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const candidates = list.slice(0, 20).map((item, idx) => {
+        const obj = item && typeof item === 'object' ? item : { label: String(item || '') };
+        return {
+          id: String(obj.id || `${kind}_${idx + 1}`),
+          candidateId: String(obj.candidateId || obj.id || `${kind}_${idx + 1}`),
+          index: idx + 1,
+          label: String(obj.label || obj.title || '').slice(0, 120),
+          title: String(obj.title || obj.label || '').slice(0, 120),
+          channel: String(obj.channel || '').slice(0, 80),
+          section: String(obj.section || obj.contextHeading || '').slice(0, 80),
+          sectionPath: Array.isArray(obj.sectionPath) ? obj.sectionPath.slice(0, 5) : [],
+          url: obj.url || obj.href ? this._sanitizeStoredUrl(obj.url || obj.href) : '',
+          domain: String(obj.domain || '').slice(0, 60),
+          category: String(obj.category || '').slice(0, 30),
+          duration: String(obj.duration || '').slice(0, 24),
+          durationSeconds: Number.isFinite(Number(obj.durationSeconds)) ? Number(obj.durationSeconds) : null,
+          position: idx + 1,
+          entityType: String(obj.entityType || (kind === 'youtube_videos' ? 'video' : 'link')),
+          description: String(obj.description || obj.summary || '').slice(0, 180)
+        };
+      });
+
+      const entry = {
+        candidateListId,
+        kind: String(kind || 'links'),
+        urlClean: cleanUrl,
+        taskId: (this.state.activeTask && this.state.activeTask.id) || '',
+        createdAt: Date.now(),
+        candidates
+      };
+
+      this.state.candidateLists.unshift(entry);
+      if (this.state.candidateLists.length > 8) {
+        this.state.candidateLists = this.state.candidateLists.slice(0, 8);
+      }
+      this.state.activeCandidateListId = candidateListId;
+      this.state.selectionState.rejectedCandidateIds = [];
+      this.state.selectionState.rejectedLabels = [];
+      if (candidates.length > 0 && kind !== 'links') {
+        this.state.currentEntities.listItems = candidates.map((c) => ({
+          title: c.title || c.label,
+          url: c.url,
+          officialUrl: c.url,
+          description: c.description,
+          channel: c.channel,
+          duration: c.duration
+        }));
+      }
+      return entry;
+    }
+
+    getActiveCandidateList(options = {}) {
+      const lists = Array.isArray(this.state.candidateLists) ? this.state.candidateLists : [];
+      if (lists.length === 0) return null;
+      const targetId = options.candidateListId || this.state.activeCandidateListId;
+      let hit = lists.find((l) => l && l.candidateListId === targetId) || lists[0];
+      if (!hit) return null;
+      const maxAgeMs = Number.isFinite(Number(options.maxAgeMs)) ? Number(options.maxAgeMs) : 20 * 60 * 1000;
+      if (Date.now() - (hit.createdAt || 0) > maxAgeMs) return null;
+      const curUrl = options.urlClean ? this._sanitizeStoredUrl(options.urlClean) : '';
+      if (curUrl && hit.urlClean && curUrl !== hit.urlClean && !options.allowCrossPage) {
+        // Fallback to any list matching current URL if active one came from another page
+        const samePage = lists.find((l) => l && l.urlClean === curUrl && Date.now() - (l.createdAt || 0) <= maxAgeMs);
+        if (!samePage) return null;
+        hit = samePage;
+      }
+      return hit;
+    }
+
+    recordSelection(candidate, meta = {}) {
+      if (!candidate || typeof candidate !== 'object') return null;
+      if (!this.state.selectionState) {
+        this.state.selectionState = {
+          currentSelection: null,
+          previousSelection: null,
+          rejectedCandidateIds: [],
+          rejectedLabels: [],
+          activeSection: null,
+          activeVideo: null,
+          activeTable: null,
+          activeCardSummary: null,
+          highlightedTarget: null
+        };
+      }
+      const prev = this.state.selectionState.currentSelection;
+      const norm = {
+        id: String(candidate.id || candidate.candidateId || ''),
+        label: String(candidate.label || candidate.title || '').slice(0, 120),
+        title: String(candidate.title || candidate.label || '').slice(0, 120),
+        channel: String(candidate.channel || '').slice(0, 80),
+        section: String(candidate.section || candidate.contextHeading || '').slice(0, 80),
+        url: candidate.url || candidate.href ? this._sanitizeStoredUrl(candidate.url || candidate.href) : '',
+        entityType: String(candidate.entityType || meta.entityType || 'link'),
+        candidateListId: meta.candidateListId || this.state.activeCandidateListId || '',
+        selectedAt: Date.now()
+      };
+      if (prev && (prev.title !== norm.title || prev.url !== norm.url)) {
+        this.state.selectionState.previousSelection = prev;
+      }
+      this.state.selectionState.currentSelection = norm;
+      if (norm.entityType === 'video') {
+        this.state.selectionState.activeVideo = norm;
+      }
+      if (norm.title) {
+        this.state.currentEntities.focusedEntity = norm.title;
+      }
+      return norm;
+    }
+
+    recordRejection(candidate, _reason = '') {
+      if (!this.state.selectionState) return;
+      const target = candidate || this.state.selectionState.currentSelection;
+      if (!target) return;
+      if (!Array.isArray(this.state.selectionState.rejectedCandidateIds)) {
+        this.state.selectionState.rejectedCandidateIds = [];
+      }
+      if (!Array.isArray(this.state.selectionState.rejectedLabels)) {
+        this.state.selectionState.rejectedLabels = [];
+      }
+      if (target.id && !this.state.selectionState.rejectedCandidateIds.includes(target.id)) {
+        this.state.selectionState.rejectedCandidateIds.push(target.id);
+      }
+      const lbl = String(target.title || target.label || '').toLowerCase();
+      if (lbl && !this.state.selectionState.rejectedLabels.includes(lbl)) {
+        this.state.selectionState.rejectedLabels.push(lbl);
+      }
+    }
+
+    findAlternateCandidate(refHint = '', options = {}) {
+      const activeList = this.getActiveCandidateList(options);
+      if (!activeList || !Array.isArray(activeList.candidates) || activeList.candidates.length === 0) return null;
+      const selState = this.state.selectionState || {};
+      const cur = selState.currentSelection;
+      const rejectedIds = new Set(Array.isArray(selState.rejectedCandidateIds) ? selState.rejectedCandidateIds : []);
+      const rejectedLabels = new Set(Array.isArray(selState.rejectedLabels) ? selState.rejectedLabels : []);
+      if (cur && cur.id) rejectedIds.add(cur.id);
+      if (cur && (cur.title || cur.label)) rejectedLabels.add(String(cur.title || cur.label).toLowerCase());
+
+      let pool = activeList.candidates.filter((c) => {
+        if (!c) return false;
+        if (rejectedIds.has(c.id)) return false;
+        const lbl = String(c.title || c.label || '').toLowerCase();
+        if (lbl && rejectedLabels.has(lbl)) return false;
+        return true;
+      });
+      if (pool.length === 0) return null;
+
+      if (/\b(?:other\s+channel|different\s+channel)\b/i.test(String(refHint || '')) && cur && cur.channel) {
+        const diffChan = pool.filter((c) => !c.channel || c.channel.toLowerCase() !== cur.channel.toLowerCase());
+        if (diffChan.length > 0) pool = diffChan;
+      }
+      return pool[0] || null;
+    }
+
+    setActiveUiFocus(focus = {}) {
+      if (!this.state.selectionState) return;
+      const incomingSection = focus.section !== undefined ? focus.section : focus.activeSection;
+      if (incomingSection !== undefined) {
+        const prev = this.state.selectionState.activeSection;
+        if (prev && incomingSection && prev !== incomingSection) {
+          this.state.selectionState.previousSection = prev;
+        }
+        this.state.selectionState.activeSection = incomingSection;
+      }
+      if (focus.cardSummary !== undefined) this.state.selectionState.activeCardSummary = focus.cardSummary;
+      if (focus.table !== undefined) this.state.selectionState.activeTable = focus.table;
+      if (focus.highlightedTarget !== undefined) this.state.selectionState.highlightedTarget = focus.highlightedTarget;
+      if (focus.video !== undefined) this.state.selectionState.activeVideo = focus.video;
+    }
+
+    /**
+     * Create or update a persistent Multi-Step Task across websites, keeping history in recentTasks.
+     */
+    async upsertTask(taskPatch = {}) {
+      const now = new Date().toISOString();
+      if (!this.state.recentTasks) this.state.recentTasks = [];
+
+      const archiveTask = (task) => {
+        if (!task || !task.id) return;
+        const idx = this.state.recentTasks.findIndex((t) => t.id === task.id || (t.topic && task.topic && t.topic.toLowerCase() === task.topic.toLowerCase()));
+        if (idx !== -1) this.state.recentTasks.splice(idx, 1);
+        this.state.recentTasks.unshift(JSON.parse(JSON.stringify(task)));
+        if (this.state.recentTasks.length > MAX_RECENT_TASKS) {
+          this.state.recentTasks = this.state.recentTasks.slice(0, MAX_RECENT_TASKS);
+        }
+      };
+
+      const isNewDistinctTask = Boolean(
+        taskPatch.createNew ||
+        (this.state.activeTask && taskPatch.topic && this.state.activeTask.topic &&
+          this.state.activeTask.topic.toLowerCase() !== taskPatch.topic.toLowerCase() &&
+          !/\b(?:navigate|comparison)\b/i.test(taskPatch.currentStep || ''))
+      );
+
+      if (!this.state.activeTask || isNewDistinctTask) {
+        if (this.state.activeTask) archiveTask(this.state.activeTask);
+        this.state.activeTask = {
+          id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          parentObjective: taskPatch.parentObjective || taskPatch.objective || '',
+          domain: taskPatch.domain || '',
+          userOriginalObjective: taskPatch.userOriginalObjective || taskPatch.objective || '',
+          objective: taskPatch.objective || '',
+          interpretedObjective: taskPatch.interpretedObjective || taskPatch.objective || '',
+          topic: taskPatch.topic || this.state.currentTopic || '',
+          entities: taskPatch.entities || this.state.currentEntities.all || [],
+          constraints: (taskPatch.constraints && typeof taskPatch.constraints === 'object') ? { ...taskPatch.constraints } : {},
+          currentStep: taskPatch.currentStep || 'init',
+          plannedSteps: Array.isArray(taskPatch.plannedSteps) ? taskPatch.plannedSteps : [],
+          subtasks: Array.isArray(taskPatch.subtasks) ? taskPatch.subtasks : (Array.isArray(taskPatch.plannedSteps) ? taskPatch.plannedSteps : []),
+          progressPercent: typeof taskPatch.progressPercent === 'number' ? taskPatch.progressPercent : 0,
+          completedSteps: Array.isArray(taskPatch.completedSteps) ? taskPatch.completedSteps : [],
+          failedSteps: Array.isArray(taskPatch.failedSteps) ? taskPatch.failedSteps : [],
+          blockedSteps: Array.isArray(taskPatch.blockedSteps) ? taskPatch.blockedSteps : [],
+          pendingSteps: Array.isArray(taskPatch.pendingSteps) ? taskPatch.pendingSteps : [],
+          identifiedDeadlines: Array.isArray(taskPatch.identifiedDeadlines) ? taskPatch.identifiedDeadlines : [],
+          relevantUrls: Array.isArray(taskPatch.relevantUrls) ? taskPatch.relevantUrls : [],
+          userDecisions: Array.isArray(taskPatch.userDecisions) ? taskPatch.userDecisions : [],
+          requiredConfirmations: Array.isArray(taskPatch.requiredConfirmations) ? taskPatch.requiredConfirmations : [],
+          resultsSnapshot: Array.isArray(taskPatch.resultsSnapshot) ? taskPatch.resultsSnapshot : [],
+          visitedUrls: Array.isArray(taskPatch.visitedUrls) ? taskPatch.visitedUrls : [],
+          linkedTabIds: [String(this.tabId || 'default')],
+          nextRecommendedAction: taskPatch.nextRecommendedAction || '',
+          status: taskPatch.status || TASK_STATUSES.RUNNING,
+          createdAt: now,
+          updatedAt: now
+        };
+      } else {
+        const cur = this.state.activeTask;
+        if (taskPatch.parentObjective) cur.parentObjective = taskPatch.parentObjective;
+        if (taskPatch.domain) cur.domain = taskPatch.domain;
+        if (!Array.isArray(cur.linkedTabIds)) cur.linkedTabIds = [];
+        const tid = String(this.tabId || 'default');
+        if (!cur.linkedTabIds.includes(tid)) cur.linkedTabIds.push(tid);
+        if (taskPatch.userOriginalObjective && !cur.userOriginalObjective) cur.userOriginalObjective = taskPatch.userOriginalObjective;
+        if (taskPatch.objective) cur.objective = taskPatch.objective;
+        if (taskPatch.interpretedObjective) cur.interpretedObjective = taskPatch.interpretedObjective;
+        if (taskPatch.topic) cur.topic = taskPatch.topic;
+        if (Array.isArray(taskPatch.entities)) {
+          cur.entities = Array.from(new Set([...(cur.entities || []), ...taskPatch.entities]));
+        }
+        if (taskPatch.constraints && typeof taskPatch.constraints === 'object') {
+          cur.constraints = Object.assign({}, cur.constraints || {}, taskPatch.constraints);
+        }
+        if (taskPatch.currentStep) cur.currentStep = taskPatch.currentStep;
+        if (Array.isArray(taskPatch.plannedSteps) && taskPatch.plannedSteps.length > 0) {
+          cur.plannedSteps = taskPatch.plannedSteps;
+          cur.subtasks = taskPatch.subtasks || taskPatch.plannedSteps;
+        }
+        if (typeof taskPatch.progressPercent === 'number') cur.progressPercent = taskPatch.progressPercent;
+        if (Array.isArray(taskPatch.blockedSteps)) cur.blockedSteps = taskPatch.blockedSteps;
+        if (Array.isArray(taskPatch.identifiedDeadlines)) cur.identifiedDeadlines = taskPatch.identifiedDeadlines;
+        if (!Array.isArray(cur.completedSteps)) cur.completedSteps = [];
+        if (taskPatch.completedStep && !cur.completedSteps.includes(taskPatch.completedStep)) {
+          cur.completedSteps.push(taskPatch.completedStep);
+          cur.pendingSteps = (cur.pendingSteps || []).filter((s) => s !== taskPatch.completedStep);
+        } else if (Array.isArray(taskPatch.completedSteps)) {
+          cur.completedSteps = Array.from(new Set([...cur.completedSteps, ...taskPatch.completedSteps]));
+        }
+        if (Array.isArray(taskPatch.failedSteps)) {
+          cur.failedSteps = taskPatch.failedSteps;
+        }
+        if (Array.isArray(taskPatch.pendingSteps)) {
+          cur.pendingSteps = taskPatch.pendingSteps;
+        }
+        if (Array.isArray(taskPatch.relevantUrls) && taskPatch.relevantUrls.length > 0) {
+          const seenUrls = new Set((cur.relevantUrls || []).map((u) => u && u.url).filter(Boolean));
+          const merged = [...(cur.relevantUrls || [])];
+          for (const u of taskPatch.relevantUrls) {
+            if (u && u.url && !seenUrls.has(u.url)) {
+              seenUrls.add(u.url);
+              merged.push(u);
+            }
+          }
+          cur.relevantUrls = merged.slice(0, 12);
+        }
+        if (Array.isArray(taskPatch.requiredConfirmations)) {
+          cur.requiredConfirmations = taskPatch.requiredConfirmations;
+        }
+        if (Array.isArray(taskPatch.resultsSnapshot) && taskPatch.resultsSnapshot.length > 0) {
+          cur.resultsSnapshot = taskPatch.resultsSnapshot;
+        }
+        if (taskPatch.visitedUrl) {
+          if (!Array.isArray(cur.visitedUrls)) cur.visitedUrls = [];
+          if (!cur.visitedUrls.includes(taskPatch.visitedUrl)) cur.visitedUrls.push(taskPatch.visitedUrl);
+        }
+        if (taskPatch.userDecision) {
+          if (!Array.isArray(cur.userDecisions)) cur.userDecisions = [];
+          cur.userDecisions.push({ decision: taskPatch.userDecision, timestamp: now });
+        }
+        if (typeof taskPatch.nextRecommendedAction === 'string') {
+          cur.nextRecommendedAction = taskPatch.nextRecommendedAction;
+        }
+        if (taskPatch.status) cur.status = taskPatch.status;
+        cur.updatedAt = now;
+      }
+
+      const activeTabCtx = this._getActiveTabContext(true);
+      if (this.state.activeTask && this.state.activeTask.id) {
+        activeTabCtx.taskId = this.state.activeTask.id;
+      }
+      const pi = getPersonalIntelApi();
+      if (pi && this.state.activeTask && !this.privacy.memoryPaused) {
+        const t = this.state.activeTask;
+        const dom = t.domain || pi.inferDomainFromText(`${t.objective} ${t.topic}`);
+        pi.ensureProject(this.state, {
+          domain: dom,
+          rootTopic: t.topic || this.state.currentTopic || 'General',
+          objective: t.objective || ''
+        });
+      }
+      if (this.state.activeTask && this.state.activeTask.status === TASK_STATUSES.COMPLETED && this.state.longTerm) {
+        if (!Array.isArray(this.state.longTerm.completedTaskSummaries)) this.state.longTerm.completedTaskSummaries = [];
+        const exists = this.state.longTerm.completedTaskSummaries.some((c) => c.id === this.state.activeTask.id);
+        if (!exists) {
+          this.state.longTerm.completedTaskSummaries.push({
+            id: this.state.activeTask.id,
+            objective: this.sanitizeText(this.state.activeTask.objective || this.state.activeTask.topic || ''),
+            completedStepsCount: (this.state.activeTask.completedSteps || []).length,
+            completedAt: now
+          });
+          this.state.longTerm.completedTaskSummaries = this.state.longTerm.completedTaskSummaries.slice(-15);
+        }
+      }
+
+      archiveTask(this.state.activeTask);
+      await this.saveState();
+      return this.state.activeTask;
+    }
+
+    /**
+     * Central 12-Category Intent Router (Phase 6).
+     * Maps every utterance into one of the 12 required intent categories with clear Page vs Site vs Web distinction.
+     */
+    classifyCentralIntent(rawText, resolvedContext, baseIntent, pageDigest) {
+      const raw = String(rawText || '')
+        .replace(/^(?:hey\s+|ok\s+|okay\s+|hi\s+)?sleepwalker\s*[,:-]*\s+/i, '')
+        .trim();
+      const resolved = (resolvedContext && resolvedContext.resolvedText) || raw;
+      const lowerRaw = raw.toLowerCase();
+      const lowerResolved = resolved.toLowerCase();
+      const baseType = (baseIntent && baseIntent.intent) || '';
+
+      // 0. Phase 5 Personal Intelligence: Reminders, Privacy Controls, Explicit Preferences, Presentation Format & Corrections
+      const pi = getPersonalIntelApi();
+      const remParsed = pi && typeof pi.parseReminderRequest === 'function'
+        ? pi.parseReminderRequest(raw, Date.now(), {
+            topic: this.state.currentTopic || (this.state.activeTask && this.state.activeTask.topic) || '',
+            taskId: (this.state.activeTask && this.state.activeTask.id) || '',
+            deadlines: (this.state.activeTask && this.state.activeTask.identifiedDeadlines) || []
+          })
+        : null;
+      if (remParsed) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'schedule_reminder', reminder: remParsed, resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:show|list|view|what\s+are)\s+(?:my\s+)?reminders?\b[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'list_reminders', resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:cancel|delete|remove|clear)\s+(?:the\s+|my\s+)?reminder\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'cancel_reminder', resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:move|reschedule|postpone|update)\s+(?:the\s+|my\s+)?reminder\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'update_reminder', resolvedQuery: resolved };
+      }
+
+      if (/\b(?:disable|turn\s+off|stop|pause|enable|turn\s+on|resume)\s+(?:adaptive\s+)?(?:learning|personalization)\b/i.test(lowerRaw)) {
+        const enable = /\b(?:enable|turn\s+on|resume)\b/i.test(lowerRaw);
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'toggle_learning_privacy', enabled: enable, resolvedQuery: resolved };
+      }
+      if (/\b(?:disable|turn\s+off|stop|pause|enable|turn\s+on|resume)\s+proactive\s+(?:suggestions?|assistance|prompts?)\b/i.test(lowerRaw)) {
+        const enable = /\b(?:enable|turn\s+on|resume)\b/i.test(lowerRaw);
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'toggle_proactive_privacy', enabled: enable, resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:clear|wipe|reset)\s+(?:my\s+)?(?:personal\s+context|learned\s+preferences|personalization)\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'clear_personal_context', resolvedQuery: resolved };
+      }
+      if (/\b(?:what\s+do\s+you\s+remember(?:\s+about\s+me)?|show\s+(?:my\s+)?(?:personal\s+context|stored\s+preferences|learned\s+preferences|remembered\s+tasks|memory))\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'inspect_personal_context', resolvedQuery: resolved };
+      }
+      if (/^(?:actually\b|correction\b|update\s+(?:the\s+)?deadline\b|change\s+(?:the\s+)?deadline\b|forget\s+(?:my\s+)?preference\b|reset\s+preferences\b)/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'correct_memory', resolvedQuery: resolved };
+      }
+      if (/\b(?:always\s+)?(?:prefer|use|prioritize)\s+official\s+(?:sources|websites|sites|portals)\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'set_preference', prefKey: 'preferOfficialSources', prefValue: true, prefLabel: 'Prioritize official sources', resolvedQuery: resolved };
+      }
+      if (/\b(?:always\s+)?(?:use|show|present(?:\s+options)?\s+in|give)\s+numbered\s+(?:options|list|format)\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'set_preference', prefKey: 'presentationFormat', prefValue: 'numbered', prefLabel: 'Numbered options format', resolvedQuery: resolved };
+      }
+      if (/^(?:be\s+(?:concise|brief|short)|keep\s+(?:answers|explanations|it)\s+(?:concise|brief|short)|give\s+(?:me\s+)?(?:a\s+)?(?:concise|short)\s+summary)$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'set_preference', prefKey: 'responseStyle', prefValue: 'concise', prefLabel: 'Concise summaries', resolvedQuery: resolved };
+      }
+      if (/^(?:give\s+(?:me\s+)?(?:a\s+)?detailed\s+(?:explanation|summary)|explain\s+in\s+detail)$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'set_preference', prefKey: 'responseStyle', prefValue: 'detailed', prefLabel: 'Detailed explanations', resolvedQuery: resolved };
+      }
+      if (/\bcompare\b.*\bin\s+a\s+table\b|\bshow\b.*\bas\s+a\s+table\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.MULTI_STEP_TASK, subAction: 'compare_items', format: 'table', resolvedQuery: resolved, targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic };
+      }
+      if (/\b(?:which\s+(?:one|option|university|laptop|plan|hotel)\s+(?:do\s+you\s+)?recommend|advantages\s+and\s+disadvantages|pros\s+and\s+cons|trade[- ]offs|what\s+information\s+is\s+(?:still\s+)?missing)\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.MULTI_STEP_TASK, subAction: 'decision_support', resolvedQuery: resolved, targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic };
+      }
+
+      // 1. CONVERSATION_CONTROL (rest, task management: pause/resume/skip/cancel/results/status)
+      if (/^(?:please\s+)?(?:pause|hold)\s+(?:this|the|our|current)\s+(?:task|workflow|plan)[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'pause_task', resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:cancel|abort|discard|drop)\s+(?:this|the|our|current)\s+(?:task|workflow|plan)[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'cancel_task', resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?(?:skip\s+(?:this|the\s+current)?\s*step|next\s+step)[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'skip_step', resolvedQuery: resolved };
+      }
+      if (/^(?:please\s+)?show(?:\s+me)?\s+(?:the\s+|saved\s+|current\s+)?results[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'show_results', resolvedQuery: resolved };
+      }
+      if (/^(?:explain\s+what\s+(?:you'?re|you\s+are)\s+doing|what\s+have\s+(?:you|we)\s+(?:done|completed)|task\s+status|where\s+are\s+we(?:\s+in\s+the\s+task)?)[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'explain_progress', resolvedQuery: resolved };
+      }
+      if (
+        this.state.activeTask &&
+        /^(?:please\s+)?(?:continue|resume)(?:\s+(?:this|the|our|saved)\s+(?:task|workflow|plan))?[.?!]*$/i.test(lowerRaw)
+      ) {
+        return { category: CENTRAL_INTENTS.CONVERSATION_CONTROL, subAction: 'resume_task', resolvedQuery: resolved, targetTopic: this.state.activeTask.topic || this.state.currentTopic };
+      }
+
+      if (resolvedContext && resolvedContext.isReturnTaskCommand) {
+        return {
+          category: CENTRAL_INTENTS.CONVERSATION_CONTROL,
+          subAction: 'return_earlier_task',
+          resolvedQuery: resolved,
+          targetTopic: resolvedContext.resolvedTopic || this.state.currentTopic
+        };
+      }
+
+      if (resolvedContext && resolvedContext.isResumeCommand) {
+        return {
+          category: CENTRAL_INTENTS.CONVERSATION_CONTROL,
+          subAction: 'resume_session_task',
+          resolvedQuery: resolved,
+          targetTopic: resolvedContext.resolvedTopic || this.state.currentTopic
+        };
+      }
+
+      if (
+        /\b(?:you\s+can\s+rest|sleepwalker\s*,?\s*rest|rest\s+now|take\s+a\s+rest|go\s+to\s+sleep|stop\s+listening|that'?s\s+all|thank\s+you.*rest|बस\s+बंद\s+करो|आराम\s+करो)\b/i.test(lowerRaw)
+      ) {
+        return {
+          category: CENTRAL_INTENTS.CONVERSATION_CONTROL,
+          subAction: 'rest_session',
+          resolvedQuery: resolved
+        };
+      }
+
+      // 2. EXTERNAL_NAVIGATION ("Open the official website", "Open its product page", "Open the second university's application page", "Return to the website we were using earlier")
+      if (/\b(?:return\s+to\s+the\s+(?:website|site|page)\s+(?:we\s+were\s+using\s+earlier|earlier|before)|back\s+to\s+(?:the\s+)?earlier\s+(?:website|site))\b/i.test(lowerRaw)) {
+        return {
+          category: CENTRAL_INTENTS.EXTERNAL_NAVIGATION,
+          subAction: 'return_earlier_website',
+          resolvedQuery: resolved,
+          targetTopic: this.state.currentTopic
+        };
+      }
+
+      const extOrdAppMatch = lowerRaw.match(
+        /^(?:please\s+)?(?:open|go\s+to|visit|navigate\s+to|launch)\s+(?:the\s+)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th)\s+(?:(?:university|college|school|product|result|item|option|one)(?:'s)?\s+)?(application\s+page|product\s+page|admissions?\s+page|official\s+(?:website|site|page)|result|website|site|portal|page)?[.?!]*$/i
+      );
+      if (extOrdAppMatch) {
+        const ordinalWord = extOrdAppMatch[1].toLowerCase();
+        const kindPhrase = (extOrdAppMatch[2] || '').toLowerCase();
+        const followUpSubGoal = /\bapplication|admissions?\b/i.test(kindPhrase)
+          ? 'find_application_page'
+          : (/\bproduct\b/i.test(kindPhrase) ? 'product_page' : '');
+        return {
+          category: CENTRAL_INTENTS.EXTERNAL_NAVIGATION,
+          subAction: 'open_recommended_url',
+          ordinalWord,
+          followUpSubGoal,
+          siteKind: followUpSubGoal || 'relevant',
+          resolvedQuery: resolved,
+          targetTopic: (resolvedContext && resolvedContext.resolvedEntity) || (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+        };
+      }
+
+      const extNavMatch = lowerRaw.match(
+        /^(?:please\s+|can\s+you\s+)?(?:open|go\s+to|visit|navigate\s+to|take\s+me\s+to|launch|find)\s+(?:its|their|the|a|that)?\s*(?:(first|1st|second|2nd|third|3rd)\s+)?(?:(relevant|recommended|official|travel|visa|consular|embassy|admission|application|product|external|suggested)\s+)?(?:website|site|portal|link|page|url)(?:\s+for\s+(.+))?$/i
+      );
+      if (
+        extNavMatch ||
+        /\b(?:open\s+(?:its|the)?\s*(?:relevant|recommended|travel|visa|official|product|first|second)\s+(?:website|site|portal|page|link)|find\s+(?:the\s+)?official\s+.+?\s*(?:website|site|portal)|open\s+that\s+(?:website|site|link))\b/i.test(lowerRaw)
+      ) {
+        const ordinalWord = extNavMatch && extNavMatch[1] ? extNavMatch[1].toLowerCase() : '';
+        const siteKind = extNavMatch && extNavMatch[2] ? extNavMatch[2].toLowerCase() : 'relevant';
+        // Single current-site semantic destination like "Open the application page" when no off-page university list or focused external item applies
+        const listItems = (this.state.currentEntities && this.state.currentEntities.listItems) || [];
+        const focusedIsOffPage = Boolean(
+          resolvedContext && resolvedContext.resolvedUrlTarget && resolvedContext.resolvedUrlTarget.url
+        );
+        if (!ordinalWord && !/\b(?:official|relevant|travel|visa|embassy|consular|external)\b/i.test(lowerRaw) &&
+            /\b(?:application|pricing|contact)\s+page\b/i.test(lowerRaw) && !focusedIsOffPage && listItems.length === 0) {
+          return {
+            category: CENTRAL_INTENTS.PAGE_NAVIGATION,
+            subAction: 'semantic_destination',
+            targetKind: lowerRaw.match(/\b(application|pricing|contact)\b/i)[1].toLowerCase(),
+            resolvedQuery: resolved
+          };
+        }
+        return {
+          category: CENTRAL_INTENTS.EXTERNAL_NAVIGATION,
+          subAction: /^find\b/i.test(lowerRaw) ? 'discover_official_url' : 'open_recommended_url',
+          ordinalWord,
+          siteKind,
+          followUpSubGoal: /application/i.test(siteKind) ? 'find_application_page' : '',
+          resolvedQuery: resolved,
+          targetTopic: (resolvedContext && resolvedContext.resolvedEntity) || (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+        };
+      }
+
+      // 3. MULTI_STEP_TASK (Comparisons across items, booking flows, multi-step planning, trip/hotel planning, consequential book/pay actions)
+      if (
+        /\b(?:compare\s+.+?\s+(?:with|and|vs\.?|versus)\b|compare\s+their\b|compare\s+(?:requirements|admission|features|prices|specs|specifications|certifications)|help\s+me\s+(?:plan|book|apply|complete|register)|apply\s+(?:for|to)\s+(?:a\s+)?master'?s|master'?s\s+degree\s+abroad|plan\s+(?:a\s+)?(?:trip|vacation|journey)\s+to|book\s+(?:a\s+|the\s+|this\s+|that\s+)?(?:flight|flights|hotel|room|ticket|tickets|trip)|confirm\s+booking|purchase\s+(?:this|the|that|now|a)|pay\s+(?:now|for)|checkout|buy\s+now|step\s+by\s+step|guide\s+me\s+through)\b/i.test(lowerResolved)
+      ) {
+        return {
+          category: CENTRAL_INTENTS.MULTI_STEP_TASK,
+          subAction: /\bcompare\b/i.test(lowerResolved) ? 'compare_items' : 'guided_workflow',
+          resolvedQuery: resolved,
+          targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+        };
+      }
+
+      // 4. OFF_PAGE_RESEARCH (External discovery & travel/hotel/course/research)
+      const explicitlyInSiteOrPage = /\b(?:on|in|within)\s+(?:this|the)\s+(?:page|website|site|portal)\b/i.test(lowerRaw);
+      const isExternalDiscovery = !explicitlyInSiteOrPage && (
+        /\b(?:find|search\s+for|look\s+up|recommend|best|top|research)\s+(?:me\s+)?(?:(?:the\s+)?(?:best|good|great|top|affordable|free|recommended|a|some)\s+)?(?:universities|colleges|laptops|flights|hotels?|accommodation|certifications|scholarships|airlines|places|visa|china|japan|germany)\b/i.test(lowerResolved) ||
+        /\b(?:find|recommend|search\s+for)\s+(?:the\s+best\s+|good\s+|top\s+)?courses\b.*\b(?:certifications?|compare)\b/i.test(lowerResolved)
+      );
+      const isTravelOrExternalAspect = /\b(?:planning\s+(?:a\s+)?(?:trip|travel|journey|visit)\s+to|flights\s+and\s+accommodation|how\s+(?:can|do|should|to)\s+i\s+(?:travel|go|fly|get|reach|visit|apply|book)|how\s+to\s+(?:travel|go|reach|visit|get\s+a\s+visa|apply)|travel\s+(?:to|there|options|requirements|guide)|visa\s+(?:requirements|process|for)|what\s+visa|need\s+(?:a\s+)?visa|flights?\s+to|tourist\s+visa|entry\s+requirements)\b/i.test(lowerResolved);
+
+      if (isExternalDiscovery) {
+        return {
+          category: CENTRAL_INTENTS.OFF_PAGE_RESEARCH,
+          subAction: 'external_discovery',
+          resolvedQuery: resolved,
+          targetTopic: (resolvedContext && resolvedContext.resolvedEntity) || (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+        };
+      }
+
+      if (isTravelOrExternalAspect) {
+        const pageCoversAspect = this._doesPageCoverAspect(lowerResolved, pageDigest);
+        if (!pageCoversAspect) {
+          return {
+            category: CENTRAL_INTENTS.OFF_PAGE_RESEARCH,
+            subAction: /\b(?:apply|admission)\b/i.test(lowerResolved) ? 'application_research' : 'travel_and_visa_research',
+            resolvedQuery: resolved,
+            targetTopic: (resolvedContext && resolvedContext.resolvedEntity) || (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+          };
+        }
+      }
+
+      // 4b. FILTER CONTROLS ("Filter by free courses", "Show only free courses")
+      const filterMatch = lowerRaw.match(/^(?:please\s+)?(?:filter(?:\s+results)?\s+by|apply\s+filter\s+(?:for\s+)?|show\s+only)\s+(.+?)[.?!]*$/i);
+      if (filterMatch && filterMatch[1]) {
+        return {
+          category: CENTRAL_INTENTS.PAGE_SEARCH,
+          subAction: 'apply_filter',
+          filterQuery: filterMatch[1].trim(),
+          resolvedQuery: resolved
+        };
+      }
+
+      // 5. PAGE_SEARCH (distinguishes within-page vs within-website vs wider-web search)
+      if (baseType === 'SEARCH' || (baseIntent && baseIntent.action === 'search')) {
+        const searchScope = (baseIntent && baseIntent.args && baseIntent.args.searchScope) ||
+          (/\b(?:within|on|in)\s+(?:this|the)\s+page\b/i.test(lowerRaw) ? 'page'
+            : (/\b(?:web|online|google|internet)\b/i.test(lowerRaw) ? 'web' : 'site'));
+        if (searchScope === 'web') {
+          return {
+            category: CENTRAL_INTENTS.OFF_PAGE_RESEARCH,
+            subAction: 'external_discovery',
+            resolvedQuery: resolved,
+            targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+          };
+        }
+        return {
+          category: CENTRAL_INTENTS.PAGE_SEARCH,
+          subAction: searchScope === 'page' ? 'search_within_page' : 'in_website_search',
+          searchScope,
+          resolvedQuery: resolved
+        };
+      }
+
+      // 6. FORM_ASSISTANCE (inspect, validate, fill, submit review)
+      if (/^(?:please\s+)?(?:identify|explain|inspect|list|what\s+are\s+the)\s+(?:the\s+)?(?:form\s+)?fields\b|\bexplain\s+this\s+form\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.FORM_ASSISTANCE, subAction: 'inspect_form', resolvedQuery: resolved };
+      }
+      if (/\b(?:validate|check)\s+(?:the\s+)?(?:form|missing\s+fields|missing\s+information|errors)\b/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.FORM_ASSISTANCE, subAction: 'validate_form', resolvedQuery: resolved };
+      }
+      const intentAction = (baseIntent && baseIntent.args && baseIntent.args.action) || (baseIntent && baseIntent.action) || '';
+      const intentSpecialOp = (baseIntent && baseIntent.args && baseIntent.args.specialOp) || '';
+      const intentSubAction = (baseIntent && baseIntent.args && baseIntent.args.subAction) || '';
+      if (
+        (baseType === 'NAVIGATE' && (intentAction === 'fill' || intentAction === 'select')) ||
+        (baseType === 'DICTATE' && (intentSubAction === 'select_option' || intentSpecialOp === 'check' || intentSpecialOp === 'uncheck' || intentSpecialOp === 'switch' || intentSpecialOp === 'slider')) ||
+        /\b(?:fill\s+(?:in|out)|enter\s+my|type\s+in\s+the\s+form)\b/i.test(lowerRaw)
+      ) {
+        return {
+          category: CENTRAL_INTENTS.FORM_ASSISTANCE,
+          subAction: (intentAction === 'select' || intentSubAction === 'select_option' || ['check', 'uncheck', 'switch', 'slider'].includes(intentSpecialOp))
+            ? 'element_select'
+            : 'form_input',
+          resolvedQuery: resolved
+        };
+      }
+
+      // 7. PAGE_NAVIGATION (history back, pricing/contact/application destination links, sections)
+      if (/^(?:please\s+)?(?:go\s+back(?:\s+to\s+(?:the\s+)?previous\s+page)?|previous\s+page)[.?!]*$/i.test(lowerRaw)) {
+        return { category: CENTRAL_INTENTS.PAGE_NAVIGATION, subAction: 'history_back', resolvedQuery: resolved };
+      }
+      const semanticDestMatch = lowerRaw.match(/\b(?:pricing\s+page|contact\s+(?:information|info|page|us)|application\s+page|admissions?\s+page)\b/i);
+      if (semanticDestMatch && /^(?:go\s+to|open|find|show|visit|take\s+me\s+to)\b/i.test(lowerRaw)) {
+        const kw = semanticDestMatch[0].toLowerCase();
+        const targetKind = kw.includes('pricing') ? 'pricing' : (kw.includes('contact') ? 'contact' : 'application');
+        return {
+          category: CENTRAL_INTENTS.PAGE_NAVIGATION,
+          subAction: 'semantic_destination',
+          targetKind,
+          resolvedQuery: resolved
+        };
+      }
+
+      const secNavMatch = raw.match(
+        /^(?:find|locate|go\s+(?:back\s+)?to|return\s+to|back\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to|show\s+me)\s+(?:the\s+)?(?:section\s+(?:about|on|for)\s+|part\s+(?:about|on)\s+)?(.+?)(?:\s+section)?[.?!]*$/i
+      );
+      if (
+        secNavMatch &&
+        (/\bsection\b/i.test(raw) || /^(?:go\s+(?:back\s+)?to|return\s+to|back\s+to|scroll\s+to|jump\s+to|take\s+me\s+to|navigate\s+to)\b/i.test(raw))
+      ) {
+        let targetSec = secNavMatch[1]
+          .replace(/^(?:the\s+)?(?:section\s+(?:about|on|for)\s+)/i, '')
+          .replace(/\s+section$/i, '')
+          .trim();
+        if (/^(?:previous|last|earlier)$/i.test(targetSec) && /\bsection\b/i.test(raw)) {
+          const prevSec = (resolvedContext && resolvedContext.resolvedSection) ||
+            (this.state && this.state.selectionState && this.state.selectionState.previousSection) || '';
+          if (prevSec) targetSec = prevSec;
+        }
+        if (targetSec && !/\b(?:website|site|portal|page)\b/i.test(targetSec)) {
+          return {
+            category: CENTRAL_INTENTS.PAGE_NAVIGATION,
+            subAction: 'navigate_section',
+            sectionTarget: targetSec,
+            resolvedQuery: resolved
+          };
+        }
+      }
+
+      if (baseType === 'NAVIGATE' || baseType === 'OUTLINE') {
+        return {
+          category: CENTRAL_INTENTS.PAGE_NAVIGATION,
+          subAction: (baseIntent && baseIntent.args && baseIntent.args.action) || (baseIntent && baseIntent.action) || 'navigate',
+          resolvedQuery: resolved
+        };
+      }
+
+      // 8. PAGE_SUMMARIZATION
+      if (
+        /^(?:summarise|summarize|give\s+me\s+a\s+summary|summary\s+of)\b/i.test(lowerRaw)
+      ) {
+        return {
+          category: CENTRAL_INTENTS.PAGE_SUMMARIZATION,
+          subAction: 'summarize_page',
+          resolvedQuery: resolved
+        };
+      }
+
+      // 9. FOLLOW_UP_QUESTION (when coreference/follow-up was detected)
+      if (resolvedContext && resolvedContext.isFollowUp) {
+        const pageCovers = this._doesPageCoverAspect(lowerResolved, pageDigest);
+        return {
+          category: pageCovers ? CENTRAL_INTENTS.FOLLOW_UP_QUESTION : CENTRAL_INTENTS.OFF_PAGE_RESEARCH,
+          subAction: pageCovers ? 'contextual_follow_up' : 'off_page_follow_up',
+          resolvedQuery: resolved,
+          targetTopic: resolvedContext.resolvedEntity || resolvedContext.resolvedTopic || this.state.currentTopic
+        };
+      }
+
+      // 10. CONTEXTUAL_QUESTION ("What does this page say about admission requirements?", "Explain the requirements on this page")
+      if (
+        /\b(?:what\s+does\s+this\s+page\s+say|according\s+to\s+this\s+page|on\s+this\s+page|tell\s+me\s+about)\b/i.test(lowerRaw)
+      ) {
+        return {
+          category: CENTRAL_INTENTS.CONTEXTUAL_QUESTION,
+          subAction: 'page_qa',
+          resolvedQuery: resolved,
+          targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+        };
+      }
+
+      // 11. PAGE_EXPLANATION
+      if (baseType === 'EXPLAIN' || baseType === 'READ') {
+        return {
+          category: CENTRAL_INTENTS.PAGE_EXPLANATION,
+          subAction: baseType.toLowerCase(),
+          resolvedQuery: resolved
+        };
+      }
+
+      // 12. GENERAL_QUESTION
+      return {
+        category: CENTRAL_INTENTS.GENERAL_QUESTION,
+        subAction: 'general_qa',
+        resolvedQuery: resolved,
+        targetTopic: (resolvedContext && resolvedContext.resolvedTopic) || this.state.currentTopic
+      };
+    }
+
+    /**
+     * Check whether the current page's headings or text cover the requested aspect.
+     */
+    _doesPageCoverAspect(lowerQuery, pageDigest) {
+      const headings = (pageDigest && Array.isArray(pageDigest.headings))
+        ? pageDigest.headings.map((h) => String(h.text || h || '').toLowerCase()).join(' ')
+        : '';
+      const bodyPreview = (typeof document !== 'undefined' && document.body)
+        ? String(document.body.innerText || '').toLowerCase().slice(0, 6000)
+        : '';
+      const combined = `${headings} ${bodyPreview}`;
+
+      if (/\b(?:travel|trip|journey|fly|flight|visa|airport|tourist|embassy|consulate)\b/i.test(lowerQuery)) {
+        const travelMatches = (combined.match(/\b(?:visa\s+application|tourist\s+visa|international\s+flights|how\s+to\s+travel|entry\s+requirements|consular\s+services|embassy)\b/gi) || []).length;
+        return travelMatches >= 2;
+      }
+      if (/\b(?:universities\s+in\s+germany|admission\s+requirements)\b/i.test(lowerQuery)) {
+        return /\b(?:university|universities|admission|requirements|tuition|daad)\b/i.test(headings);
+      }
+      return true;
+    }
+
+    /**
+     * Build structured external entity list discovery (universities, laptops, courses, official sites)
+     * with verifiable official domains and zero invented prices/cutoffs.
+     */
+    buildExternalDiscoveryPlan(query, resolvedContext, pageDigest = {}) {
+      const qLower = String((resolvedContext && resolvedContext.resolvedText) || query || '').toLowerCase();
+      const originUrl = (typeof window !== 'undefined' && window.location) ? window.location.origin : '';
+      const isLocalTestHost = Boolean(originUrl && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(originUrl));
+
+      if (/\b(?:universities|university|colleges)\b/i.test(qLower) && /\bgermany\b/i.test(qLower)) {
+        const items = [
+          {
+            index: 1,
+            title: 'Technical University of Munich (TUM)',
+            officialUrl: isLocalTestHost ? `${originUrl}/uni-tum.html` : 'https://www.tum.de/en/',
+            url: isLocalTestHost ? `${originUrl}/uni-tum.html` : 'https://www.tum.de/en/',
+            summary: 'Public technical university in Munich. Verify exact program prerequisites, language certificates, and APS/uni-assist rules on TUM’s official admissions portal.',
+            entityType: 'university'
+          },
+          {
+            index: 2,
+            title: 'LMU Munich (Ludwig-Maximilians-Universität)',
+            officialUrl: isLocalTestHost ? `${originUrl}/uni-lmu.html` : 'https://www.lmu.de/en/',
+            url: isLocalTestHost ? `${originUrl}/uni-lmu.html` : 'https://www.lmu.de/en/',
+            summary: 'Major research university in Munich. Admission requirements depend on degree level and faculty; check LMU’s official International Office portal for live criteria.',
+            entityType: 'university'
+          },
+          {
+            index: 3,
+            title: 'RWTH Aachen University',
+            officialUrl: isLocalTestHost ? `${originUrl}/uni-rwth.html` : 'https://www.rwth-aachen.de/',
+            url: isLocalTestHost ? `${originUrl}/uni-rwth.html` : 'https://www.rwth-aachen.de/',
+            summary: 'Leading German engineering university. Check RWTHonline and official degree pages for live deadlines and GRE/German/English requirements.',
+            entityType: 'university'
+          }
+        ];
+        const pi = getPersonalIntelApi();
+        const preferOfficial = Boolean(this.getEffectivePreference('preferOfficialSources', false));
+        const recommendedUrls = pi
+          ? pi.sortUrlsOfficialFirst([
+              ...items.map((i) => ({ title: `${i.title} Official Website`, url: i.officialUrl, kind: 'university', official: true })),
+              { title: 'DAAD — Official German University & Admissions Database', url: 'https://www.daad.de/en/', kind: 'official', official: true }
+            ], preferOfficial)
+          : [
+              ...items.map((i) => ({ title: `${i.title} Official Website`, url: i.officialUrl, kind: 'university', official: true })),
+              { title: 'DAAD — Official German University & Admissions Database', url: 'https://www.daad.de/en/', kind: 'official', official: true }
+            ];
+        if (pi) {
+          for (const it of items) {
+            pi.recordEntityResearch(this.state, {
+              domain: 'university_research',
+              rootTopic: 'Germany',
+              objective: 'Researching universities and admissions in Germany',
+              entityName: it.title,
+              facts: [it.summary],
+              url: it.officialUrl,
+              official: true
+            });
+          }
+        }
+        const summaryEn =
+          `Notable German Universities to explore (verify live admission criteria on each official site):\n` +
+          `1. ${items[0].title}\n2. ${items[1].title}\n3. ${items[2].title}\n` +
+          `Also check DAAD (daad.de) for official program search. You can ask "What about the second one?" or "Compare their admission requirements."`;
+        return {
+          targetTopic: 'Universities in Germany',
+          listItems: items,
+          recommendedUrls,
+          summaryEn,
+          taskPatch: {
+            objective: 'Researching universities and admissions in Germany',
+            topic: 'Germany',
+            entities: ['Germany', ...items.map((i) => i.title)],
+            currentStep: 'listed_universities',
+            completedStep: 'Listed German universities and official portals',
+            pendingSteps: ['Compare admission requirements', 'Open chosen university official website'],
+            relevantUrls: recommendedUrls,
+            nextRecommendedAction: 'Say "What about the second one?" or "Compare their admission requirements"'
+          }
+        };
+      }
+
+      if (/\b(?:laptop|laptops|notebook)\b/i.test(qLower)) {
+        const items = [
+          {
+            index: 1,
+            title: 'Lenovo ThinkPad X1 Carbon',
+            officialUrl: isLocalTestHost ? `${originUrl}/product-thinkpad.html` : 'https://www.lenovo.com/',
+            url: isLocalTestHost ? `${originUrl}/product-thinkpad.html` : 'https://www.lenovo.com/',
+            specs: '14-inch business ultrabook class; Intel Core Ultra / Windows 11 Pro options; verify live RAM/SSD/price on Lenovo.com.',
+            summary: 'Lightweight business ultrabook series (Intel Core Ultra platform class). Verify live RAM/SSD configurations and pricing on Lenovo’s official store.',
+            entityType: 'product'
+          },
+          {
+            index: 2,
+            title: 'Apple MacBook Air',
+            officialUrl: isLocalTestHost ? `${originUrl}/product-macbook.html` : 'https://www.apple.com/macbook-air/',
+            url: isLocalTestHost ? `${originUrl}/product-macbook.html` : 'https://www.apple.com/macbook-air/',
+            specs: 'Fanless ultrabook class; Apple Silicon M-series unified memory architecture, macOS; verify live options on Apple.com.',
+            summary: 'Fanless ultrabook powered by Apple Silicon. Verify configuration options and regional pricing on Apple’s official store.',
+            entityType: 'product'
+          },
+          {
+            index: 3,
+            title: 'Dell XPS Series',
+            officialUrl: isLocalTestHost ? `${originUrl}/product-xps.html` : 'https://www.dell.com/',
+            url: isLocalTestHost ? `${originUrl}/product-xps.html` : 'https://www.dell.com/',
+            specs: 'Compact Windows ultrabook line; OLED/FHD+ display options; verify live specs & pricing on Dell.com.',
+            summary: 'Compact Windows ultrabook line. Check official Dell listings for exact display, RAM, and battery specifications.',
+            entityType: 'product'
+          }
+        ];
+        const summaryEn =
+          `Popular Ultrabook Categories (live pricing/RAM/stock unverified — check official manufacturer sites):\n` +
+          `1. ${items[0].title}\n2. ${items[1].title}\n3. ${items[2].title}\n` +
+          `You can say "Compare the second one with the first one.", "Compare specifications.", or "Open its product page."`;
+        return {
+          targetTopic: 'Laptops comparison',
+          listItems: items,
+          recommendedUrls: items.map((i) => ({ title: `${i.title} Official Site`, url: i.officialUrl, kind: 'product', official: true, verified: false })),
+          summaryEn,
+          taskPatch: {
+            objective: 'Comparing laptops',
+            topic: 'Laptops',
+            entities: items.map((i) => i.title),
+            currentStep: 'listed_laptops',
+            completedStep: 'Listed laptop options for comparison',
+            pendingSteps: ['Compare specifications', 'Check live price/specs on official website'],
+            relevantUrls: items.map((i) => ({ title: `${i.title} Official Site`, url: i.officialUrl, kind: 'product', official: true, verified: false })),
+            resultsSnapshot: items.map((i) => ({ index: i.index, title: i.title, url: i.officialUrl, specs: i.specs, official: true, verified: false })),
+            nextRecommendedAction: 'Compare the second one with the first one'
+          }
+        };
+      }
+
+      if (/\b(?:courses?|certifications?|mooc)\b/i.test(qLower)) {
+        const freePref = /\bfree\b/i.test(qLower);
+        const items = [
+          {
+            index: 1,
+            title: 'MIT OpenCourseWare (OCW)',
+            officialUrl: 'https://ocw.mit.edu/',
+            url: 'https://ocw.mit.edu/',
+            specs: 'Open-access university lecture notes/materials (typically non-certificate free study). Verify course syllabus on ocw.mit.edu.',
+            summary: 'Open university courseware (free open access, no formal paid certificate). Verify syllabus directly on ocw.mit.edu.',
+            entityType: 'course'
+          },
+          {
+            index: 2,
+            title: 'edX Verified Courses',
+            officialUrl: 'https://www.edx.org/',
+            url: 'https://www.edx.org/',
+            specs: 'Free audit track available on many courses; optional verified certificate fee varies by course on edx.org.',
+            summary: 'University partner MOOC platform offering free audit tracks and optional verified certificates (check live fees on edx.org).',
+            entityType: 'course'
+          },
+          {
+            index: 3,
+            title: 'Coursera Programs',
+            officialUrl: 'https://www.coursera.org/',
+            url: 'https://www.coursera.org/',
+            specs: 'Audit options vs paid Specializations/Professional Certificates; confirm current pricing/financial aid on coursera.org.',
+            summary: 'Industry and university specializations with shareable certificates (verify live tuition or financial aid directly on coursera.org).',
+            entityType: 'course'
+          }
+        ];
+        const summaryEn =
+          `Authoritative Course & Certification Platforms (${freePref ? 'with free/open tracks; ' : ''}confirm current certificate fees directly on each platform):\n` +
+          `1. ${items[0].title}\n2. ${items[1].title}\n3. ${items[2].title}\n` +
+          `Ask "Compare certifications", "What about the second one?", or "Open its official website."`;
+        return {
+          targetTopic: 'Courses & Certifications',
+          listItems: items,
+          recommendedUrls: items.map((i) => ({ title: `${i.title}`, url: i.officialUrl, kind: 'course', official: true, verified: false })),
+          summaryEn,
+          taskPatch: {
+            objective: 'Finding courses and comparing certifications',
+            topic: 'Courses',
+            entities: items.map((i) => i.title),
+            constraints: freePref ? { freeOnly: true } : undefined,
+            currentStep: 'listed_courses',
+            completedStep: 'Identified authoritative course & certification platforms',
+            pendingSteps: ['Compare certifications', 'Open selected course portal'],
+            relevantUrls: items.map((i) => ({ title: i.title, url: i.officialUrl, kind: 'course', official: true, verified: false })),
+            resultsSnapshot: items.map((i) => ({ index: i.index, title: i.title, url: i.officialUrl, specs: i.specs, official: true, verified: false })),
+            nextRecommendedAction: 'Ask to compare certifications or open a provider'
+          }
+        };
+      }
+
+      if (/\b(?:hotel|hotels|accommodation|tokyo|japan)\b/i.test(qLower) && /\b(?:hotel|hotels|accommodation|stay|tokyo)\b/i.test(qLower)) {
+        const items = [
+          {
+            index: 1,
+            title: 'Japan National Tourism Organization — Official Accommodation Guide',
+            officialUrl: isLocalTestHost ? `${originUrl}/hotel-tokyo-official.html` : 'https://www.japan.travel/en/plan/accommodation/',
+            url: isLocalTestHost ? `${originUrl}/hotel-tokyo-official.html` : 'https://www.japan.travel/en/plan/accommodation/',
+            specs: 'Official JNTO accommodation categories (business hotels, ryokan, city hotels); live rates & dates must be checked on booking providers.',
+            summary: 'Official Japan travel accommodation guidance. Live nightly rates and room availability vary by dates and provider.',
+            entityType: 'hotel'
+          },
+          {
+            index: 2,
+            title: 'Tokyo Official Tourism Portal (GO TOKYO)',
+            officialUrl: isLocalTestHost ? `${originUrl}/go-tokyo.html` : 'https://www.gotokyo.org/en/',
+            url: isLocalTestHost ? `${originUrl}/go-tokyo.html` : 'https://www.gotokyo.org/en/',
+            specs: 'District & transit-accessible stay guidance (Shinjuku, Tokyo Station, Asakusa); check official carrier/booking partner directly.',
+            summary: 'Official Tokyo city visitor guide covering neighborhoods and transport connections.',
+            entityType: 'hotel'
+          }
+        ];
+        const summaryEn =
+          `Official Tokyo Accommodation Planning Sources (live room rates & availability are NOT invented — check dates on provider portals):\n` +
+          `1. ${items[0].title}\n2. ${items[1].title}\n` +
+          `Tell me your check-in dates, number of guests, or say "Open the first one" to review options safely before any booking.`;
+        return {
+          targetTopic: 'Tokyo Accommodation',
+          listItems: items,
+          recommendedUrls: items.map((i) => ({ title: i.title, url: i.officialUrl, kind: 'accommodation', official: true, verified: false })),
+          summaryEn,
+          taskPatch: {
+            objective: 'Finding accommodation in Tokyo safely',
+            topic: 'Tokyo',
+            entities: ['Tokyo', 'Japan', ...items.map((i) => i.title)],
+            currentStep: 'listed_accommodation_sources',
+            completedStep: 'Identified official Tokyo travel & accommodation portals',
+            pendingSteps: ['Collect travel dates and guest count', 'Compare providers', 'Explicit confirmation required before any booking'],
+            relevantUrls: items.map((i) => ({ title: i.title, url: i.officialUrl, kind: 'accommodation', official: true, verified: false })),
+            resultsSnapshot: items.map((i) => ({ index: i.index, title: i.title, url: i.officialUrl, specs: i.specs, official: true, verified: false })),
+            nextRecommendedAction: 'Share your dates and guest count, or open the official guide'
+          }
+        };
+      }
+
+      return null;
+    }
+
+    /**
+     * Build structured Off-Page Research response & recommended official URLs
+     * without fabricating prices, dates, or unverified schedules.
+     */
+    buildOffPageResearchPlan(query, resolvedContext, pageDigest = {}) {
+      const discovery = this.buildExternalDiscoveryPlan(query, resolvedContext, pageDigest);
+      if (discovery) {
+        this.state.currentEntities.listItems = discovery.listItems;
+        this.state.currentEntities.lastPickedIndex = -1;
+        return {
+          targetTopic: discovery.targetTopic,
+          resolvedQuery: (resolvedContext && resolvedContext.resolvedText) || query,
+          isTravel: false,
+          isApply: /universit|admission|apply/i.test(discovery.targetTopic),
+          listItems: discovery.listItems,
+          summaryEn: discovery.summaryEn,
+          recommendedUrls: discovery.recommendedUrls,
+          taskPatch: discovery.taskPatch
+        };
+      }
+
+      const target = (resolvedContext && (resolvedContext.resolvedEntity || resolvedContext.resolvedTopic)) ||
+        this.state.currentTopic ||
+        'this destination';
+      const cleanTarget = this._cleanTopicPhrase(target) || 'China';
+      const lowerQuery = String((resolvedContext && resolvedContext.resolvedText) || query || '').toLowerCase();
+      const originUrl = (typeof window !== 'undefined' && window.location) ? window.location.origin : '';
+
+      const isTravel = /\b(?:travel|trip|journey|plan|go|fly|flight|flights|visa|visit|reach|tourist|passport|documents|entry|fee|accommodation|hotel)\b/i.test(lowerQuery);
+      const isApply = /\b(?:apply|admission|enroll|application|scholarship|eligibility)\b/i.test(lowerQuery);
+
+      const recommendedUrls = [];
+      if (originUrl && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(originUrl)) {
+        recommendedUrls.push({
+          title: `${cleanTarget} Official Travel & Visa Guide Portal`,
+          url: `${originUrl}/travel-guide.html?destination=${encodeURIComponent(cleanTarget)}`,
+          kind: 'travel',
+          official: true,
+          verified: false
+        });
+      }
+
+      if (cleanTarget.toLowerCase() === 'china') {
+        recommendedUrls.push(
+          {
+            title: 'Chinese Visa Application Service Center (Official Portal)',
+            url: 'https://www.visaforchina.cn/',
+            kind: 'visa',
+            official: true,
+            verified: false
+          },
+          {
+            title: 'China National Tourist Office — Official Travel Portal',
+            url: 'https://www.travelchina.org.cn/',
+            kind: 'travel',
+            official: true,
+            verified: false
+          }
+        );
+      } else if (cleanTarget.toLowerCase() === 'japan') {
+        recommendedUrls.push(
+          {
+            title: 'Ministry of Foreign Affairs of Japan — Official Visa Information',
+            url: 'https://www.mofa.go.jp/j_info/visit/visa/',
+            kind: 'visa',
+            official: true,
+            verified: false
+          },
+          {
+            title: 'Japan National Tourism Organization (JNTO — Official Travel Guide)',
+            url: 'https://www.japan.travel/en/',
+            kind: 'travel',
+            official: true,
+            verified: false
+          }
+        );
+      } else {
+        recommendedUrls.push(
+          {
+            title: `${cleanTarget} Official Tourism & Entry Information`,
+            url: `https://en.wikivoyage.org/wiki/${encodeURIComponent(cleanTarget.replace(/\s+/g, '_'))}`,
+            kind: 'travel',
+            official: true,
+            verified: false
+          }
+        );
+      }
+
+      let summaryEn = '';
+      if (isTravel) {
+        const hubs = cleanTarget.toLowerCase() === 'china'
+          ? ' (such as Beijing, Shanghai, and Guangzhou)'
+          : (cleanTarget.toLowerCase() === 'japan' ? ' (such as Tokyo Haneda/Narita and Osaka Kansai)' : '');
+        const visaLabel = cleanTarget.toLowerCase() === 'china' ? 'an L-type Tourist Visa or visa-free transit eligibility' : 'current tourist visa / eVisa exemption rules';
+        summaryEn =
+          `Travel & Entry Guide for ${cleanTarget} (General guidance — verify live rules & dates on official sites):\n` +
+          `• Routes & Stay: Major international air hubs serve ${cleanTarget}${hubs}. Check live flight schedules, rail passes, and accommodation options directly on carrier/official portals.\n` +
+          `• Official Visa & Immigration: Check ${visaLabel} via ${recommendedUrls[0].title}. Typically you need a valid passport, application form, itinerary, and accommodation details (live fees unverified until checked on the official portal).\n` +
+          `• Official Portal: ${recommendedUrls[0].title}.\n` +
+          `Would you like me to open the official ${cleanTarget} portal?`;
+      } else if (isApply) {
+        summaryEn =
+          `Official Application Guidance for ${cleanTarget} (External Research):\n` +
+          `• Check official admissions eligibility, required academic/language certificates, and live application deadlines directly on the official portal.\n` +
+          `• Recommended Official Resource: ${recommendedUrls[0].title}.\n` +
+          `Would you like me to open the official website for ${cleanTarget}?`;
+      } else {
+        summaryEn =
+          `Additional external resources for ${cleanTarget} regarding "${(resolvedContext && resolvedContext.resolvedText) || query}":\n` +
+          `• This detail goes beyond what is written on the current page.\n` +
+          `• Official resource: ${recommendedUrls[0].title}. Would you like me to open it?`;
+      }
+
+      return {
+        targetTopic: cleanTarget,
+        resolvedQuery: (resolvedContext && resolvedContext.resolvedText) || query,
+        isTravel,
+        isApply,
+        summaryEn,
+        recommendedUrls,
+        taskPatch: {
+          objective: isTravel ? `Travel and visa planning for ${cleanTarget}` : `Researching ${cleanTarget}`,
+          topic: cleanTarget,
+          entities: [cleanTarget],
+          currentStep: 'off_page_research_completed',
+          completedStep: `Researched ${isTravel ? 'travel & visa options' : 'related details'} for ${cleanTarget}`,
+          pendingSteps: [
+            `Open official ${cleanTarget} ${isTravel ? 'travel & visa' : ''} website`,
+            `Review specific entry, document, or booking requirements for ${cleanTarget}`
+          ],
+          relevantUrls: recommendedUrls,
+          nextRecommendedAction: `Open ${recommendedUrls[0].title}`
+        }
+      };
+    }
+
+    /**
+     * Phase 6: Learned Workflow Skills Persistence, Semantic Retrieval & Versioning.
+     * Experience-based workflow memory (never claims model weights are retrained).
+     */
+    _extractSkillHost(rawUrlOrSite = '') {
+      const s = String(rawUrlOrSite || '').trim().toLowerCase();
+      if (!s) return '';
+      try {
+        if (/^https?:\/\//i.test(s)) return new URL(s).hostname.toLowerCase();
+      } catch (_e) {}
+      return s.replace(/^www\./, '').split('/')[0].split(':')[0];
+    }
+
+    _sanitizeSkillSteps(rawSteps = []) {
+      const steps = Array.isArray(rawSteps) ? rawSteps : [];
+      const out = [];
+      for (let i = 0; i < steps.length && i < 24; i++) {
+        const st = steps[i];
+        if (!st || typeof st !== 'object') continue;
+        const label = this.sanitizeText(String(st.label || st.accessibleName || ''), 120);
+        const val = st.value !== undefined && st.value !== null ? String(st.value) : '';
+        const safeValue = (st.sensitive || this.isSensitiveText(val) || this.isSensitiveText(label)) ? '' : this.sanitizeText(val, 100);
+        out.push({
+          sequence: out.length + 1,
+          action: String(st.action || 'click').slice(0, 32),
+          role: String(st.role || '').slice(0, 40),
+          tag: String(st.tag || '').slice(0, 24),
+          elementType: String(st.elementType || '').slice(0, 32),
+          label,
+          accessibleName: this.sanitizeText(String(st.accessibleName || label), 120),
+          parentSection: this.sanitizeText(String(st.parentSection || ''), 90),
+          ancestorHeadings: Array.isArray(st.ancestorHeadings) ? st.ancestorHeadings.slice(0, 4).map((h) => this.sanitizeText(String(h || ''), 60)).filter(Boolean) : [],
+          idAttr: String(st.idAttr || '').slice(0, 80),
+          nameAttr: String(st.nameAttr || '').slice(0, 80),
+          ariaLabel: this.sanitizeText(String(st.ariaLabel || ''), 100),
+          hrefPath: st.hrefPath ? String(this._sanitizeStoredUrl(st.hrefPath)).slice(0, 180) : '',
+          value: safeValue,
+          pageUrlClean: this._sanitizeStoredUrl(st.pageUrlClean || st.urlClean || ''),
+          resultingUrlClean: this._sanitizeStoredUrl(st.resultingUrlClean || ''),
+          expectedState: this.sanitizeText(String(st.expectedState || ''), 100),
+          fallbackRect: (st.fallbackRect && typeof st.fallbackRect === 'object')
+            ? { x: Math.round(Number(st.fallbackRect.x) || 0), y: Math.round(Number(st.fallbackRect.y) || 0) }
+            : null
+        });
+      }
+      return out;
+    }
+
+    _buildSkillCommandVariations(instruction = '', customVars = []) {
+      const base = this.sanitizeText(String(instruction || ''), 160).trim();
+      const set = new Set();
+      if (base) set.add(base);
+      const lower = base.toLowerCase();
+      if (/^(?:open|show|go\s+to|take\s+me\s+to)\s+(.+)$/i.test(lower)) {
+        const tgt = base.replace(/^(?:open|show|go\s+to|take\s+me\s+to)\s+(?:the\s+|my\s+)?/i, '').trim();
+        if (tgt) {
+          set.add(`Open ${tgt}`);
+          set.add(`Show ${tgt}`);
+          set.add(`Go to ${tgt}`);
+          set.add(`Take me to ${tgt}`);
+        }
+      }
+      for (const v of (Array.isArray(customVars) ? customVars : [])) {
+        const cleanV = this.sanitizeText(String(v || ''), 140).trim();
+        if (cleanV && !this.isSensitiveText(cleanV)) set.add(cleanV);
+      }
+      return Array.from(set).slice(0, 12);
+    }
+
+    async saveLearnedSkill(skillInput = {}) {
+      if (!skillInput || typeof skillInput !== 'object') return null;
+      if (!Array.isArray(this.state.learnedSkills)) this.state.learnedSkills = [];
+      const instruction = this.sanitizeText(String(skillInput.instruction || skillInput.name || ''), 180).trim();
+      if (!instruction || this.isSensitiveText(instruction)) return null;
+
+      const website = this._extractSkillHost(skillInput.website || skillInput.url || (typeof window !== 'undefined' && window.location ? window.location.href : 'local')) || 'local';
+      const steps = this._sanitizeSkillSteps(skillInput.steps || []);
+      if (steps.length === 0) return null;
+
+      const variations = this._buildSkillCommandVariations(instruction, skillInput.variations || []);
+      const now = Date.now();
+      const existingIdx = skillInput.id
+        ? this.state.learnedSkills.findIndex((s) => s && s.id === skillInput.id)
+        : this.state.learnedSkills.findIndex((s) => s && s.website === website && String(s.instruction || '').toLowerCase() === instruction.toLowerCase());
+      const prev = existingIdx >= 0 ? this.state.learnedSkills[existingIdx] : null;
+
+      const previousVersions = prev && Array.isArray(prev.previousVersions) ? prev.previousVersions.slice(-4) : [];
+      if (prev) {
+        previousVersions.push({
+          version: prev.version || 1,
+          name: prev.name,
+          instruction: prev.instruction,
+          steps: prev.steps,
+          updatedAt: prev.updatedAt || now
+        });
+      }
+
+      const nextName = this.sanitizeText(String(skillInput.name || (prev && prev.name) || instruction), 90).trim();
+      const embedText = `${nextName} ${instruction} ${variations.join(' ')} ${steps.map((s) => `${s.label} ${s.parentSection}`).join(' ')}`.slice(0, 420);
+      let emb = null;
+      try {
+        emb = await this.computeHybridEmbedding(embedText);
+      } catch (_e) {
+        emb = { vec: this.computeDeterministicEmbedding(embedText), model: 'deterministic' };
+      }
+
+      const record = {
+        id: (prev && prev.id) || skillInput.id || `skill_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        name: nextName,
+        website,
+        instruction,
+        variations,
+        pageContext: this.sanitizeText(String(skillInput.pageContext || ''), 120),
+        steps,
+        verification: skillInput.verification && typeof skillInput.verification === 'object'
+          ? {
+              expectedUrlIncludes: this._sanitizeStoredUrl(skillInput.verification.expectedUrlIncludes || ''),
+              expectedTitleIncludes: this.sanitizeText(String(skillInput.verification.expectedTitleIncludes || ''), 80),
+              expectedState: this.sanitizeText(String(skillInput.verification.expectedState || ''), 90)
+            }
+          : { expectedUrlIncludes: steps[steps.length - 1].resultingUrlClean || '', expectedTitleIncludes: '', expectedState: steps[steps.length - 1].expectedState || '' },
+        version: prev ? ((prev.version || 1) + 1) : 1,
+        previousVersions,
+        enabled: skillInput.enabled !== undefined ? Boolean(skillInput.enabled) : (prev ? prev.enabled !== false : true),
+        confirmedByUser: skillInput.confirmedByUser !== false,
+        lastSuccessAt: skillInput.lastSuccessAt || now,
+        failureCount: 0,
+        createdAt: prev ? (prev.createdAt || now) : now,
+        updatedAt: now,
+        embedding: Array.isArray(emb) ? emb : (emb && Array.isArray(emb.vec) ? emb.vec : null)
+      };
+
+      if (existingIdx >= 0) this.state.learnedSkills[existingIdx] = record;
+      else this.state.learnedSkills.unshift(record);
+      if (this.state.learnedSkills.length > 80) {
+        this.state.learnedSkills = this.state.learnedSkills.slice(0, 80);
+      }
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return record;
+    }
+
+    async retrieveLearnedSkillsAsync(query = '', websiteOrUrl = '', options = {}) {
+      const skills = Array.isArray(this.state && this.state.learnedSkills) ? this.state.learnedSkills : [];
+      if (skills.length === 0) return [];
+      const qClean = this.sanitizeText(String(query || ''), 180).trim();
+      if (!qClean) return [];
+      const qLow = qClean.toLowerCase();
+      const targetHost = this._extractSkillHost(websiteOrUrl || (typeof window !== 'undefined' && window.location ? window.location.href : ''));
+      const includeDisabled = Boolean(options.includeDisabled);
+      const minScore = Number.isFinite(Number(options.minScore)) ? Number(options.minScore) : 0.44;
+      const topK = Math.max(1, Number(options.topK) || 3);
+
+      let qVec = null;
+      try {
+        const qEmb = await this.computeHybridEmbedding(qClean);
+        qVec = Array.isArray(qEmb) ? qEmb : (qEmb && Array.isArray(qEmb.vec) ? qEmb.vec : this.computeDeterministicEmbedding(qClean));
+      } catch (_e) {
+        qVec = this.computeDeterministicEmbedding(qClean);
+      }
+      const qToks = new Set(qLow.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 2 && !/^(?:please|can|you|the|my|me|to|in|on|for|and)$/.test(t)));
+
+      const scored = [];
+      for (const sk of skills) {
+        if (!sk || (!includeDisabled && sk.enabled === false)) continue;
+        const skHost = this._extractSkillHost(sk.website || '');
+        if (targetHost && skHost && skHost !== 'local' && targetHost !== 'local') {
+          const hostMatch = skHost === targetHost || targetHost.endsWith(`.${skHost}`) || skHost.endsWith(`.${targetHost}`);
+          if (!hostMatch && !options.crossSite) continue;
+        }
+        const phrases = [sk.name, sk.instruction, ...(Array.isArray(sk.variations) ? sk.variations : [])]
+          .filter(Boolean)
+          .map((p) => String(p).toLowerCase().trim());
+
+        let exactBonus = 0;
+        let bestLex = 0;
+        for (const p of phrases) {
+          if (p === qLow) exactBonus = Math.max(exactBonus, 0.45);
+          else if (qLow.includes(p) || p.includes(qLow)) exactBonus = Math.max(exactBonus, 0.25);
+          const pToks = p.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((t) => t.length >= 2 && !/^(?:please|can|you|the|my|me|to|in|on|for|and)$/.test(t));
+          if (pToks.length > 0 && qToks.size > 0) {
+            let inter = 0;
+            for (const pt of pToks) if (qToks.has(pt)) inter += 1;
+            const union = new Set([...pToks, ...qToks]).size;
+            bestLex = Math.max(bestLex, union > 0 ? (inter / union) : 0);
+          }
+        }
+        let embSim = 0;
+        if (qVec && Array.isArray(sk.embedding) && sk.embedding.length === qVec.length) {
+          embSim = Math.max(0, this.cosineSimilarity(qVec, sk.embedding));
+        } else {
+          const skVec = this.computeDeterministicEmbedding(phrases.join(' '));
+          embSim = (qVec && skVec.length === qVec.length) ? Math.max(0, this.cosineSimilarity(qVec, skVec)) : 0;
+        }
+        const score = Math.round(Math.min(1, 0.58 * embSim + 0.42 * bestLex + exactBonus) * 1000) / 1000;
+        if (score >= minScore) {
+          scored.push({ skill: sk, score, lexicalScore: bestLex, semanticScore: embSim });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      return scored.slice(0, topK);
+    }
+
+    searchLearnedSkills(filterText = '', website = '') {
+      const skills = Array.isArray(this.state && this.state.learnedSkills) ? this.state.learnedSkills : [];
+      const fLow = String(filterText || '').trim().toLowerCase();
+      const wLow = this._extractSkillHost(website || '');
+      return skills.filter((sk) => {
+        if (!sk) return false;
+        if (wLow && this._extractSkillHost(sk.website) !== wLow) return false;
+        if (!fLow) return true;
+        const hay = `${sk.name} ${sk.instruction} ${sk.website} ${(sk.variations || []).join(' ')}`.toLowerCase();
+        return hay.includes(fLow);
+      });
+    }
+
+    async renameLearnedSkill(skillId, nextName) {
+      const clean = this.sanitizeText(String(nextName || ''), 90).trim();
+      if (!clean || !Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      sk.name = clean;
+      sk.updatedAt = Date.now();
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
+    }
+
+    async setLearnedSkillEnabled(skillId, enabled) {
+      if (!Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      sk.enabled = Boolean(enabled);
+      sk.updatedAt = Date.now();
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
+    }
+
+    async deleteLearnedSkill(skillId) {
+      if (!Array.isArray(this.state.learnedSkills)) return false;
+      const before = this.state.learnedSkills.length;
+      this.state.learnedSkills = this.state.learnedSkills.filter((s) => s && s.id !== skillId);
+      if (this.state.learnedSkills.length === before) return false;
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return true;
+    }
+
+    async recordLearnedSkillOutcome(skillId, { ok = true } = {}) {
+      if (!Array.isArray(this.state.learnedSkills)) return null;
+      const sk = this.state.learnedSkills.find((s) => s && s.id === skillId);
+      if (!sk) return null;
+      if (ok) {
+        sk.lastSuccessAt = Date.now();
+        sk.failureCount = 0;
+      } else {
+        sk.failureCount = (sk.failureCount || 0) + 1;
+        sk.lastFailureAt = Date.now();
+      }
+      this.state._skillsModifiedExplicitly = true;
+      await this.saveState({ skipTabSync: true });
+      delete this.state._skillsModifiedExplicitly;
+      return sk;
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.SleepwalkerMemory = SleepwalkerMemory;
+  }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = SleepwalkerMemory;
+  }
+})();

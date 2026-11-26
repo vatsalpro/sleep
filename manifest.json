@@ -1,0 +1,111 @@
+{
+  "manifest_version": 3,
+  "name": "Sleepwalker — AI Browser Copilot",
+  "version": "2.0.0",
+  "description": "General-purpose AI browser copilot with natural-language navigation, Shadow DOM & hierarchical control understanding, multi-tab context, local Ollama and Gemini support.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "offscreen",
+    "alarms",
+    "debugger"
+  ],
+  "host_permissions": [
+    "http://localhost:11434/*",
+    "http://127.0.0.1:11434/*"
+  ],
+  "optional_host_permissions": [
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/background.js"
+  },
+  "action": {
+    "default_title": "Sleepwalker (Alt+S)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      }
+    }
+  },
+  "options_ui": {
+    "page": "pages/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/voice/reader.js",
+        "src/intelligence/outline.js",
+        "src/intelligence/diagnostics.js",
+        "src/background/ai-comm.js",
+        "src/voice/voice-pipeline.js",
+        "src/voice/voice.js",
+        "src/intelligence/memory.js",
+        "src/intelligence/task-planner.js",
+        "src/intelligence/personal-intel.js",
+        "src/intelligence/digest.js",
+        "src/intelligence/explain.js",
+        "src/intelligence/confirm.js",
+        "src/engine/link-index.js",
+        "src/engine/match.js",
+        "src/engine/link-intent.js",
+        "src/engine/intent.js",
+        "src/engine/nav-engine.js",
+        "src/engine/navigate.js",
+        "src/forms/form-index.js",
+        "src/forms/form-fill.js",
+        "src/forms/forms.js",
+        "src/engine/element-select.js",
+        "src/engine/world-model.js",
+        "src/forms/shelf-db.js",
+        "src/forms/upload.js",
+        "src/forms/camera.js",
+        "src/voice/dialogue.js",
+        "src/ui/threads.js",
+        "src/ui/card.js",
+        "src/ui/orb-canvas.js",
+        "src/ui/orb.js",
+        "src/intelligence/teach.js",
+        "src/engine/browser-engine.js",
+        "src/engine/stagehand-browser-adapter.js",
+        "src/engine/extension-intelligence.js",
+        "src/engine/unified-task-contract.js",
+        "src/engine/unified-orchestrator.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/ui/ui.css",
+        "pages/mic-setup.html",
+        "data/lexicon.json",
+        "data/link-lexicon.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

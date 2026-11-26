@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sleepwalker 2.0 Settings</title>
+  <style>
+    :root { --ink:#1b1714; --muted:#574f45; --gold:#d99b26; --card:rgba(255,250,240,0.94); --border:rgba(217,155,38,0.45); --ok:#15803d; --warn:#b45309; }
+    * { box-sizing:border-box; font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Devanagari",sans-serif; }
+    body { margin:0; padding:28px 18px 56px; background:linear-gradient(160deg,#f7f1e3 0%,#ece7f7 100%); color:var(--ink); min-height:100vh; }
+    main { max-width:780px; margin:0 auto; display:flex; flex-direction:column; gap:18px; }
+    header { display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; }
+    header h1 { margin:0 0 4px; font-size:28px; letter-spacing:-0.02em; }
+    header p { margin:0; font-size:16px; color:var(--muted); }
+    .version-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; background:rgba(255,255,255,0.85); border:1px solid var(--border); font-size:13px; font-weight:700; color:#78350f; }
+    section, details.advanced-drawer { background:var(--card); border:1.5px solid var(--border); border-radius:22px; padding:20px 22px; box-shadow:0 10px 28px rgba(24,18,12,0.07); }
+    details.advanced-drawer > summary { cursor:pointer; font-size:18px; font-weight:700; list-style:none; display:flex; align-items:center; justify-content:space-between; }
+    details.advanced-drawer > summary::after { content:"▸"; font-size:16px; color:var(--muted); transition:transform 160ms ease; }
+    details.advanced-drawer[open] > summary::after { transform:rotate(90deg); }
+    details.advanced-drawer .adv-body { margin-top:16px; display:flex; flex-direction:column; gap:14px; }
+    h2 { margin:0 0 12px; font-size:19px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .health-card { padding:12px 14px; border-radius:14px; background:rgba(255,255,255,0.82); border:1px solid rgba(27,23,20,0.12); display:flex; flex-direction:column; gap:4px; }
+    .health-card strong { font-size:14px; }
+    .health-card [data-state="connected"] { color:var(--ok); font-weight:700; }
+    .health-card [data-state="disconnected"] { color:var(--warn); font-weight:700; }
+    label { display:flex; flex-direction:column; gap:6px; font-size:15px; font-weight:600; }
+    input[type="text"], input[type="url"], input[type="password"], select {
+      min-height:48px; padding:10px 12px; border-radius:12px; border:1px solid rgba(27,23,20,0.22); background:#fff; color:var(--ink); font-size:16px;
+    }
+    label.chk { flex-direction:row; align-items:center; gap:10px; min-height:46px; cursor:pointer; font-size:15px; font-weight:500; }
+    input[type="checkbox"] { width:22px; height:22px; accent-color:var(--gold); flex-shrink:0; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; align-items:center; }
+    button {
+      min-height:46px; min-width:46px; padding:10px 18px; border-radius:999px; border:1.5px solid rgba(27,23,20,0.2);
+      background:#fff; color:var(--ink); font-size:15px; font-weight:700; cursor:pointer;
+    }
+    button.primary { background:linear-gradient(135deg,#f3c65f,#d99b26); border-color:#b47812; color:#1b1407; }
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline:3px solid #2563eb; outline-offset:2px; }
+    .note { margin:4px 0 0; font-size:13.5px; color:var(--muted); line-height:1.45; }
+    #opt-status { font-size:15px; font-weight:700; min-height:22px; color:#14532d; }
+    .shortcut-bar { display:flex; flex-wrap:wrap; gap:12px; padding:10px 14px; border-radius:14px; background:rgba(255,255,255,0.72); border:1px solid rgba(27,23,20,0.1); font-size:14px; }
+    kbd { background:#fff; border:1px solid rgba(27,23,20,0.25); border-radius:6px; padding:2px 6px; font-family:monospace; font-size:13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Sleepwalker 2.0</h1>
+        <p>Private, local-first voice assistant for your browser and Windows desktop.</p>
+      </div>
+      <span class="version-pill">Local-First • v2.0</span>
+    </header>
+
+    <!-- 1. System Readiness Dashboard -->
+    <section>
+      <h2>System Readiness</h2>
+      <div id="opt-health-grid" class="grid">
+        <div class="health-card">
+          <strong>Local AI (Ollama)</strong>
+          <span id="badge-ollama" data-state="disconnected">Checking...</span>
+          <span id="detail-ollama" class="note">Click Run Auto-Check</span>
+        </div>
+        <div class="health-card">
+          <strong>Browser Automation</strong>
+          <span id="badge-stagehand" data-state="disconnected">Checking...</span>
+          <span id="detail-stagehand" class="note">Stagehand CDP + built-in fallback</span>
+        </div>
+        <div class="health-card">
+          <strong>Windows Desktop Companion</strong>
+          <span id="badge-native" data-state="disconnected">Checking...</span>
+          <span id="detail-native" class="note">Notepad, Calculator &amp; UIA</span>
+        </div>
+        <div class="health-card">
+          <strong>Semantic Memory</strong>
+          <span id="badge-embed" data-state="disconnected">Checking...</span>
+          <span id="detail-embed" class="note">Local embeddings</span>
+        </div>
+      </div>
+      <div class="row">
+        <button id="opt-test-ollama" type="button" class="primary">Run Auto-Check</button>
+        <button id="opt-open-mic" type="button">Check Microphone</button>
+        <button id="opt-test-ollama-model" type="button">Test AI Response</button>
+      </div>
+      <p id="opt-ai-hint" class="note">Sleepwalker runs 100% locally by default. Passwords, OTPs, payment numbers, and private messages are never captured or sent.</p>
+    </section>
+
+    <!-- 2. Voice, Appearance & Shortcuts -->
+    <section>
+      <h2>Voice &amp; Accessibility</h2>
+      <div class="grid">
+        <label>Default Language
+          <select id="opt-lang">
+            <option value="auto">Auto (Hinglish: HI -&gt; EN retry)</option>
+            <option value="en-IN">English (India)</option>
+            <option value="hi-IN">Hindi (हिन्दी)</option>
+            <option value="ta-IN">Tamil</option><option value="te-IN">Telugu</option>
+            <option value="bn-IN">Bengali</option><option value="mr-IN">Marathi</option>
+            <option value="gu-IN">Gujarati</option><option value="kn-IN">Kannada</option>
+            <option value="ml-IN">Malayalam</option><option value="pa-IN">Punjabi</option>
+          </select>
+        </label>
+        <label>Speech Speed
+          <select id="opt-rate">
+            <option value="0.8">Slow (0.8x)</option>
+            <option value="1">Normal (1.0x)</option>
+            <option value="1.2">Fast (1.2x)</option>
+          </select>
+        </label>
+        <label>Card Text Size
+          <select id="opt-font-size">
+            <option value="18">Standard (18px)</option>
+            <option value="20">Large (20px)</option>
+            <option value="22">Extra Large (22px)</option>
+          </select>
+        </label>
+      </div>
+      <label class="chk"><input id="opt-glow-enabled" type="checkbox" checked> Show luminous golden threads &amp; subtle focus glow</label>
+      <label class="chk"><input id="opt-barge-in" type="checkbox"> Allow interrupting speech while speaking (best with headphones)</label>
+      <label class="chk"><input id="opt-translit" type="checkbox" checked> Transliterate Hindi dictation to English letters when required</label>
+      <div class="shortcut-bar" style="margin-top:10px;">
+        <span><kbd>Alt+S</kbd> Summon / Toggle</span>
+        <span><kbd>Alt+Z</kbd> Hold-to-Talk</span>
+        <span><kbd>Alt+Shift+X</kbd> Emergency Stop</span>
+        <span><kbd>Esc</kbd> Dismiss</span>
+      </div>
+    </section>
+
+    <!-- 3. Privacy, Automation & Memory -->
+    <section>
+      <h2>Privacy &amp; Smart Automation</h2>
+      <label class="chk"><input id="opt-local-only" type="checkbox" checked> Local-Only Privacy Mode (recommended — runs strictly on your local Ollama models)</label>
+      <label class="chk"><input id="opt-stagehand-enabled" type="checkbox" checked> Enable Stagehand Browser Engine (auto-falls back to built-in DOM engine if sidecar is offline)</label>
+      <label class="chk"><input id="opt-ai-search-enabled" type="checkbox" checked> Intelligent Search Box Matching (automatically selects the right search box on complex pages)</label>
+      <label class="chk"><input id="opt-memory-paused" type="checkbox"> Pause local memory collection</label>
+      <label class="chk"><input id="opt-disable-page-analysis" type="checkbox"> Disable webpage context analysis</label>
+      <label class="chk"><input id="opt-learning-enabled" type="checkbox" checked> Adaptive workflow learning (learns only from repeated confirmed patterns)</label>
+      <label class="chk"><input id="opt-proactive-enabled" type="checkbox" checked> Compact next-step suggestions (never executes automatically)</label>
+      <div class="row">
+        <button id="opt-clear-recent" type="button">Clear Recent Activity</button>
+        <button id="opt-clear-tasks" type="button">Clear Task History</button>
+        <button id="opt-clear-personal" type="button">Clear Personal Context</button>
+        <button id="opt-clear-all-mem" type="button">Clear All Memory</button>
+      </div>
+      <p id="opt-mem-summary" class="note">Memory stays stored locally in your browser.</p>
+    </section>
+
+    <!-- 4. Learned Workflow Skills -->
+    <section id="opt-skills-section">
+      <h2>Learned Workflow Skills</h2>
+      <p class="note">Workflows you teach Sleepwalker stay local, never store sensitive inputs, and revalidate controls against the live page.</p>
+      <div class="row" style="margin-top:8px;">
+        <input id="opt-skills-search" type="text" placeholder="Search skills by name or website..." style="flex:1 1 260px;">
+        <button id="opt-skills-refresh" type="button">Refresh Skills</button>
+      </div>
+      <div id="opt-skills-list" style="margin-top:12px;display:flex;flex-direction:column;gap:10px;"></div>
+    </section>
+
+    <!-- 5. Opt-In Non-Sensitive Autofill Profile -->
+    <section>
+      <h2>Opt-In Non-Sensitive Form Profile</h2>
+      <label class="chk"><input id="opt-profile-optin" type="checkbox"> Enable opt-in autofill when I say "Fill my details"</label>
+      <div class="grid">
+        <label>Full Name <input id="prof-name" type="text"></label>
+        <label>Email <input id="prof-email" type="text"></label>
+        <label>Phone <input id="prof-phone" type="text"></label>
+        <label>City <input id="prof-city" type="text"></label>
+        <label>State <input id="prof-state" type="text"></label>
+        <label>PIN Code <input id="prof-pin" type="text"></label>
+      </div>
+      <p class="note">Never stores passwords, OTP, Aadhaar, PAN, card/CVV, bank numbers, or CAPTCHA values.</p>
+      <div class="row">
+        <button id="opt-clear-profile" type="button">Clear Saved Profile</button>
+        <button id="opt-open-shelf" type="button">Document Shelf Setup</button>
+      </div>
+    </section>
+
+    <!-- 6. Collapsible Advanced & Developer Drawer -->
+    <details id="opt-advanced-drawer" class="advanced-drawer">
+      <summary>Advanced &amp; Developer Settings</summary>
+      <div class="adv-body">
+        <div class="grid">
+          <label>Local Ollama URL
+            <input id="opt-ollama-url" type="url" placeholder="http://localhost:11434">
+          </label>
+          <label>Ollama Model (Approved Local Allowlist)
+            <input id="opt-ollama-model" type="text" list="ollama-model-presets" placeholder="llama3.2:3b">
+            <datalist id="ollama-model-presets">
+              <option value="llama3.2:3b">llama3.2:3b (Planner &amp; Summarizer — Default)</option>
+              <option value="qwen2.5:1.5b">qwen2.5:1.5b (Fast Intent Router)</option>
+              <option value="qwen3-vl:2b">qwen3-vl:2b (Local Visual Grounding)</option>
+              <option value="nomic-embed-text:latest">nomic-embed-text:latest (Semantic Memory)</option>
+            </datalist>
+          </label>
+          <label>Optional Cloud Proxy URL (HTTPS)
+            <input id="opt-proxy-url" type="url" placeholder="https://your-proxy.example.com/explain">
+          </label>
+          <label>Optional Gemini Model
+            <input id="opt-gemini-model" type="text" placeholder="gemini-2.5-flash-lite">
+          </label>
+          <label>Optional Gemini API Key
+            <input id="opt-gemini-key" type="password" placeholder="Stored locally only (optional)">
+          </label>
+        </div>
+
+        <label class="chk"><input id="opt-live-ws" type="checkbox"> Enable Gemini Live WebSocket Mode (only when Local-Only Mode is off)</label>
+        <label class="chk"><input id="opt-rebuilt-browser-engine" type="checkbox"> [Developer] Enable Experimental Rebuilt Browser Engine</label>
+
+        <div class="row">
+          <button id="opt-reload-env" type="button">Reload Local .env</button>
+          <button id="opt-toggle-key" type="button">Show Key</button>
+          <button id="opt-load-diag" type="button">Inspect Live Diagnostics</button>
+          <button id="opt-reset-prefs" type="button">Reset Learned Preferences</button>
+          <button id="opt-clear-reminders" type="button">Clear All Reminders</button>
+        </div>
+
+        <div class="grid">
+          <div class="health-card"><strong>Stagehand CDP Session</strong><span id="badge-stagehand-cdp" data-state="disconnected">Idle</span><span id="detail-stagehand-cdp" class="note">Idle until Stagehand executes</span></div>
+          <div class="health-card"><strong>Gemini REST/SSE (Opt-In)</strong><span id="badge-gemini-rest" data-state="disconnected">Disabled</span><span id="detail-gemini-rest" class="note">Disabled in Local-Only Mode</span></div>
+          <div class="health-card"><strong>Gemini Live WS (Opt-In)</strong><span id="badge-gemini-ws" data-state="disconnected">Disabled</span><span id="detail-gemini-ws" class="note">Disabled</span></div>
+        </div>
+
+        <div style="padding:12px 14px;border-radius:14px;background:rgba(255,255,255,0.75);border:1px solid rgba(27,23,20,0.14);">
+          <div><strong>Extension ID:</strong> <code id="opt-extension-id" style="font-family:monospace;font-size:14px;">detecting...</code></div>
+          <div class="note" style="margin-top:6px;"><strong>Windows Native Companion Registration (PowerShell):</strong></div>
+          <div class="row" style="margin-top:6px;">
+            <input id="opt-native-reg-cmd" type="text" readonly value=".\register-native-host.ps1" aria-label="Native host registration command" style="flex:1 1 360px;font-family:monospace;font-size:14px;">
+            <button id="opt-copy-native-cmd" type="button">Copy Command</button>
+          </div>
+          <p id="opt-ollama-origin-info" class="note">Extension Origin: detecting...</p>
+        </div>
+
+        <div>
+          <strong>Stored Preferences, Tasks &amp; Reminders</strong>
+          <div id="opt-personal-inspector" class="note" style="margin-top:6px;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.72);border:1px solid rgba(27,23,20,0.12);">Click "Inspect Live Diagnostics" to view stored preferences, tasks, and reminders.</div>
+        </div>
+        <pre id="opt-diag" class="note" style="white-space:pre-wrap;background:rgba(255,255,255,0.65);padding:10px;border-radius:10px;max-height:220px;overflow:auto;"></pre>
+      </div>
+    </details>
+
+    <div class="row" style="position:sticky;bottom:14px;background:rgba(255,250,240,0.96);padding:12px 16px;border-radius:18px;border:1.5px solid var(--border);box-shadow:0 8px 24px rgba(24,18,12,0.12);">
+      <button id="opt-save" type="button" class="primary">Save Settings</button>
+      <span id="opt-status" role="status" aria-live="polite"></span>
+    </div>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

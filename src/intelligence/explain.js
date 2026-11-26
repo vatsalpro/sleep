@@ -1,0 +1,1039 @@
+/**
+ * Sleepwalker - explain.js
+ * CodeQuest National Tech Hackathon 2026
+ *
+ * Feature B: "Explain This Page" Engine
+ *
+ * Responsibilities:
+ * 1. Safe text extraction: Extracts main visible text from <main>, <article>, [role=main] or body.
+ *    STRICT PRIVACY: Excludes nav, footer, headers, scripts, styles, iframes.
+ *    CRITICAL PRIVACY: Excludes ALL inputs, selects, textareas, and passwords. Form values are NEVER read.
+ * 2. URL cleaning: Strips query strings from URLs for cache keys.
+ * 3. Offline Extractive Fallback: Generates a high-quality "basic summary" with zero AI dependencies.
+ * 4. Hallucination Validator: Validates model responses. Numbers, amounts, and dates MUST appear in
+ *    the source page text (normalizing Devanagari numerals). Hallucinated sentences are dropped.
+ * 5. Timing honesty: Shows "Still working, tap Stop to cancel" after 15 seconds.
+ * 6. Coordinates with widget.pill, widget.glow, and widget.reader.
+ */
+
+(function (root, factory) {
+  const api = factory(root);
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+  if (root && typeof root === 'object') {
+    root.SleepwalkerExplainer = api.SleepwalkerExplainer;
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : window, function (root) {
+  'use strict';
+
+  class SleepwalkerExplainer {
+    constructor(widget) {
+      this.widget = widget;
+      this.activeAbortController = null;
+      this.waitingTimer = null;
+      this.turnMemory = [];
+      this.lastDigest = null;
+      this.lastPageHash = '';
+      this._streamGen = 0;
+      this._inFlight = false;
+      this.streamClient = null;
+    }
+
+    isInFlight() {
+      return Boolean(this._inFlight);
+    }
+
+    _canUseStreamPort() {
+      const aiComm = (root && root.SleepwalkerAiComm)
+        || (typeof SleepwalkerAiComm !== 'undefined' ? SleepwalkerAiComm : null);
+      return Boolean(
+        aiComm &&
+        typeof aiComm.SleepwalkerStreamClient === 'function' &&
+        typeof chrome !== 'undefined' &&
+        chrome.runtime &&
+        typeof chrome.runtime.connect === 'function'
+      );
+    }
+
+    _getOrCreateStreamClient() {
+      if (this.streamClient) return this.streamClient;
+      const aiComm = (root && root.SleepwalkerAiComm)
+        || (typeof SleepwalkerAiComm !== 'undefined' ? SleepwalkerAiComm : null);
+      if (aiComm && typeof aiComm.SleepwalkerStreamClient === 'function') {
+        this.streamClient = new aiComm.SleepwalkerStreamClient({ sessionId: 'content_tab' });
+      }
+      return this.streamClient;
+    }
+
+    /**
+     * Get clean URL without query string or hash for caching.
+     */
+    getCleanUrl() {
+      try {
+        const u = new URL(window.location.href);
+        return `${u.origin}${u.pathname}`;
+      } catch (e) {
+        return window.location.origin + window.location.pathname;
+      }
+    }
+
+    /**
+     * Extract main page readable text.
+     * Strictly ignores nav, footer, forms, inputs, and passwords.
+     * @param {string} [sectionQuery] - Optional section to focus on.
+     * @returns {string} Clean visible text up to ~6,000 characters.
+     */
+    extractPageText(sectionQuery = null) {
+      // 1. If section query specified, look for section heading first
+      if (sectionQuery && this.widget && this.widget.outline) {
+        if (!this.widget.outline.items || this.widget.outline.items.length === 0) {
+          this.widget.outline.extractOutline();
+        }
+        const heading = this.widget.outline.fuzzyFindHeading(sectionQuery);
+        if (heading) {
+          // Orient user to the section visually
+          this.widget.outline.scrollToHeading(heading);
+          if (heading.sectionElements && heading.sectionElements.length > 0) {
+            const sectionText = heading.sectionElements
+              .map(el => this._extractCleanTextFromNode(el))
+              .filter(Boolean)
+              .join(' ');
+            if (sectionText.trim().length > 30) {
+              return this._sanitizeAndTruncate(sectionText, 7000);
+            }
+          }
+        }
+      }
+
+      // 2. Main content root selection
+      const candidates = [
+        'main',
+        'article',
+        '[role="main"]',
+        '#main-content',
+        '#content',
+        '#bodyContent',
+        '#mw-content-text',
+        '.mw-parser-output',
+        '.entry-content',
+        '.article-body',
+        '.post-content',
+        '.content'
+      ];
+      let root = null;
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (el && this._isVisible(el) && el.textContent.trim().length > 60) {
+          root = el;
+          break;
+        }
+      }
+      if (!root) {
+        root = document.body;
+      }
+
+      const text = this._extractCleanTextFromNode(root);
+      return this._sanitizeAndTruncate(text, 7000);
+    }
+
+    /**
+     * Recursive text extraction excluding form inputs, passwords, nav, footer, scripts.
+     */
+    _extractCleanTextFromNode(node) {
+      if (!node) return '';
+
+      // Ignore sleepwalker's own host element
+      if (node.id === 'sleepwalker-host' || (node.classList && node.classList.contains('sleepwalker-exclude'))) {
+        return '';
+      }
+
+      // Exclude non-content and layout tags
+      const tag = node.tagName ? node.tagName.toLowerCase() : '';
+      if (['nav', 'footer', 'header', 'script', 'style', 'noscript', 'svg', 'iframe'].includes(tag)) {
+        return '';
+      }
+
+      // STRICT PRIVACY RULE: Exclude all form inputs, textareas, selects, and passwords!
+      if (['input', 'textarea', 'select', 'button'].includes(tag)) {
+        return '';
+      }
+
+      // Skip hidden DOM elements
+      if (node.nodeType === 1 && !this._isVisible(node)) {
+        return '';
+      }
+
+      // Handle table elements
+      if (tag === 'table') {
+        const rows = Array.from(node.querySelectorAll('tr'));
+        return rows.map(r => {
+          const cells = Array.from(r.querySelectorAll('th, td')).map(c => c.textContent.trim());
+          return cells.join(': ');
+        }).join('. ') + '. ';
+      }
+
+      if (node.nodeType === 3) {
+        return node.textContent.replace(/\s+/g, ' ');
+      }
+
+      let result = '';
+      if (node.childNodes && node.childNodes.length) {
+        for (let i = 0; i < node.childNodes.length; i++) {
+          result += ' ' + this._extractCleanTextFromNode(node.childNodes[i]);
+        }
+      } else {
+        for (let child = node.firstChild; child; child = child.nextSibling) {
+          result += ' ' + this._extractCleanTextFromNode(child);
+        }
+      }
+      return result;
+    }
+
+    _isVisible(elem) {
+      if (!elem || elem.nodeType !== 1) return true;
+      if (typeof Element !== 'undefined' && !(elem instanceof Element)) return true;
+      const win = typeof window !== 'undefined' ? window : null;
+      if (!win || typeof win.getComputedStyle !== 'function') return true;
+      const s = win.getComputedStyle(elem);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    }
+
+    _sanitizeAndTruncate(text, maxChars = 6000) {
+      const cleaned = text.replace(/\s+/g, ' ').trim();
+      if (cleaned.length <= maxChars) return cleaned;
+      return cleaned.substring(0, maxChars) + '...';
+    }
+
+    /**
+     * Normalize Devanagari numerals to standard ASCII digits.
+     */
+    normalizeNumerals(str) {
+      if (!str) return '';
+      const devanagariDigits = {
+        '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
+        '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
+      };
+      return str.replace(/[०-९]/g, d => devanagariDigits[d] || d);
+    }
+
+    /**
+     * Extract all numbers, monetary figures, and year/day numbers from text.
+     */
+    extractNumbersAndDates(text) {
+      const norm = this.normalizeNumerals(text.toLowerCase());
+      const matches = norm.match(/\b\d+(?:[,\.]\d+)?\b/g) || [];
+      return matches.map(n => n.replace(/,/g, ''));
+    }
+
+    /**
+     * Hallucination Validator: Ensures numbers/dates in the answer appear in source text.
+     * Drops any sentence containing hallucinated numbers.
+     * @param {string} answer - LLM output.
+     * @param {string} sourceText - Original page text.
+     * @returns {string|null} Validated answer text, or null if nothing survived.
+     */
+    validateAnswer(answer, sourceText) {
+      if (!answer || !answer.trim()) return null;
+
+      // Clean markdown formatting if present
+      const cleanAnswer = answer
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/__(.*?)__/g, '$1')
+        .replace(/_(.*?)_/g, '$1')
+        .replace(/^#+\s*/gm, '')
+        .replace(/^\s*[-*•+]\s+/gm, '')
+        .trim();
+
+      const sourceNumbers = new Set(this.extractNumbersAndDates(sourceText));
+      const sentences = cleanAnswer.match(/[^.!?।\n]+[.!?।\n]+|[^.!?।\n]+$/g) || [cleanAnswer];
+      const validSentences = [];
+
+      for (const rawSentence of sentences) {
+        const sentence = rawSentence.trim();
+        if (sentence.length < 3) continue;
+
+        const sentenceNumbers = this.extractNumbersAndDates(sentence);
+        let hasHallucination = false;
+
+        for (const num of sentenceNumbers) {
+          const cleanNum = num.replace(/[,.]/g, '');
+          const val = parseInt(cleanNum, 10);
+          // Conversational enumeration / counts <= 10 (e.g. "3 steps", "2 requirements", "1st") are natural phrasing
+          if (!isNaN(val) && val <= 10) continue;
+
+          // If a large specific number in the answer is not anywhere in the source text, flag as hallucination
+          if (!sourceNumbers.has(cleanNum)) {
+            console.warn(`[Sleepwalker Validator] Dropped hallucinated sentence (number "${cleanNum}" not in page): "${sentence}"`);
+            hasHallucination = true;
+            break;
+          }
+        }
+
+        if (!hasHallucination) {
+          validSentences.push(sentence);
+        }
+      }
+
+      // If all sentences with numbers were dropped, but the model gave valid conceptual text, keep text-only sentences
+      if (validSentences.length === 0) {
+        const textOnlySentences = sentences
+          .map(s => s.trim())
+          .filter(s => s.length > 5 && this.extractNumbersAndDates(s).length === 0);
+        if (textOnlySentences.length > 0) {
+          return textOnlySentences.join(' ');
+        }
+        console.warn('[Sleepwalker Validator] Validation dropped hallucinated figures; falling back to basic summary.');
+        return null;
+      }
+
+      return validSentences.join(' ');
+    }
+
+    invalidateDigestCache() {
+      this._digestCacheEntry = null;
+    }
+
+    _getDigestApi() {
+      return (typeof window !== 'undefined' && window.SleepwalkerDigest)
+        || (root && root.SleepwalkerDigest)
+        || (typeof SleepwalkerDigest !== 'undefined' ? SleepwalkerDigest : null);
+    }
+
+    /**
+     * Build/refresh compact page digest via SleepwalkerDigest without reading input values.
+     * Caches for 3.5s on unchanged URL/title/DOM structure so rapid commands skip redundant scans.
+     */
+    getPageDigest(forceRefresh = false) {
+      if (this.widget && this.widget.memory && this.widget.memory.privacy && this.widget.memory.privacy.disablePageAnalysis) {
+        return {
+          title: (typeof document !== 'undefined' && document.title) || 'Private Page',
+          urlClean: this.getCleanUrl(),
+          pageTextHash: 'analysis_disabled',
+          headings: [],
+          elements: [],
+          chunks: [],
+          fullSafeText: '',
+          disabledByPrivacy: true,
+          stats: { headingCount: 0, elementCount: 0, chunkCount: 0, totalTextTokens: 0 }
+        };
+      }
+      const digestApi = this._getDigestApi();
+      if (!digestApi || typeof document === 'undefined') return null;
+
+      const sig = `${(typeof window !== 'undefined' && window.location && window.location.href) || ''}::${document.title || ''}::${document.body ? document.body.children.length : 0}`;
+      const now = Date.now();
+      if (!forceRefresh && this._digestCacheEntry && this._digestCacheEntry.sig === sig && (now - this._digestCacheEntry.ts) < 3500) {
+        return this._digestCacheEntry.digest;
+      }
+
+      const digest = digestApi.buildDigest(document);
+      if (digest.pageTextHash && digest.pageTextHash !== this.lastPageHash) {
+        this.turnMemory = [];
+        this.lastPageHash = digest.pageTextHash;
+      }
+      this.lastDigest = digest;
+      this._digestCacheEntry = { sig, digest, ts: now };
+      return digest;
+    }
+
+    /**
+     * Keep a 3-turn compact memory for follow-ups ("explain that in simple words", etc.).
+     */
+    recordTurnMemory(entry) {
+      if (!entry || !entry.answerSnippet) return;
+      this.turnMemory.push({
+        query: String(entry.query || entry.mode || 'summary').slice(0, 60),
+        mode: String(entry.mode || 'summary'),
+        answerSnippet: String(entry.answerSnippet).replace(/\s+/g, ' ').trim().slice(0, 120)
+      });
+      if (this.turnMemory.length > 3) {
+        this.turnMemory = this.turnMemory.slice(-3);
+      }
+    }
+
+    _normalizeOptions(sectionQueryOrOptions = null, widgetLang = 'en-IN') {
+      const wholePageTargetRe = /^(?:(?:this|the|whole|entire|full|current)\s+)?(?:page|website|site|webpage|web\s+page|article|portal|screen|everything|content|it|this|that)?(?:\s+(?:to|for)\s+me)?$/i;
+      if (sectionQueryOrOptions && typeof sectionQueryOrOptions === 'object') {
+        let rawTarget = String(sectionQueryOrOptions.target || sectionQueryOrOptions.section || '').trim();
+        if (rawTarget && wholePageTargetRe.test(rawTarget)) {
+          rawTarget = '';
+        }
+        const mode = sectionQueryOrOptions.mode === 'section' && !rawTarget
+          ? 'summary'
+          : (sectionQueryOrOptions.mode || (sectionQueryOrOptions.query ? 'qa' : (rawTarget ? 'section' : 'summary')));
+        return {
+          mode,
+          level: sectionQueryOrOptions.level || 'standard',
+          target: rawTarget,
+          query: sectionQueryOrOptions.query || '',
+          lang: sectionQueryOrOptions.lang || widgetLang,
+          isFollowUp: Boolean(sectionQueryOrOptions.isFollowUp)
+        };
+      }
+      let sectionStr = typeof sectionQueryOrOptions === 'string' ? sectionQueryOrOptions.trim() : '';
+      if (sectionStr && wholePageTargetRe.test(sectionStr)) {
+        sectionStr = '';
+      }
+      return {
+        mode: sectionStr ? 'section' : 'summary',
+        level: 'standard',
+        target: sectionStr,
+        query: '',
+        lang: widgetLang,
+        isFollowUp: false
+      };
+    }
+
+    /**
+     * Step 6: Offline Fallback (No AI)
+     * Builds an authentic extractive summary / action steps / Q&A answer using page text & top digest chunks.
+     */
+    generateBasicSummary(pageText, sectionQueryOrOptions = null, lang = 'en-IN', digest = null) {
+      const opts = this._normalizeOptions(sectionQueryOrOptions, lang);
+      const effectiveLang = opts.lang || lang || 'en-IN';
+      const isHindi = String(effectiveLang).startsWith('hi');
+      const title = (typeof document !== 'undefined' && document.title)
+        ? document.title.split(/[-|•]/)[0].trim()
+        : ((digest && digest.title) || 'This page');
+
+      const safeSource = String(pageText || (digest && digest.fullSafeText) || '').trim();
+      const digestApi = this._getDigestApi();
+
+      // Mode QA / Term offline extractive answer using top 2 keyword chunks
+      if ((opts.mode === 'qa' || opts.mode === 'term') && (opts.query || opts.target) && digest && digestApi) {
+        const searchTerm = opts.query || opts.target;
+        const topChunks = digestApi.selectTopChunks(digest, searchTerm, { maxChunks: 2, maxTokens: 600 });
+        const bestChunk = topChunks.find((c) => c.score > 0);
+        if (bestChunk) {
+          const sentences = bestChunk.text
+            .split(/(?<=[.!?।])\s+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length > 10);
+          const qTokens = digestApi.normalizeSearchTokens(searchTerm);
+          const matchingSentences = sentences.filter((s) => {
+            const sl = s.toLowerCase();
+            return qTokens.some((tok) => sl.includes(tok));
+          });
+          const picked = (matchingSentences.length > 0 ? matchingSentences : sentences).slice(0, 2).join(' ');
+          return isHindi
+            ? `"${bestChunk.section}" के अनुसार: ${picked}`
+            : `From "${bestChunk.section}": ${picked}`;
+        }
+        // If user asks "Tell me about <PageTitle/Topic>" and page title matches topic, return lead overview sentences
+        const titleLower = title.toLowerCase();
+        const termLower = String(searchTerm || '').toLowerCase();
+        if (titleLower && (termLower.includes(titleLower) || /^(?:tell\s+me\s+about|about)\b/i.test(termLower)) && safeSource) {
+          const fallbackLead = safeSource
+            .split(/(?<=[.!?।])\s+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length > 20 && !/cookie|javascript|privacy policy|terms of service/i.test(s))
+            .slice(0, 2)
+            .join(' ');
+          if (fallbackLead) {
+            return fallbackLead;
+          }
+        }
+        return isHindi
+          ? `इस पेज पर "${searchTerm}" के बारे में स्पष्ट जानकारी नहीं मिली।`
+          : `I could not find clear information about "${searchTerm}" on this page.`;
+      }
+
+      // Gather visible headings safely
+      const headings = (typeof document !== 'undefined' && document.querySelectorAll)
+        ? Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+            .filter(h => this._isVisible(h) && h.textContent.trim().length > 2)
+            .map(h => h.textContent.trim().replace(/\s+/g, ' '))
+        : ((digest && Array.isArray(digest.headings)) ? digest.headings.map(h => h.text) : []);
+
+      // Lead sentences
+      const leadSentences = safeSource
+        .split(/(?<=[.!?।])\s+/)
+        .map(s => s.trim())
+        .filter(s => s.length > 20 && !/cookie|javascript|privacy policy|terms of service|all rights reserved/i.test(s));
+      const leadIntro = leadSentences.slice(0, opts.level === 'simple' || opts.level === 'child' ? 1 : 2).join(' ');
+
+      const feeMatch = safeSource.match(/(?:fee|fees|amount|cost|शुल्क|फीस)(?:\s+(?:is|of))?\s*[:=-]?\s*[₹$€£]?\s*[\d,]+(?:\s*(?:INR|USD|rupees|रुपये))?/i) ||
+                       safeSource.match(/(?:₹|Rs\.?|\$)\s*\d+[\d,]*/i) ||
+                       safeSource.match(/\b\d+[\d,]*\s*(?:INR|USD|rupees|रुपये)\b/i);
+      const feeStr = feeMatch ? feeMatch[0].trim() : null;
+
+      const dateMatch = safeSource.match(/(?:deadline|last date|opening date|milestone|अंतिम तिथि|तारीख)[:\s]+[A-Za-z0-9,\s\/-]{5,30}/i) ||
+                        safeSource.match(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?\b/i);
+      const dateStr = dateMatch ? dateMatch[0].trim() : null;
+
+      const docsMatch = safeSource.match(/(?:required\s+documents|documents\s+needed|दस्तावेज)[:\s]+([^.!?\n]{10,80})/i);
+      const docsStr = docsMatch ? docsMatch[1].trim() : null;
+
+      if (opts.mode === 'action_steps') {
+        const elementHint = (digest && Array.isArray(digest.elements) && digest.elements.length > 0)
+          ? digest.elements.slice(0, 3).map((e) => e.label).join(', ')
+          : '';
+        if (isHindi) {
+          let steps = `पेज "${title}" पर करने योग्य कदम:`;
+          if (feeStr) steps += ` फीस ${feeStr} देखें।`;
+          if (dateStr) steps += ` तारीख ${dateStr} ध्यान रखें।`;
+          if (docsStr) steps += ` जरूरी दस्तावेज: ${docsStr}।`;
+          if (elementHint) steps += ` मुख्य बटन या लिंक: ${elementHint}।`;
+          if (!feeStr && !dateStr && !docsStr && leadIntro) steps += ` ${leadIntro}।`;
+          return steps;
+        }
+        let steps = `To act on "${title}":`;
+        if (feeStr) steps += ` check fee ${feeStr}.`;
+        if (dateStr) steps += ` note deadline ${dateStr}.`;
+        if (docsStr) steps += ` prepare documents: ${docsStr}.`;
+        if (elementHint) steps += ` main actions available: ${elementHint}.`;
+        if (!feeStr && !dateStr && !docsStr && leadIntro) steps += ` ${leadIntro}`;
+        return steps;
+      }
+
+      if (isHindi) {
+        let summary = opts.level === 'child'
+          ? `सरल शब्दों में, यह पेज "${title}" के बारे में है।`
+          : `यह पेज "${title}" है।`;
+        if (leadIntro) summary += ` मुख्य जानकारी: ${leadIntro}।`;
+        if (headings.length > 0 && opts.level !== 'child') summary += ` इसमें मुख्य भाग शामिल हैं: ${headings.slice(0, 3).join(', ')}।`;
+        if (feeStr) summary += ` शुल्क विवरण: ${feeStr}।`;
+        if (dateStr) summary += ` मुख्य तारीख: ${dateStr}।`;
+        if (docsStr) summary += ` दस्तावेज: ${docsStr}।`;
+        summary += ` आप आगे की जानकारी के लिए "पेज पढ़ो" या आउटलाइन का उपयोग कर सकते हैं।`;
+        return summary;
+      } else {
+        let summary = opts.level === 'child'
+          ? `In easy words, "${title}" is about this topic.`
+          : `This page is "${title}".`;
+        if (leadIntro) summary += ` ${leadIntro}`;
+        if (headings.length > 0 && opts.level !== 'child') summary += ` Key sections include: ${headings.slice(0, 3).join(', ')}.`;
+        if (feeStr) summary += ` Fee information: ${feeStr}.`;
+        if (dateStr) summary += ` Key deadline: ${dateStr}.`;
+        if (docsStr) summary += ` Required documents: ${docsStr}.`;
+        summary += ` You can navigate sections using Outline or say "Read this page" to hear everything.`;
+        return summary;
+      }
+    }
+
+    /**
+     * Primary Explain & Q&A Pipeline:
+     * 1. Build privacy-safe digest + select top 2-3 keyword chunks for Q&A/section queries.
+     * 2. Enforce token budgets + 3-turn compact memory.
+     * 3. Cascade via service worker (cache -> Gemini -> Proxy -> Ollama -> offline).
+     * 4. Validate numbers/dates against visible page text and present cleanly.
+     */
+    async runExplainPipeline(sectionQueryOrOptions = null) {
+      const widgetLang = (this.widget && this.widget.lang) || 'en-IN';
+      const opts = this._normalizeOptions(sectionQueryOrOptions, widgetLang);
+      const rawLang = opts.lang || widgetLang;
+      const lang = rawLang === 'auto'
+        ? ((this.widget && this.widget.voice && this.widget.voice.activeLang) || 'hi-IN')
+        : rawLang;
+      const isHindi = String(lang).startsWith('hi');
+
+      // Abort any ongoing request cleanly before launching a new one
+      this.abort();
+      this.activeAbortController = new AbortController();
+      const myAbort = this.activeAbortController;
+      const myGen = ++this._streamGen;
+      this._inFlight = true;
+      const isCancelledOrStale = () => (
+        myAbort.signal.aborted ||
+        this.activeAbortController !== myAbort ||
+        this._streamGen !== myGen
+      );
+
+      // Privacy safeguard: respect user toggle disabling page-context analysis
+      if (this.widget && this.widget.memory && typeof this.widget.memory.loadPrivacySettings === 'function') {
+        await this.widget.memory.loadPrivacySettings().catch(() => null);
+      }
+      if (this.widget && this.widget.memory && this.widget.memory.privacy && this.widget.memory.privacy.disablePageAnalysis) {
+        this._inFlight = false;
+        const msg = isHindi
+          ? 'गोपनीयता सेटिंग में पेज-संदर्भ विश्लेषण अभी बंद है।'
+          : 'Page-context analysis is currently disabled in Privacy Settings. Re-enable it in Options to analyze webpage text.';
+        if (this.widget && typeof this.widget.setAssistantReply === 'function') this.widget.setAssistantReply(msg);
+        if (typeof window !== 'undefined' && window.SW_UI) {
+          window.SW_UI.setState('speaking');
+          window.SW_UI.showCard({ type: 'answer', title: 'Privacy Mode Active', text: msg });
+        }
+        if (this.widget && this.widget.reader) this.widget.reader.readText(msg);
+        return { answer: msg, source: 'privacy_disabled', privacyBlocked: true };
+      }
+
+      // Verify section target against actual DOM headings/landmarks so random speech fragments never become fake section titles
+      let verifiedSectionTitle = '';
+      if (opts.target && opts.mode !== 'qa') {
+        let matchedHeading = null;
+        if (this.widget && this.widget.outline) {
+          if (!this.widget.outline.items || this.widget.outline.items.length === 0) {
+            if (typeof this.widget.outline.extractOutline === 'function') {
+              this.widget.outline.extractOutline();
+            }
+          }
+          if (typeof this.widget.outline.fuzzyFindHeading === 'function') {
+            matchedHeading = this.widget.outline.fuzzyFindHeading(opts.target);
+          }
+        }
+        if (!matchedHeading && typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+          const tLower = opts.target.toLowerCase();
+          const domHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+            .filter((h) => this._isVisible(h))
+            .map((h) => (h.textContent || '').replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+          const foundText = domHeadings.find((ht) => ht.toLowerCase().includes(tLower) || tLower.includes(ht.toLowerCase()));
+          if (foundText) matchedHeading = { text: foundText };
+        }
+        if (matchedHeading && matchedHeading.text) {
+          verifiedSectionTitle = matchedHeading.text.replace(/\s+/g, ' ').trim();
+        } else {
+          // Requested section does not exist in page headings — fall back to whole-page summary instead of inventing a fake section title
+          opts.target = '';
+          if (opts.mode === 'section') opts.mode = 'summary';
+        }
+      }
+
+      // 1. Visual states: PREPARING
+      let statusPrompt = isHindi ? 'पेज को सरल भाषा में समझा रहे हैं...' : 'Analyzing page to explain...';
+      if (opts.mode === 'qa' && opts.query) {
+        statusPrompt = isHindi ? `प्रश्न देख रहे हैं: "${opts.query}"...` : `Finding answer for "${opts.query}"...`;
+      } else if (opts.mode === 'action_steps') {
+        statusPrompt = isHindi ? 'आवश्यक कदम और दस्तावेज देख रहे हैं...' : 'Finding steps, fees, dates & documents...';
+      } else if (verifiedSectionTitle) {
+        statusPrompt = isHindi ? `"${verifiedSectionTitle}" भाग समझाया जा रहा है...` : `Analyzing "${verifiedSectionTitle}" section...`;
+      }
+
+      if (typeof window !== 'undefined' && window.SW_UI) {
+        window.SW_UI.setState('thinking');
+        window.SW_UI.setTranscript(statusPrompt);
+        if (this._canUseStreamPort()) {
+          window.SW_UI.showCard({
+            type: opts.mode === 'qa' ? 'answer' : 'summary',
+            title: opts.mode === 'qa' ? 'Answer' : (verifiedSectionTitle ? `Section: ${verifiedSectionTitle}` : 'Page Summary'),
+            stepLabel: isHindi ? 'सोच रहा हूँ...' : 'Thinking...',
+            streamStatus: 'thinking',
+            text: statusPrompt,
+            reading: true
+          });
+        }
+      } else {
+        if (this.widget && this.widget.pill) this.widget.pill.setPreparing(statusPrompt);
+        if (this.widget && this.widget.glow) this.widget.glow.setPreparing();
+      }
+      if (this.widget && typeof this.widget.setAssistantReply === 'function') {
+        this.widget.setAssistantReply(`${statusPrompt}\n(Checking digest, cache & AI models...)`);
+      }
+
+      // 2. Build digest & top keyword chunks
+      const digest = this.getPageDigest();
+      const digestApi = this._getDigestApi();
+      const cleanUrl = (digest && digest.urlClean) || this.getCleanUrl();
+      const searchQuery = opts.query || opts.target || '';
+      const isTargeted = opts.mode === 'qa' || opts.mode === 'term' || (opts.mode === 'section' && Boolean(opts.target));
+
+      const pageTextFallback = this.extractPageText(opts.target || null);
+      let digestPrompt = pageTextFallback;
+      let chunksPrompt = '';
+      let topChunks = [];
+
+      if (digest && digestApi) {
+        digestPrompt = digestApi.formatDigestForPrompt(digest, {
+          maxTokens: 1500,
+          maxChunkTokens: 1200,
+          maxChunks: 3,
+          query: searchQuery,
+          target: opts.target,
+          topChunksOnly: isTargeted
+        });
+        if (isTargeted) {
+          topChunks = digestApi.selectTopChunks(digest, searchQuery, {
+            target: opts.target,
+            maxChunks: 3,
+            maxTokens: 1200
+          });
+          if (topChunks.length > 0) {
+            chunksPrompt = digestApi.truncateToTokenBudget(
+              topChunks.map((c) => `[${c.id}|${c.section}] ${c.text}`).join('\n'),
+              1200
+            );
+          }
+        }
+      }
+
+      const rawCustomChunks = (sectionQueryOrOptions && typeof sectionQueryOrOptions === 'object' && typeof sectionQueryOrOptions.customChunksText === 'string')
+        ? sectionQueryOrOptions.customChunksText.trim()
+        : '';
+      if (rawCustomChunks && digestApi) {
+        chunksPrompt = digestApi.truncateToTokenBudget(rawCustomChunks, 1200);
+        digestPrompt = digestApi.truncateToTokenBudget(`${digestPrompt}\n${chunksPrompt}`, 1500);
+      }
+
+      if (this.widget && typeof this.widget.renderDigestOverview === 'function' && digest) {
+        this.widget.renderDigestOverview(digest);
+      }
+
+      const validationSourceText = [
+        digest && digest.fullSafeText ? digest.fullSafeText : '',
+        pageTextFallback,
+        rawCustomChunks
+      ].filter(Boolean).join('\n');
+
+      // 3. 15-Second Honesty Timer
+      this.waitingTimer = setTimeout(() => {
+        const waitMsg = isHindi ? 'प्रोसेसिंग जारी है, रोकने के लिए Stop दबाएं...' : 'Still working, tap Stop to cancel...';
+        if (typeof window !== 'undefined' && window.SW_UI && window.SW_UI.getState() === 'thinking') {
+          window.SW_UI.setTranscript(waitMsg);
+        } else if (this.widget && this.widget.pill && this.widget.pill.state === 'preparing') {
+          this.widget.pill.setStatus(waitMsg);
+        }
+        if (this.widget && typeof this.widget.setAssistantReply === 'function') {
+          this.widget.setAssistantReply(waitMsg);
+        }
+      }, 15000);
+
+      let finalAnswer = null;
+      let sourceLabel = 'basic summary';
+      let degradeNotice = '';
+      let streamLiveText = '';
+      let streamSourceLabel = '';
+      let streamedSpeechStarted = false;
+      let usedStreamingPort = false;
+      const reader = this.widget && this.widget.reader;
+      const cardType = opts.mode === 'qa' ? 'answer' : 'summary';
+      const customCardTitle = (sectionQueryOrOptions && typeof sectionQueryOrOptions === 'object' && sectionQueryOrOptions.customTitle) || '';
+      const cardTitle = customCardTitle || (opts.mode === 'qa' ? 'Answer' : (verifiedSectionTitle ? `Section: ${verifiedSectionTitle}` : 'Page Summary'));
+
+      const clearWaitTimer = () => {
+        if (this.waitingTimer) {
+          clearTimeout(this.waitingTimer);
+          this.waitingTimer = null;
+        }
+      };
+
+      let personalSlice = null;
+      let responseStyle = opts.style || 'standard';
+      let presentationFormat = opts.format || 'standard';
+      const mem = this.widget && this.widget.memory;
+      if (mem) {
+        if (typeof mem.getEffectivePreference === 'function') {
+          responseStyle = mem.getEffectivePreference('responseStyle', responseStyle);
+          presentationFormat = mem.getEffectivePreference('presentationFormat', presentationFormat);
+        }
+        const topic = (mem.state && mem.state.currentTopic) || '';
+        const task = mem.state && mem.state.activeTask;
+        const iso = (searchQuery && typeof mem.getSeparatedEntityContext === 'function')
+          ? mem.getSeparatedEntityContext(searchQuery)
+          : null;
+        personalSlice = {
+          topic: iso && iso.entity ? iso.entity.entityName : topic,
+          objective: task ? task.objective : '',
+          constraints: task && task.constraints ? Object.entries(task.constraints).map(([k, v]) => `${k}=${v}`).slice(0, 4) : [],
+          preferOfficialSources: Boolean(typeof mem.getEffectivePreference === 'function' && mem.getEffectivePreference('preferOfficialSources', false)),
+          relevantFacts: iso && iso.entity ? (iso.entity.facts || []).slice(0, 2) : []
+        };
+      }
+
+      const digestTokens = (digest && digest.stats && digest.stats.totalTextTokens) || Math.ceil(String(digestPrompt || '').length / 4);
+      const qStr = String(opts.query || '').trim();
+      const isSpecialistTask = Boolean(
+        opts.specialist === true ||
+        opts.explicitGemini === true ||
+        opts.isVideoExplain === true ||
+        opts.isDocumentAnalysis === true ||
+        opts.mode === 'summary' ||
+        opts.mode === 'summarize' ||
+        opts.mode === 'action_steps' ||
+        responseStyle === 'detailed' ||
+        digestTokens > 1200 ||
+        qStr.length > 180 ||
+        /\b(?:summarize|summary|analyze|analysis|compare|comparison|explain in detail|deep dive)\b/i.test(qStr)
+      );
+
+      try {
+        const response = await this._sendToBackgroundCascade({
+          urlClean: cleanUrl,
+          pageTextHash: digest ? digest.pageTextHash : '',
+          mode: opts.mode,
+          level: responseStyle === 'simple' && opts.level === 'standard' ? 'simple' : opts.level,
+          responseStyle,
+          presentationFormat,
+          section: opts.target || 'all',
+          target: opts.target,
+          query: opts.query,
+          lang,
+          specialist: isSpecialistTask,
+          geminiSpecialist: isSpecialistTask,
+          skipGemini: !isSpecialistTask,
+          isComplexDocument: digestTokens > 1200,
+          isVideoExplain: Boolean(opts.isVideoExplain),
+          digestPrompt,
+          chunksPrompt,
+          pageText: digestPrompt,
+          memory: this.turnMemory.slice(-3),
+          personalContext: personalSlice
+        }, {
+          onAck: () => {
+            usedStreamingPort = true;
+          },
+          onMeta: (meta) => {
+            if (isCancelledOrStale()) return;
+            usedStreamingPort = true;
+            if (meta && meta.source) streamSourceLabel = String(meta.source);
+            if (typeof window !== 'undefined' && window.SW_UI) {
+              window.SW_UI.updateCard({
+                type: cardType,
+                title: cardTitle,
+                stepLabel: streamSourceLabel ? `Streaming · ${streamSourceLabel}` : 'Streaming...',
+                streamStatus: 'streaming',
+                text: streamLiveText || statusPrompt,
+                reading: true
+              });
+            }
+          },
+          onDelta: (ev) => {
+            if (isCancelledOrStale()) return;
+            usedStreamingPort = true;
+            clearWaitTimer();
+            streamLiveText = (ev && ev.text) ? ev.text : (streamLiveText + ((ev && ev.delta) || ''));
+            if (this.widget && typeof this.widget.setAssistantReply === 'function') {
+              this.widget.setAssistantReply(streamLiveText);
+            }
+            if (typeof window !== 'undefined' && window.SW_UI) {
+              window.SW_UI.setState('speaking');
+              window.SW_UI.updateCard({
+                type: cardType,
+                title: cardTitle,
+                stepLabel: streamSourceLabel ? `Live · ${streamSourceLabel}` : 'Live',
+                streamStatus: 'streaming',
+                text: streamLiveText,
+                reading: true
+              });
+            }
+          },
+          onSpeakChunk: (ev) => {
+            if (isCancelledOrStale()) return;
+            const rawChunk = ev && ev.sentence ? String(ev.sentence).trim() : '';
+            if (!rawChunk) return;
+            const safeChunk = this.validateAnswer(rawChunk, validationSourceText);
+            if (!safeChunk || !reader) return;
+            if (!streamedSpeechStarted) {
+              streamedSpeechStarted = true;
+              if (typeof reader.startStream === 'function') {
+                reader.startStream({ lang });
+              }
+            }
+            if (typeof reader.enqueueStreamChunk === 'function') {
+              reader.enqueueStreamChunk(safeChunk);
+            } else {
+              reader.readText(safeChunk);
+            }
+          }
+        });
+
+        if (isCancelledOrStale() || (response && response.cancelled)) {
+          if (streamedSpeechStarted && reader && typeof reader.cancelStream === 'function') {
+            reader.cancelStream();
+          }
+          clearWaitTimer();
+          return null;
+        }
+
+        if (response && response.degradeMessage) {
+          degradeNotice = response.degradeMessage;
+        }
+
+        if (response && response.status === 'ok' && response.answer) {
+          const validated = this.validateAnswer(response.answer, validationSourceText);
+          if (validated) {
+            finalAnswer = validated;
+            sourceLabel = response.source || 'cloud';
+          }
+        }
+      } catch (err) {
+        console.warn('[Sleepwalker Explainer] Cascade request error:', err.message);
+      } finally {
+        clearWaitTimer();
+        if (this.activeAbortController === myAbort) {
+          this._inFlight = false;
+        }
+      }
+
+      if (isCancelledOrStale()) {
+        if (streamedSpeechStarted && reader && typeof reader.cancelStream === 'function') {
+          reader.cancelStream();
+        }
+        return null;
+      }
+
+      if (!finalAnswer) {
+        if (streamedSpeechStarted && reader && typeof reader.cancelStream === 'function') {
+          reader.cancelStream();
+          streamedSpeechStarted = false;
+        }
+        finalAnswer = this.generateBasicSummary(pageTextFallback, opts, lang, digest);
+        sourceLabel = 'basic summary';
+      }
+
+      this.recordTurnMemory({
+        query: opts.query || opts.target || opts.mode,
+        mode: opts.mode,
+        answerSnippet: finalAnswer
+      });
+
+      if (this.widget && this.widget.glow && !(typeof window !== 'undefined' && window.SW_UI)) {
+        this.widget.glow.setReady();
+      }
+
+      const isRegional = !isHindi && !String(lang).toLowerCase().startsWith('en');
+      let displayBadge = `[Source: ${sourceLabel}]`;
+      if (degradeNotice) {
+        displayBadge += ` (${degradeNotice})`;
+      } else if (isHindi && String(sourceLabel).includes('ollama')) {
+        displayBadge += ' ⚠️ Local Hindi accuracy may be lower.';
+      } else if (isRegional && sourceLabel === 'basic summary') {
+        displayBadge += ` (Offline extractive summary — connect Gemini/Ollama for full ${lang} translation)`;
+      }
+
+      const completeAnnouncement = () => {
+        const fullAnnouncement = `${displayBadge}\n${finalAnswer}`;
+        if (this.widget && typeof this.widget.setAssistantReply === 'function') {
+          this.widget.setAssistantReply(fullAnnouncement);
+        }
+
+        if (typeof window !== 'undefined' && window.SW_UI) {
+          const sentences = finalAnswer.match(/[^.!?।]+[.!?।]*/g) || [finalAnswer];
+          let topics = null;
+          if (!usedStreamingPort && opts.mode !== 'qa' && sentences.length >= 2) {
+            topics = sentences.map((s, idx) => ({
+              title: idx === 0 ? 'Overview' : (idx === sentences.length - 1 ? 'Next Step' : `Detail ${idx}`),
+              text: s.trim()
+            }));
+          }
+          this._topicSentenceOffsets = topics ? topics.map((_, i) => i) : null;
+          let numberedItems = null;
+          if (presentationFormat === 'numbered' || presentationFormat === 'steps') {
+            const parts = finalAnswer.split(/(?<=[.!?।])\s+/).map((s) => s.trim()).filter((s) => s.length > 4);
+            if (parts.length >= 2) numberedItems = parts.slice(0, 6);
+          }
+          const displayAnswer = (responseStyle === 'concise' && !usedStreamingPort)
+            ? finalAnswer.split(/\s+/).slice(0, 55).join(' ')
+            : finalAnswer;
+          window.SW_UI.setState('speaking');
+          const cardSpec = {
+            type: cardType,
+            title: cardTitle,
+            stepLabel: sourceLabel,
+            streamStatus: 'complete',
+            text: topics ? '' : (numberedItems ? '' : displayAnswer),
+            topics: numberedItems ? null : topics,
+            numberedItems,
+            reading: true,
+            onAction: (act) => {
+              if (!this.widget || !this.widget.reader) return;
+              if (act === 'pause') this.widget.reader.pause();
+              else if (act === 'resume') this.widget.reader.resume();
+            }
+          };
+          if (streamedSpeechStarted || usedStreamingPort) {
+            window.SW_UI.updateCard(cardSpec);
+          } else {
+            window.SW_UI.showCard(cardSpec);
+          }
+        } else {
+          if (this.widget && this.widget.pill) {
+            const shortPreview = finalAnswer.length > 50 ? finalAnswer.substring(0, 48) + '...' : finalAnswer;
+            this.widget.pill.setStatus(`[${sourceLabel}] "${shortPreview}"`);
+            this.widget.pill.setSpeaking(`[${sourceLabel}] "${shortPreview}"`);
+          }
+          if (this.widget && this.widget.glow) this.widget.glow.setSpeaking();
+        }
+
+        if (reader) {
+          if (typeof reader.setLang === 'function') {
+            reader.setLang(lang);
+          }
+          if (streamedSpeechStarted && typeof reader.finishStream === 'function') {
+            reader.finishStream();
+          } else {
+            reader.readText(finalAnswer);
+          }
+        }
+      };
+
+      completeAnnouncement();
+      return { answer: finalAnswer, source: sourceLabel, degradeNotice };
+    }
+
+    /**
+     * Send explain request over persistent Chrome Port (`sw-ai-stream`) when available,
+     * falling back cleanly to `chrome.runtime.sendMessage` in REST-only / mock environments.
+     */
+    _sendToBackgroundCascade(payload, streamCbs = null) {
+      if (streamCbs && this._canUseStreamPort()) {
+        const client = this._getOrCreateStreamClient();
+        if (client) {
+          let receivedAnyStreamEvent = false;
+          const wrappedCbs = {
+            onAck: (ev) => { receivedAnyStreamEvent = true; if (streamCbs.onAck) streamCbs.onAck(ev); },
+            onMeta: (ev) => { receivedAnyStreamEvent = true; if (streamCbs.onMeta) streamCbs.onMeta(ev); },
+            onDelta: (ev) => { receivedAnyStreamEvent = true; if (streamCbs.onDelta) streamCbs.onDelta(ev); },
+            onSpeakChunk: (ev) => { receivedAnyStreamEvent = true; if (streamCbs.onSpeakChunk) streamCbs.onSpeakChunk(ev); }
+          };
+          return client.runExplainStream(payload, wrappedCbs).then((res) => {
+            if (!receivedAnyStreamEvent && res && res.interrupted && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+              return this._sendToBackgroundMessageFallback(payload);
+            }
+            return res;
+          });
+        }
+      }
+      return this._sendToBackgroundMessageFallback(payload);
+    }
+
+    _sendToBackgroundMessageFallback(payload) {
+      return new Promise((resolve) => {
+        if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+          resolve({ status: 'fallback', source: 'basic summary' });
+          return;
+        }
+
+        chrome.runtime.sendMessage(
+          {
+            type: 'SLEEPWALKER_EXPLAIN_REQUEST',
+            payload
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              console.warn('[Sleepwalker] Background communication error:', chrome.runtime.lastError.message);
+              resolve({ status: 'fallback', source: 'basic summary' });
+            } else {
+              resolve(response || { status: 'fallback', source: 'basic summary' });
+            }
+          }
+        );
+      });
+    }
+
+    /**
+     * Abort active explanation request, cancel upstream stream, stop streaming TTS, and clear timers.
+     */
+    abort() {
+      this._streamGen += 1;
+      this._inFlight = false;
+      if (this.waitingTimer) {
+        clearTimeout(this.waitingTimer);
+        this.waitingTimer = null;
+      }
+      if (this.activeAbortController) {
+        this.activeAbortController.abort();
+        this.activeAbortController = null;
+      }
+      if (this.streamClient && typeof this.streamClient.cancel === 'function') {
+        this.streamClient.cancel('explainer_abort');
+      }
+      if (this.widget && this.widget.reader && typeof this.widget.reader.cancelStream === 'function' && this.widget.reader.isStreamingActive && this.widget.reader.isStreamingActive()) {
+        this.widget.reader.cancelStream();
+      }
+    }
+  }
+
+  return { SleepwalkerExplainer };
+});

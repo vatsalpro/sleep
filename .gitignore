@@ -1,0 +1,13 @@
+# Environment & Local Secrets (Excluded to protect credentials & pass GitHub push protection)
+.env
+.env.*
+!.env.example
+config.local.js
+*.local.js
+
+# Temporary automated test browser profiles & build cache
+tests/chrome-*/
+stagehand-bridge/node_modules/
+dist/
+[Oo]bj/
+*.log

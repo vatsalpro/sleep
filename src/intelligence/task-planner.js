@@ -1,0 +1,712 @@
+/**
+ * Sleepwalker - task-planner.js (Phase 3)
+ * Structured Multi-Step Task Planning, Booking Constraint Collection,
+ * Failure Recording/Recovery & Voice-Driven Task Control.
+ *
+ * Works tightly with SleepwalkerMemory, SleepwalkerConfirm, SleepwalkerDialogue,
+ * and floating Progress Card UI without inventing prices, availability, or URLs.
+ */
+(function (rootScope) {
+  'use strict';
+
+  if (rootScope.SleepwalkerTaskPlanner) return;
+
+  const TASK_STATUSES = {
+    CREATED: 'CREATED',
+    PLANNING: 'PLANNING',
+    RUNNING: 'RUNNING',
+    WAITING_FOR_USER: 'WAITING_FOR_USER',
+    PAUSED: 'PAUSED',
+    RECOVERING: 'RECOVERING',
+    COMPLETED: 'COMPLETED',
+    FAILED: 'FAILED',
+    CANCELLED: 'CANCELLED'
+  };
+
+  function makeStep(id, label, actionType = 'research', status = 'pending', meta = {}) {
+    return {
+      id,
+      label,
+      actionType,
+      status, // 'done' | 'active' | 'pending' | 'failed' | 'skipped'
+      target: meta.target || '',
+      url: meta.url || '',
+      note: meta.note || '',
+      requiresConfirm: Boolean(meta.requiresConfirm),
+      completedAt: status === 'done' ? new Date().toISOString() : null
+    };
+  }
+
+  class SleepwalkerTaskPlanner {
+    constructor(widget) {
+      this.widget = widget || null;
+      this.lastRecoveryOffer = null;
+    }
+
+    get memory() {
+      return this.widget && this.widget.memory;
+    }
+
+    get diagnostics() {
+      return this.widget && this.widget.diagnostics;
+    }
+
+    /**
+     * Extract user constraints from natural language (free courses, dates, guests, budget, location).
+     */
+    extractConstraints(rawText = '', existing = {}) {
+      const text = String(rawText || '').trim();
+      const lower = text.toLowerCase();
+      const out = { ...(existing && typeof existing === 'object' ? existing : {}) };
+
+      if (/\b(?:free|no\s+cost|tuition[- ]?free|audit\s+only|zero\s+fee)\b/i.test(lower)) {
+        out.freeOnly = true;
+      }
+      if (/\b(?:undergrad|bachelor|bsc|ba|b\.tech)\b/i.test(lower)) out.degreeLevel = 'Bachelor';
+      else if (/\b(?:graduate|master|msc|ma|m\.tech|phd|doctorate)\b/i.test(lower)) out.degreeLevel = 'Graduate';
+
+      const guestsMatch = lower.match(/\b(\d+)\s*(?:guests?|adults?|people|persons?|travelers?|travellers?|rooms?)\b/i);
+      if (guestsMatch) {
+        out.guests = Number(guestsMatch[1]);
+      }
+
+      const dateRangeMatch = text.match(
+        /\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:\s*(?:-|to|through|until)\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+)?\d{1,2})?|\d{4}-\d{2}-\d{2}(?:\s+to\s+\d{4}-\d{2}-\d{2})?|next\s+(?:week|month|weekend)|tomorrow(?:\s+for\s+\d+\s+nights?)?)\b/i
+      );
+      if (dateRangeMatch) {
+        out.dates = dateRangeMatch[1].trim();
+      }
+
+      const nightsMatch = lower.match(/\bfor\s+(\d+)\s+nights?\b/i);
+      if (nightsMatch) {
+        out.nights = Number(nightsMatch[1]);
+      }
+
+      const budgetMatch = text.match(/(?:\$|usd|€|eur|₹|inr|£|gbp|yen|jpy)\s*\d[\d,]*/i);
+      if (budgetMatch) {
+        out.budget = budgetMatch[0].trim();
+      } else {
+        const qualMatch = lower.match(/\b(affordable|cheap|mid[- ]?range|luxury)\b/i) || lower.match(/\b(budget)\b/i);
+        if (qualMatch) out.budget = qualMatch[1];
+      }
+
+      return out;
+    }
+
+    /**
+     * Determine whether an utterance represents a structured multi-step workflow
+     * (never forcing simple navigation, scroll, read, or within-page search into a heavyweight plan).
+     */
+    isMultiStepObjective(rawText = '', resolvedContext = {}, centralIntent = null) {
+      const lower = String((resolvedContext && resolvedContext.resolvedText) || rawText || '').toLowerCase();
+      if (!lower) return false;
+
+      // Never treat pure single simple actions as multi-step task creations
+      if (
+        centralIntent &&
+        ['PAGE_SEARCH', 'PAGE_SUMMARIZATION', 'PAGE_EXPLANATION', 'CONVERSATION_CONTROL'].includes(centralIntent.category)
+      ) {
+        return false;
+      }
+
+      if (/\b(?:apply\s+(?:for|to)\s+a?\s*master'?s|master'?s\s+degree\s+abroad|help\s+me\s+(?:plan|book|apply|find|compare|research)|plan\s+(?:a\s+)?(?:trip|vacation|travel|journey)\s+to)\b/i.test(lower)) {
+        return true;
+      }
+      if (/\b(?:find\s+(?:me\s+)?(?:(?:the\s+)?(?:best|good|great|top|affordable|free|recommended|a|some)\s+)?(?:hotel|hotels|flight|flights|universities|colleges|laptops|courses)|research\s+(?:china|japan|germany|[a-z]+\s+universities|visa|travel)|compare\s+(?:specifications|specs|certifications|admission\s+requirements))\b/i.test(lower)) {
+        return true;
+      }
+      if (/\bflights\s+and\s+(?:accommodation|hotels?)\b/i.test(lower)) {
+        return true;
+      }
+      return false;
+    }
+
+    /**
+     * Classify the workflow domain and return clean, realistic steps & metadata.
+     */
+    buildPlanTemplate(rawText = '', resolvedContext = {}, pageDigest = {}) {
+      const resolved = String((resolvedContext && resolvedContext.resolvedText) || rawText || '').trim();
+      const lower = resolved.toLowerCase();
+      const existingTopic = (resolvedContext && (resolvedContext.resolvedEntity || resolvedContext.resolvedTopic)) ||
+        (this.memory && this.memory.state.currentTopic) || '';
+      const constraints = this.extractConstraints(resolved, (this.memory && this.memory.state.activeTask && this.memory.state.activeTask.constraints) || {});
+
+      // Domain 1: Booking / Accommodation / Flights ("Find me a hotel in Tokyo", "Help me book flights...")
+      if (/\b(?:hotel|hotels|accommodation|stay|resort|book\s+(?:a\s+)?(?:hotel|flight|ticket)|flights?\s+to|flights\s+and\s+accommodation)\b/i.test(lower)) {
+        const placeMatch = lower.match(/\b(?:in|to|for)\s+([a-z][a-z\s]{1,30})(?:\s|$)/i);
+        const dest = (placeMatch && placeMatch[1] && !/^(?:a|the|my|me)$/i.test(placeMatch[1].trim()))
+          ? placeMatch[1].trim().replace(/\b\w/g, (m) => m.toUpperCase())
+          : (existingTopic || 'Destination');
+        const isFlight = /\bflights?\b/i.test(lower) && !/\bhotels?|accommodation\b/i.test(lower);
+        const needDatesOrGuests = !constraints.dates || (!isFlight && !constraints.guests);
+
+        const steps = [
+          makeStep('identify_dest', `Identify destination (${dest})`, 'plan', 'done'),
+          makeStep('collect_reqs', needDatesOrGuests ? 'Collect travel dates and guest/passenger details' : `Requirements set (${constraints.dates}${constraints.guests ? `, ${constraints.guests} guests` : ''})`, 'collect_constraints', needDatesOrGuests ? 'active' : 'done'),
+          makeStep('compare_providers', `Compare official & verified ${isFlight ? 'airline' : 'accommodation'} providers`, 'research', needDatesOrGuests ? 'pending' : 'active'),
+          makeStep('assist_form', 'Open selected provider & assist non-sensitive booking fields', 'navigate_interact', 'pending'),
+          makeStep('confirm_booking', 'Review final details & request explicit confirmation before booking', 'confirm_submit', 'pending', { requiresConfirm: true })
+        ];
+
+        return {
+          domain: isFlight ? 'flight_booking' : 'hotel_booking',
+          topic: dest,
+          interpretedObjective: `${isFlight ? 'Find flights' : 'Find accommodation'} in ${dest} with user-controlled booking preparation`,
+          constraints,
+          plannedSteps: steps,
+          currentStep: needDatesOrGuests ? 'collect_reqs' : 'compare_providers',
+          status: needDatesOrGuests ? TASK_STATUSES.WAITING_FOR_USER : TASK_STATUSES.RUNNING,
+          missingConstraintsPrompt: needDatesOrGuests
+            ? `Planning ${isFlight ? 'flights' : 'accommodation'} for ${dest}. What travel dates${!isFlight && !constraints.guests ? ' and how many guests' : ''} do you prefer? (You can also ask me to open official portals directly.)`
+            : ''
+        };
+      }
+
+      // Domain 2: Travel Research & Trip Planning ("Help me plan a trip to Japan", "Research China")
+      if (/\b(?:trip|vacation|travel|visa|research\s+(?:japan|china|germany|france|uk|usa|india|canada|australia))\b/i.test(lower) && !/\buniversities|colleges|courses|laptops\b/i.test(lower)) {
+        const countryMatch = lower.match(/\b(?:trip\s+to|travel\s+to|research|visit)\s+([a-z][a-z\s]{1,28})(?:[.?!]|$)/i);
+        const dest = (countryMatch && countryMatch[1] && !/\b(?:website|site|page)\b/i.test(countryMatch[1]))
+          ? countryMatch[1].trim().replace(/\b\w/g, (m) => m.toUpperCase())
+          : (existingTopic || 'Destination');
+        const isVisaStep = /\bvisa|entry\s+requirements\b/i.test(lower);
+
+        const steps = [
+          makeStep('research_travel', `Research travel requirements for ${dest}`, 'research', isVisaStep ? 'done' : 'done'),
+          makeStep('check_visa', `Check official ${dest} visa & immigration rules`, 'research', isVisaStep ? 'done' : 'active'),
+          makeStep('find_flights', `Find flight options to ${dest}`, 'research', 'pending'),
+          makeStep('compare_stays', `Compare accommodation in ${dest}`, 'research', 'pending'),
+          makeStep('local_transport', `Check local transport info in ${dest}`, 'research', 'pending'),
+          makeStep('organize_summary', 'Organize summary & verified official sources', 'summarize', 'pending'),
+          makeStep('assisted_booking', 'Assist booking preparation (explicit confirmation required)', 'confirm_submit', 'pending', { requiresConfirm: true })
+        ];
+
+        return {
+          domain: 'travel_planning',
+          topic: dest,
+          interpretedObjective: `Plan travel & research official entry/visa, transport, and stay options for ${dest}`,
+          constraints,
+          plannedSteps: steps,
+          currentStep: isVisaStep ? 'find_flights' : 'check_visa',
+          status: TASK_STATUSES.RUNNING
+        };
+      }
+
+      // Domain 3: Universities & Admissions Research ("Find good universities in Germany", "Apply for a master's degree abroad")
+      if (/\b(?:universities|university|colleges|admission\s+requirements|tuition|master'?s\s+degree|study\s+abroad)\b/i.test(lower)) {
+        const region = /\bgermany\b/i.test(lower) ? 'Germany' : (existingTopic || 'Higher Education');
+        const isCompare = /\bcompare\b/i.test(lower);
+        const isDeadlineCheck = /\bdeadline/i.test(lower);
+        const isTuitionCheck = /\btuition|fee/i.test(lower);
+        const isFullApplyGoal = /\bapply\b|\bmaster'?s\b|\babroad\b/i.test(lower);
+        const steps = isFullApplyGoal
+          ? [
+              makeStep('search_unis', `Research universities in ${region}`, 'research', 'done'),
+              makeStep('compare_tuition', 'Compare tuition fees & living costs', 'compare', isTuitionCheck ? 'done' : (isCompare ? 'done' : 'active')),
+              makeStep('check_eligibility', 'Check eligibility & language criteria', 'research', 'pending'),
+              makeStep('compare_reqs', 'Compare admission requirements', 'compare', isCompare ? 'done' : 'pending'),
+              makeStep('identify_deadlines', 'Identify application deadlines from official portals', 'research', isDeadlineCheck ? 'done' : 'pending'),
+              makeStep('find_docs', 'Find required application documents (transcripts, SOP, LOR)', 'research', 'pending'),
+              makeStep('open_app_page', 'Open official university application portals', 'navigate', 'pending'),
+              makeStep('assist_checklist', 'Prepare application info (explicit confirm before submit)', 'form_assist', 'pending', { requiresConfirm: true })
+            ]
+          : [
+              makeStep('search_unis', `Search universities in ${region}`, 'research', 'done'),
+              makeStep('identify_official', 'Identify universities & official .de/.edu sites', 'research', 'done'),
+              makeStep('compare_reqs', 'Compare admission requirements & tuition portals', 'compare', isCompare ? 'done' : 'active'),
+              makeStep('identify_deadlines', 'Identify official application deadlines', 'research', isDeadlineCheck ? 'done' : 'pending'),
+              makeStep('open_app_page', 'Open selected university official application page', 'navigate', isCompare ? 'active' : 'pending'),
+              makeStep('assist_checklist', 'Review requirements or assist application form (confirm before submit)', 'form_assist', 'pending', { requiresConfirm: true })
+            ];
+
+        return {
+          domain: 'university_research',
+          parentObjective: isFullApplyGoal ? 'Apply for a master\'s degree abroad' : `Higher education research in ${region}`,
+          topic: region,
+          interpretedObjective: isFullApplyGoal
+            ? `Apply for a master's degree${region !== 'Higher Education' ? ` in ${region}` : ' abroad'}: research universities, tuition, requirements & deadlines`
+            : `Research universities in ${region}, compare admission requirements, and navigate official application pages`,
+          constraints,
+          plannedSteps: steps,
+          currentStep: isDeadlineCheck ? 'find_docs' : (isCompare ? 'open_app_page' : 'compare_reqs'),
+          status: TASK_STATUSES.RUNNING
+        };
+      }
+
+      // Domain 4: Courses & Certifications ("Find courses and compare certifications", "Search for AI courses")
+      if (/\b(?:courses?|certifications?|MOOC|tutorial|curriculum)\b/i.test(lower)) {
+        const subjMatch = lower.match(/\b(?:for|about|in)\s+([a-z0-9][a-z0-9\s+.#-]{1,35}?)\s+(?:courses?|certifications?)\b/i) ||
+          lower.match(/\b(?:courses?|certifications?)\s+(?:on|in|for|about)\s+([a-z0-9][a-z0-9\s+.#-]{1,35})/i);
+        const subject = (subjMatch && subjMatch[1] ? subjMatch[1].trim() : '') || 'AI & CS';
+        const isCompare = /\bcompare\b/i.test(lower);
+
+        const steps = [
+          makeStep('search_courses', `Search courses${subject ? ` (${subject})` : ''}`, 'research', 'done'),
+          makeStep('filter_criteria', constraints.freeOnly ? 'Applied free-course filter criteria' : 'Identify course providers & free/paid options', 'filter', constraints.freeOnly ? 'done' : 'active'),
+          makeStep('compare_certs', 'Compare certifications & syllabus details', 'compare', isCompare ? 'done' : 'pending'),
+          makeStep('open_course', 'Open selected official course page', 'navigate', 'pending')
+        ];
+
+        return {
+          domain: 'course_research',
+          topic: `${subject} Courses`,
+          interpretedObjective: `Find ${constraints.freeOnly ? 'free ' : ''}${subject} courses and compare certification options`,
+          constraints,
+          plannedSteps: steps,
+          currentStep: isCompare ? 'open_course' : 'filter_criteria',
+          status: TASK_STATUSES.RUNNING
+        };
+      }
+
+      // Domain 5: Product Search & Comparison ("Find laptops", "Compare specifications")
+      if (/\b(?:laptops?|notebooks?|products?|phones?|headphones?|monitors?|specs?|specifications)\b/i.test(lower)) {
+        const isCompare = /\bcompare\b/i.test(lower);
+        const steps = [
+          makeStep('search_products', 'Search product options', 'research', 'done'),
+          makeStep('extract_specs', 'Extract specifications & official brand URLs', 'research', 'done'),
+          makeStep('compare_products', 'Compare selected product specifications', 'compare', isCompare ? 'done' : 'active'),
+          makeStep('open_product_page', 'Open selected product official page (checkout always user-confirmed)', 'navigate', isCompare ? 'active' : 'pending')
+        ];
+
+        return {
+          domain: 'product_research',
+          topic: existingTopic || 'Laptops',
+          interpretedObjective: 'Search products, preserve identity, compare real specifications, and open product pages',
+          constraints,
+          plannedSteps: steps,
+          currentStep: isCompare ? 'open_product_page' : 'compare_products',
+          status: TASK_STATUSES.RUNNING
+        };
+      }
+
+      // Domain 6: Routine Form / Website Workflow
+      const steps = [
+        makeStep('understand_goal', `Interpret goal: ${resolved.slice(0, 60)}`, 'plan', 'done'),
+        makeStep('locate_target', 'Identify target links, filters, or form controls', 'interact', 'active'),
+        makeStep('execute_safe', 'Execute requested browsing steps', 'navigate', 'pending'),
+        makeStep('verify_result', 'Verify outcome & keep you in control', 'verify', 'pending', { requiresConfirm: true })
+      ];
+      return {
+        domain: 'general_workflow',
+        topic: existingTopic || (pageDigest && pageDigest.title) || 'Web Workflow',
+        interpretedObjective: resolved,
+        constraints,
+        plannedSteps: steps,
+        currentStep: 'locate_target',
+        status: TASK_STATUSES.RUNNING
+      };
+    }
+
+    /**
+     * Create or advance the structured Phase 3 task in persistent memory.
+     */
+    async startOrUpdateTaskFromPlan(rawText, resolvedContext = {}, extras = {}) {
+      if (!this.memory) return null;
+      const pageDigest = extras.pageDigest || {};
+      const tpl = this.buildPlanTemplate(rawText, resolvedContext, pageDigest);
+
+      const curTask = this.memory.state.activeTask;
+      const sameTopic = Boolean(
+        curTask &&
+        curTask.status !== TASK_STATUSES.CANCELLED &&
+        curTask.status !== TASK_STATUSES.COMPLETED &&
+        curTask.topic &&
+        tpl.topic &&
+        curTask.topic.toLowerCase() === tpl.topic.toLowerCase()
+      );
+
+      // Preserve existing completedSteps / failedSteps / plannedSteps if updating an ongoing domain task
+      let mergedSteps = tpl.plannedSteps;
+      let mergedCompleted = tpl.plannedSteps.filter((s) => s.status === 'done').map((s) => s.label);
+      if (sameTopic && Array.isArray(curTask.plannedSteps) && curTask.plannedSteps.length > 0) {
+        mergedSteps = curTask.plannedSteps.map((existingStep, i) => {
+          const incoming = tpl.plannedSteps[i];
+          if (existingStep.status === 'done' || existingStep.status === 'skipped') return existingStep;
+          return incoming ? { ...existingStep, status: incoming.status } : existingStep;
+        });
+        mergedCompleted = Array.from(new Set([...(curTask.completedSteps || []), ...mergedCompleted]));
+      }
+
+      const pendingList = mergedSteps.filter((s) => s.status === 'pending' || s.status === 'active').map((s) => s.label);
+      const blockedList = mergedSteps.filter((s) => s.status === 'blocked' || s.status === 'failed').map((s) => s.label);
+      const doneCount = mergedSteps.filter((s) => s.status === 'done').length;
+      const progressPercent = mergedSteps.length > 0 ? Math.round((doneCount / mergedSteps.length) * 100) : 0;
+
+      const task = await this.memory.upsertTask({
+        createNew: !sameTopic && Boolean(extras.forceNew),
+        parentObjective: tpl.parentObjective || tpl.interpretedObjective,
+        domain: tpl.domain,
+        userOriginalObjective: (sameTopic && curTask.userOriginalObjective) || rawText,
+        objective: tpl.interpretedObjective,
+        interpretedObjective: tpl.interpretedObjective,
+        topic: tpl.topic,
+        entities: extras.entities || (resolvedContext.resolvedEntity ? [resolvedContext.resolvedEntity] : undefined),
+        constraints: tpl.constraints,
+        currentStep: tpl.currentStep,
+        plannedSteps: mergedSteps,
+        subtasks: mergedSteps,
+        progressPercent,
+        completedSteps: mergedCompleted,
+        failedSteps: (sameTopic && Array.isArray(curTask.failedSteps)) ? curTask.failedSteps : [],
+        blockedSteps: blockedList,
+        pendingSteps: pendingList,
+        relevantUrls: extras.relevantUrls,
+        resultsSnapshot: extras.resultsSnapshot,
+        requiredConfirmations: extras.requiredConfirmations || (mergedSteps.filter((s) => s.requiresConfirm).map((s) => ({ stepId: s.id, action: s.label, status: 'pending' }))),
+        nextRecommendedAction: pendingList[0] || 'Review details or ask your next question',
+        status: extras.status || tpl.status
+      });
+
+      if (this.diagnostics) {
+        this.diagnostics.log('task', sameTopic ? 'updated' : 'created', {
+          taskId: task && task.id,
+          domain: tpl.domain,
+          status: task && task.status,
+          stepCount: mergedSteps.length
+        });
+      }
+
+      return { task, template: tpl };
+    }
+
+    /**
+     * Mark a step done (by step id or keyword regex) and advance next pending step to active.
+     */
+    async markStepCompleted(stepMatch, note = '', extras = {}) {
+      if (!this.memory || !this.memory.state.activeTask) return null;
+      const task = this.memory.state.activeTask;
+      const steps = Array.isArray(task.plannedSteps) ? task.plannedSteps : [];
+      let hit = null;
+
+      for (const st of steps) {
+        if (st.id === stepMatch || (stepMatch instanceof RegExp && stepMatch.test(`${st.id} ${st.label}`))) {
+          st.status = 'done';
+          st.completedAt = new Date().toISOString();
+          if (note) st.note = note;
+          hit = st;
+          break;
+        }
+      }
+      if (!hit) {
+        const active = steps.find((s) => s.status === 'active');
+        if (active) {
+          active.status = 'done';
+          active.completedAt = new Date().toISOString();
+          if (note) active.note = note;
+          hit = active;
+        }
+      }
+
+      // Promote next pending step to active
+      const hasActive = steps.some((s) => s.status === 'active');
+      const nextPending = steps.find((s) => s.status === 'pending');
+      if (!hasActive && nextPending) {
+        nextPending.status = 'active';
+      }
+
+      const allFinished = steps.length > 0 && steps.every((s) => s.status === 'done' || s.status === 'skipped');
+      const nextStatus = extras.status || (allFinished ? TASK_STATUSES.COMPLETED : TASK_STATUSES.RUNNING);
+      const doneCount = steps.filter((s) => s.status === 'done').length;
+      const progressPercent = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
+
+      await this.memory.upsertTask({
+        currentStep: (nextPending && nextPending.id) || (hit && hit.id) || task.currentStep,
+        completedStep: (hit && hit.label) || note || '',
+        plannedSteps: steps,
+        subtasks: steps,
+        progressPercent,
+        pendingSteps: steps.filter((s) => s.status === 'pending' || s.status === 'active').map((s) => s.label),
+        blockedSteps: steps.filter((s) => s.status === 'blocked' || s.status === 'failed').map((s) => s.label),
+        nextRecommendedAction: (nextPending && nextPending.label) || 'Ask any follow-up or confirm next step',
+        status: nextStatus
+      });
+      return task;
+    }
+
+    async markStepBlocked(stepMatch, reason = 'Waiting on external verification') {
+      if (!this.memory || !this.memory.state.activeTask) return null;
+      const task = this.memory.state.activeTask;
+      const steps = Array.isArray(task.plannedSteps) ? task.plannedSteps : [];
+      const hit = steps.find((s) => s.id === stepMatch || (stepMatch instanceof RegExp && stepMatch.test(`${s.id} ${s.label}`))) || steps.find((s) => s.status === 'active');
+      if (hit) {
+        hit.status = 'blocked';
+        hit.note = reason;
+      }
+      const doneCount = steps.filter((s) => s.status === 'done').length;
+      const progressPercent = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
+      await this.memory.upsertTask({
+        plannedSteps: steps,
+        subtasks: steps,
+        progressPercent,
+        blockedSteps: steps.filter((s) => s.status === 'blocked' || s.status === 'failed').map((s) => `${s.label}${s.note ? ` (${s.note})` : ''}`),
+        pendingSteps: steps.filter((s) => s.status === 'pending' || s.status === 'active').map((s) => s.label),
+        status: TASK_STATUSES.WAITING_FOR_USER,
+        nextRecommendedAction: reason
+      });
+      return task;
+    }
+
+    /**
+     * Record a step failure cleanly without losing the task, putting task in RECOVERING status.
+     */
+    async recordFailure(stepLabelOrId, reason = 'Navigation or element unavailable', url = '') {
+      if (!this.memory) return null;
+      if (!this.memory.state.activeTask) {
+        await this.memory.upsertTask({
+          objective: stepLabelOrId || 'Active browsing action',
+          currentStep: 'recovering',
+          status: TASK_STATUSES.RECOVERING
+        });
+      }
+      const task = this.memory.state.activeTask;
+      const steps = Array.isArray(task.plannedSteps) ? task.plannedSteps : [];
+      const activeStep = steps.find((s) => s.id === stepLabelOrId || s.status === 'active');
+      if (activeStep) {
+        activeStep.status = 'failed';
+        activeStep.note = reason;
+      }
+      if (!Array.isArray(task.failedSteps)) task.failedSteps = [];
+      task.failedSteps.push({
+        step: (activeStep && activeStep.label) || String(stepLabelOrId || task.currentStep),
+        reason: String(reason),
+        url: String(url || ''),
+        timestamp: new Date().toISOString()
+      });
+
+      await this.memory.upsertTask({
+        plannedSteps: steps,
+        failedSteps: task.failedSteps,
+        status: TASK_STATUSES.RECOVERING,
+        nextRecommendedAction: `Recover from: ${reason}`
+      });
+
+      if (this.diagnostics) {
+        this.diagnostics.log('task', 'step_failed', {
+          taskId: task.id,
+          step: (activeStep && activeStep.label) || stepLabelOrId,
+          reason
+        });
+      }
+      return task;
+    }
+
+    /**
+     * Format compact floating progress card steps compatible with SleepwalkerCard ('plan' or answer card).
+     */
+    buildProgressCardSteps(task) {
+      if (!task || !Array.isArray(task.plannedSteps)) return [];
+      return task.plannedSteps.slice(0, 7).map((st) => ({
+        label: st.label,
+        status: st.status
+      }));
+    }
+
+    /**
+     * Summarize active task status naturally ("We found three universities and compared...").
+     */
+    formatProgressSummary(task) {
+      if (!task) {
+        return 'There is no active multi-step task right now. Tell me what you want to research, compare, or navigate to.';
+      }
+      const done = Array.isArray(task.completedSteps) ? task.completedSteps : [];
+      const failed = Array.isArray(task.failedSteps) ? task.failedSteps : [];
+      const steps = Array.isArray(task.plannedSteps) ? task.plannedSteps : [];
+      const active = steps.find((s) => s.status === 'active');
+      const remaining = steps.filter((s) => s.status === 'pending');
+
+      const parts = [];
+      if (done.length > 0) {
+        parts.push(`Completed (${done.length}): ${done.slice(-3).join('; ')}.`);
+      } else {
+        parts.push(`Task: ${task.interpretedObjective || task.objective || task.topic}.`);
+      }
+      if (failed.length > 0) {
+        const lastFail = failed[failed.length - 1];
+        parts.push(`Issue encountered at "${lastFail.step}": ${lastFail.reason}.`);
+      }
+      if (active) {
+        parts.push(`Current step: ${active.label}.`);
+      }
+      if (remaining.length > 0) {
+        parts.push(`Remaining (${remaining.length}): ${remaining.slice(0, 2).map((s) => s.label).join(', ')}.`);
+      }
+      parts.push(`Status: ${task.status}.`);
+      return parts.join(' ');
+    }
+
+    /**
+     * Execute voice-driven task management commands cleanly WITHOUT ending Sleepwalker's session.
+     */
+    async handleTaskControlCommand(subAction, rawText = '') {
+      const task = this.memory && this.memory.state.activeTask;
+      const ctrl = this.widget;
+
+      if (subAction === 'pause_task') {
+        if (!task) {
+          return this._respond('No Active Task', 'There is no multi-step task running right now to pause.', 'no_active_task');
+        }
+        await this.memory.upsertTask({ status: TASK_STATUSES.PAUSED });
+        return this._respond(
+          `Paused: ${task.topic || 'Task'}`,
+          `Paused "${task.objective || task.topic}". I am still listening — say "Resume" or "Continue" when you want to pick up where we left off.`,
+          'task_paused',
+          { task }
+        );
+      }
+
+      if (subAction === 'resume_task' || subAction === 'continue_task' || subAction === 'resume_session_task' || subAction === 'return_earlier_task') {
+        if (!task) {
+          if (ctrl && typeof ctrl.resumeSavedTask === 'function') {
+            return ctrl.resumeSavedTask();
+          }
+          return this._respond('Ready', 'No saved task found. Tell me what you want to explore next.', 'no_active_task');
+        }
+        if (task.status === TASK_STATUSES.CANCELLED) {
+          return this._respond('Task Cancelled', `Your earlier task "${task.objective || task.topic}" was cancelled. Start a new request anytime.`, 'task_already_cancelled', { task });
+        }
+        const wasRecovering = task.status === TASK_STATUSES.RECOVERING;
+        const lastFail = wasRecovering && Array.isArray(task.failedSteps) ? task.failedSteps[task.failedSteps.length - 1] : null;
+        await this.memory.upsertTask({ status: TASK_STATUSES.RUNNING });
+        const summary = this.formatProgressSummary(task);
+
+        if (wasRecovering && lastFail && lastFail.url && ctrl && ctrl.dialogue) {
+          const promptMsg = `${summary} Would you like me to try opening that link again?`;
+          ctrl.dialogue.setPendingPrompt({
+            kind: 'yesno',
+            label: 'retry_failed_navigation',
+            askedText: promptMsg,
+            onAnswer: async (yes) => {
+              if (yes && ctrl._navigateToExternalUrl) {
+                return ctrl._navigateToExternalUrl(lastFail.url, lastFail.step, task.topic);
+              }
+              return this._respond('Recovery Skipped', 'Okay, keeping your task open. Tell me which step to try next.', 'recovery_declined', { task });
+            }
+          });
+          return this._respond('Recovering Task', promptMsg, 'task_recovering', { task, showPlanCard: true });
+        }
+
+        return this._respond(
+          `Resuming: ${task.topic || 'Task'}`,
+          summary,
+          'task_resumed',
+          { task, showPlanCard: true }
+        );
+      }
+
+      if (subAction === 'skip_step') {
+        if (!task || !Array.isArray(task.plannedSteps) || task.plannedSteps.length === 0) {
+          return this._respond('No Step to Skip', 'There is no active step to skip right now.', 'no_step_to_skip');
+        }
+        const steps = task.plannedSteps;
+        const activeIdx = steps.findIndex((s) => s.status === 'active' || s.status === 'failed');
+        const targetIdx = activeIdx >= 0 ? activeIdx : steps.findIndex((s) => s.status === 'pending');
+        let skippedLabel = '';
+        if (targetIdx >= 0) {
+          skippedLabel = steps[targetIdx].label;
+          steps[targetIdx].status = 'skipped';
+        }
+        const nextStep = steps.find((s) => s.status === 'pending');
+        if (nextStep) nextStep.status = 'active';
+        await this.memory.upsertTask({
+          plannedSteps: steps,
+          currentStep: nextStep ? nextStep.id : 'completed',
+          pendingSteps: steps.filter((s) => s.status === 'pending' || s.status === 'active').map((s) => s.label),
+          nextRecommendedAction: nextStep ? nextStep.label : 'Task steps finished',
+          status: nextStep ? TASK_STATUSES.RUNNING : TASK_STATUSES.COMPLETED
+        });
+        const msg = nextStep
+          ? `Skipped "${skippedLabel}". Next step: ${nextStep.label}.`
+          : `Skipped "${skippedLabel}". All remaining steps in this task are finished.`;
+        return this._respond('Skipped Step', msg, 'step_skipped', { task, showPlanCard: true });
+      }
+
+      if (subAction === 'cancel_task') {
+        if (!task) {
+          return this._respond('No Active Task', 'There is no active task to cancel. Tell me what you would like to do.', 'no_active_task');
+        }
+        const prevTitle = task.topic || task.objective || 'current task';
+        await this.memory.upsertTask({ status: TASK_STATUSES.CANCELLED });
+        if (this.memory.state.pendingActions) {
+          this.memory.state.pendingActions = [];
+          await this.memory.saveState();
+        }
+        // Strictly keep Sleepwalker's voice session alive (do NOT end conversation)
+        return this._respond(
+          'Task Cancelled',
+          `Cancelled "${prevTitle}". Sleepwalker is still active and listening for your next command.`,
+          'task_cancelled',
+          { task }
+        );
+      }
+
+      if (subAction === 'show_results') {
+        const items = (task && Array.isArray(task.resultsSnapshot) && task.resultsSnapshot.length > 0)
+          ? task.resultsSnapshot
+          : ((this.memory && this.memory.state.currentEntities && this.memory.state.currentEntities.listItems) || []);
+        if (items.length === 0) {
+          return this._respond('Results', 'No extracted results are saved yet in this task. Try searching or asking to find options first.', 'no_results');
+        }
+        const lines = items.slice(0, 5).map((it, idx) =>
+          `${it.index || (idx + 1)}. ${it.title}${it.official ? ' [Official]' : ''}${it.specs || it.summary ? ` — ${(it.specs || it.summary).slice(0, 95)}` : ''}`
+        );
+        return this._respond(
+          `Results (${items.length})`,
+          lines.join('\n'),
+          'showing_results',
+          { task }
+        );
+      }
+
+      if (subAction === 'explain_progress' || subAction === 'what_completed') {
+        const summary = this.formatProgressSummary(task);
+        return this._respond(
+          task ? `Progress: ${task.topic || 'Task'}` : 'Current Status',
+          summary,
+          'task_status',
+          { task, showPlanCard: Boolean(task && Array.isArray(task.plannedSteps) && task.plannedSteps.length > 0) }
+        );
+      }
+
+      return null;
+    }
+
+    _respond(title, text, status, opts = {}) {
+      const ctrl = this.widget;
+      const task = opts.task;
+      if (ctrl && typeof ctrl.setAssistantReply === 'function') {
+        ctrl.setAssistantReply(text);
+      }
+      if (typeof window !== 'undefined' && window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        if (opts.showPlanCard && task && Array.isArray(task.plannedSteps) && task.plannedSteps.length > 0) {
+          window.SW_UI.showCard({
+            type: 'plan',
+            title,
+            text,
+            steps: this.buildProgressCardSteps(task),
+            actions: task.status === TASK_STATUSES.PAUSED
+              ? [{ id: 'resume_btn', label: 'Resume Task', primary: true }, { id: 'cancel_btn', label: 'Cancel Task' }]
+              : (task.status === TASK_STATUSES.CANCELLED ? [] : [{ id: 'pause_btn', label: 'Pause' }, { id: 'skip_btn', label: 'Skip Step' }]),
+            onAction: (id) => {
+              if (id === 'resume_btn') this.handleTaskControlCommand('resume_task');
+              else if (id === 'pause_btn') this.handleTaskControlCommand('pause_task');
+              else if (id === 'skip_btn') this.handleTaskControlCommand('skip_step');
+              else if (id === 'cancel_btn') this.handleTaskControlCommand('cancel_task');
+            }
+          });
+        } else {
+          window.SW_UI.showCard({ type: 'answer', title, text });
+        }
+      }
+      if (ctrl && ctrl.reader && typeof ctrl.reader.readText === 'function') {
+        ctrl.reader.readText(text);
+      }
+      return { status, title, answer: text, message: text, task };
+    }
+  }
+
+  SleepwalkerTaskPlanner.TASK_STATUSES = TASK_STATUSES;
+  rootScope.SleepwalkerTaskPlanner = SleepwalkerTaskPlanner;
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { SleepwalkerTaskPlanner, TASK_STATUSES };
+  }
+})(typeof window !== 'undefined' ? window : globalThis);

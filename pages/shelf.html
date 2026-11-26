@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sleepwalker - Document Shelf Setup</title>
+  <style>
+    :root {
+      --bg: #121214;
+      --card: #1E1E24;
+      --border: #323240;
+      --accent: #FFD600;
+      --accent-fg: #111111;
+      --cyan: #22D3EE;
+      --ok: #10B981;
+      --warn: #FBBF24;
+      --danger: #F87171;
+      --text: #FFFFFF;
+      --muted: #B0B0C2;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 32px 20px;
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 760px; width: 100%; }
+    header { text-align: center; margin-bottom: 24px; }
+    h1 { font-size: 28px; color: var(--accent); margin-bottom: 8px; }
+    .sub { font-size: 18px; color: var(--muted); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      margin-bottom: 20px;
+    }
+    h2 { font-size: 20px; color: var(--cyan); margin-bottom: 10px; }
+    p { font-size: 18px; color: var(--text); margin-bottom: 12px; }
+    .muted { color: var(--muted); font-size: 16px; }
+    .status {
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: #14141A;
+      border: 1px solid var(--border);
+      font-size: 18px;
+      margin-bottom: 16px;
+    }
+    .status.ok { border-color: var(--ok); color: var(--ok); }
+    .status.warn { border-color: var(--warn); color: var(--warn); }
+    .status.err { border-color: var(--danger); color: var(--danger); }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; }
+    button {
+      min-height: 48px;
+      min-width: 48px;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-size: 18px;
+      font-weight: 800;
+      cursor: pointer;
+      border: 2px solid transparent;
+    }
+    .btn-primary { background: var(--accent); color: var(--accent-fg); }
+    .btn-secondary { background: #272734; color: var(--text); border-color: var(--cyan); }
+    .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+    button:focus-visible { outline: 3px solid var(--cyan); outline-offset: 2px; }
+    ul { margin-top: 12px; padding-left: 22px; max-height: 300px; overflow-y: auto; }
+    li { font-size: 17px; padding: 4px 0; color: var(--text); }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>Sleepwalker Document Shelf</h1>
+      <p class="sub">One-time folder setup for hands-free voice uploads (no OS file dialog needed during forms).</p>
+    </header>
+
+    <section class="card" aria-label="Document Shelf Connection">
+      <h2>1. Connect Your Documents Folder</h2>
+      <p>
+        Choose one local folder containing files like your passport photo, marksheet, income certificate, or resume.
+        Sleepwalker matches by filename when you speak (e.g., <em>"upload my marksheet"</em>), validates size &amp; format,
+        and asks your final confirmation before attaching.
+      </p>
+      <div id="shelf-status-box" class="status" role="status" aria-live="polite">Checking saved Document Shelf...</div>
+      <div class="actions">
+        <button type="button" id="btn-connect-shelf" class="btn-primary">Connect Document Folder</button>
+        <button type="button" id="btn-reauth-shelf" class="btn-secondary" hidden>Re-allow Folder Access</button>
+        <button type="button" id="btn-disconnect-shelf" class="btn-outline" hidden>Disconnect Folder</button>
+      </div>
+      <p id="shelf-privacy-note" class="muted" style="margin-top:12px;">
+        Privacy: Stored only as a browser directory handle in local IndexedDB inside Sleepwalker. File contents and filenames are never sent to any AI model or external server.
+      </p>
+    </section>
+
+    <section class="card" aria-label="Indexed Filenames">
+      <h2>2. Available Shelf Files (<span id="shelf-count">0</span>)</h2>
+      <p class="muted">Listed by filename only so you know what Sleepwalker can find on forms.</p>
+      <ul id="shelf-file-list">
+        <li class="muted">No folder connected yet.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="../src/forms/shelf-db.js"></script>
+  <script src="shelf.js"></script>
+</body>
+</html>
