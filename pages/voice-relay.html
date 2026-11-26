@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sleepwalker Mic Relay</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      color: #f8fafc;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 14px 16px;
+      overflow: hidden;
+      user-select: none;
+    }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #38bdf8;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.85);
+      flex-shrink: 0;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    .dot.paused { background: #fbbf24; box-shadow: none; animation: none; }
+    .dot.error { background: #f87171; box-shadow: none; animation: none; }
+    @keyframes pulse {
+      0%, 100% { transform: scale(0.92); opacity: 0.75; }
+      50% { transform: scale(1.18); opacity: 1; }
+    }
+    .title { font-size: 13px; font-weight: 600; letter-spacing: 0.01em; }
+    .sub {
+      font-size: 11.5px; color: #cbd5e1; margin-top: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .btn {
+      margin-top: 10px; align-self: flex-start;
+      background: #38bdf8; color: #0f172a; border: none;
+      border-radius: 999px; padding: 5px 14px; font-size: 12px;
+      font-weight: 600; cursor: pointer;
+    }
+    .btn[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div id="dot" class="dot"></div>
+    <div style="min-width:0;flex:1;">
+      <div id="status" class="title">Sleepwalker Mic Active</div>
+      <div id="transcript" class="sub">Listening for commands on restricted site...</div>
+    </div>
+  </div>
+  <button id="allow-btn" class="btn" hidden>Allow Microphone</button>
+  <script src="voice-relay.js"></script>
+</body>
+</html>

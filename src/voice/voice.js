@@ -99,6 +99,11 @@
       this._lastErrorCode = '';
       this.lastInterim = '';
       this.useOffscreen = false;
+      this._fallbackMode = 'none'; // 'none' | 'iframe' | 'relay'
+      this._iframeEl = null;
+      this._iframeReady = false;
+      this._iframePendingStart = false;
+      this._iframeMsgBound = false;
 
       // Callbacks
       this.onTranscript = null; // ({ text, isFinal, confidence, activeLang, mode }) => {}
@@ -210,7 +215,7 @@
     }
 
     /**
-     * Listen for speech events relayed from the background offscreen document.
+     * Listen for speech events relayed from the extension voice-relay popup or offscreen document.
      */
     initOffscreenListener() {
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
@@ -218,18 +223,26 @@
           if (!message) return;
 
           if (message.type === 'OFFSCREEN_TRANSCRIPT') {
-            if (message.interim && this.onTranscript) {
-              this.onTranscript({
-                text: message.interim,
-                isFinal: false,
-                confidence: null,
-                activeLang: this.activeLang,
-                mode: this.mode
-              });
+            if (!this.isListening || this.isPaused) return;
+            if (message.interim) {
+              this._micBoost = 0.72;
+              this.lastInterim = message.interim;
+              if (this.onActivity) this.onActivity({ type: 'interim' });
+              if (this.onTranscript) {
+                this.onTranscript({
+                  text: message.interim,
+                  isFinal: false,
+                  confidence: null,
+                  activeLang: this.activeLang,
+                  mode: this.mode
+                });
+              }
             }
             if (message.final) {
               const confidence = typeof message.confidence === 'number' ? message.confidence : null;
+              this.lastInterim = '';
               this.lastConfidence = confidence;
+              if (this.onActivity) this.onActivity({ type: 'final' });
               const meta = {
                 confidence,
                 activeLang: this.activeLang,
@@ -238,25 +251,151 @@
               if (this.onTranscript) {
                 this.onTranscript({ text: message.final, isFinal: true, ...meta });
               }
-              const parsed = this.parseCommand(message.final);
-              parsed.confidence = confidence;
-              parsed.activeLang = this.activeLang;
-              parsed.mode = this.mode;
-              if (this.onCommand) {
-                this.onCommand(parsed, meta);
-              }
+              this._emitCommandDeduped(message.final, meta);
             }
           } else if (message.type === 'OFFSCREEN_ERROR') {
-            console.warn('[Sleepwalker Voice] Offscreen recognition failed:', message.error);
-            // Fallback automatically to content script recognition
+            console.warn('[Sleepwalker Voice] Extension voice relay error:', message.error);
             this.useOffscreen = false;
           } else if (message.type === 'OFFSCREEN_STATE_CHANGE') {
+            if (message.isListening) {
+              this.isListening = true;
+              this.isPaused = false;
+              this._setLifecycleState('listening', 'Listening via Sleepwalker Mic...');
+              this._startLevelMonitor();
+            }
             if (this.onStateChange) {
-              this.onStateChange(message.isListening);
+              this.onStateChange(Boolean(message.isListening));
             }
           }
         });
       }
+    }
+
+    _ensureIframeBridgeListener() {
+      if (this._iframeMsgBound || typeof window === 'undefined') return;
+      this._iframeMsgBound = true;
+      window.addEventListener('message', (event) => {
+        if (!this._iframeEl || event.source !== this._iframeEl.contentWindow) return;
+        const data = event.data;
+        if (!data || data.source !== 'sleepwalker-voice-frame') return;
+
+        if (data.kind === 'ready') {
+          this._iframeReady = true;
+          if (this._iframePendingStart && this._fallbackMode === 'iframe' && this.isListening && !this.isPaused) {
+            this._iframePendingStart = false;
+            this._postToIframe({ action: 'START', lang: this.activeLang });
+          }
+        } else if (data.kind === 'start') {
+          if (!this.isListening || this.isPaused) {
+            this._postToIframe({ action: 'STOP' });
+            return;
+          }
+          this._lastErrorCode = '';
+          this._setLifecycleState('listening', 'Listening...');
+          this._startLevelMonitor();
+          if (this.onStateChange) this.onStateChange(true);
+        } else if (data.kind === 'result') {
+          if (!this.isListening || this.isPaused) return;
+          if (data.interim) {
+            this._micBoost = 0.72;
+            this.lastInterim = data.interim;
+            if (this.onActivity) this.onActivity({ type: 'interim' });
+            if (this.onTranscript) {
+              this.onTranscript({ text: data.interim, isFinal: false, confidence: null, activeLang: this.activeLang, mode: this.mode });
+            }
+          }
+          if (data.final) {
+            this.lastInterim = '';
+            this.lastConfidence = typeof data.confidence === 'number' ? data.confidence : null;
+            if (this.onActivity) this.onActivity({ type: 'final' });
+            const meta = { confidence: this.lastConfidence, activeLang: this.activeLang, mode: this.mode };
+            if (this.onTranscript) {
+              this.onTranscript({ text: data.final, isFinal: true, ...meta });
+            }
+            this._emitCommandDeduped(data.final, meta);
+          }
+        } else if (data.kind === 'error') {
+          if (data.error === 'not-allowed' || data.error === 'service-not-allowed') {
+            this._diag('iframe_blocked_escalate_relay', { error: data.error });
+            this._startExtensionRelayFallback();
+          } else if (data.error === 'audio-capture') {
+            this.isListening = false;
+            this._setLifecycleState('error', 'No microphone detected');
+            if (this.onError) {
+              this.onError({ error: 'audio-capture', message: 'No microphone was detected. Connect a microphone and click Retry.', isPermissionDenied: false });
+            }
+          }
+        }
+      });
+    }
+
+    _postToIframe(msg) {
+      if (this._iframeEl && this._iframeEl.contentWindow) {
+        try {
+          this._iframeEl.contentWindow.postMessage({ source: 'sleepwalker-host-voice', ...msg }, '*');
+        } catch (_e) {}
+      }
+    }
+
+    _startIframeFallback() {
+      if (typeof document === 'undefined' || typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.getURL) {
+        return false;
+      }
+      this._fallbackMode = 'iframe';
+      this.isListening = true;
+      this.isPaused = false;
+      this._intentionalStop = false;
+      this._ensureIframeBridgeListener();
+
+      if (!this._iframeEl || !this._iframeEl.isConnected) {
+        this._iframeReady = false;
+        this._iframePendingStart = true;
+        const iframe = document.createElement('iframe');
+        iframe.className = 'sleepwalker-ignore sleepwalker-exclude';
+        iframe.setAttribute('allow', 'microphone');
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.tabIndex = -1;
+        iframe.style.cssText = 'position:fixed !important;width:1px !important;height:1px !important;opacity:0 !important;pointer-events:none !important;border:0 !important;bottom:0 !important;right:0 !important;z-index:-1 !important;';
+        iframe.src = chrome.runtime.getURL('pages/voice-frame.html');
+        (document.documentElement || document.body).appendChild(iframe);
+        this._iframeEl = iframe;
+      } else if (this._iframeReady) {
+        this._postToIframe({ action: 'START', lang: this.activeLang });
+      } else {
+        this._iframePendingStart = true;
+      }
+      this._setLifecycleState('starting', 'Connecting Sleepwalker microphone...');
+      return true;
+    }
+
+    _startExtensionRelayFallback() {
+      if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+        return false;
+      }
+      this._postToIframe({ action: 'STOP' });
+      this._fallbackMode = 'relay';
+      this.isListening = true;
+      this.isPaused = false;
+      this._intentionalStop = false;
+      this._setLifecycleState('starting', 'Opening Sleepwalker Mic Relay for restricted site...');
+      chrome.runtime.sendMessage(
+        { type: 'SLEEPWALKER_START_EXT_VOICE_RELAY', lang: this.activeLang },
+        (res) => {
+          if (chrome.runtime.lastError || !res || res.status === 'error') {
+            this._fallbackMode = 'none';
+            this.isListening = false;
+            this._setLifecycleState('error', 'Microphone permission denied');
+            if (this.onError) {
+              this.onError({
+                error: 'not-allowed',
+                message: 'This site blocks in-page microphone access. Click Allow Microphone below to enable Sleepwalker Mic.',
+                isPermissionDenied: true
+              });
+            }
+          }
+        }
+      );
+      return true;
     }
 
     /**
@@ -593,6 +732,19 @@
         switch (event.error) {
           case 'not-allowed':
           case 'service-not-allowed':
+            this._recognitionRunning = false;
+            if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+              if (typeof window !== 'undefined' && window.isSecureContext !== false && this._fallbackMode === 'none') {
+                this._diag('site_mic_blocked_try_iframe', { error: event.error });
+                this._startIframeFallback();
+                return;
+              }
+              if (this._fallbackMode !== 'relay') {
+                this._diag('site_mic_blocked_try_relay', { error: event.error });
+                this._startExtensionRelayFallback();
+                return;
+              }
+            }
             isPermissionDenied = true;
             this.isListening = false;
             this._setLifecycleState('error', 'Microphone permission denied');
@@ -747,6 +899,13 @@
       }
       this.lastConfidence = null;
 
+      if (this._fallbackMode === 'iframe') {
+        return this._startIframeFallback();
+      }
+      if (this._fallbackMode === 'relay') {
+        return this._startExtensionRelayFallback();
+      }
+
       if (this.useOffscreen && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage(
           { type: 'SLEEPWALKER_START_OFFSCREEN_VOICE', lang: this.activeLang },
@@ -778,6 +937,10 @@
       }
 
       if (typeof window !== 'undefined' && window.isSecureContext === false) {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+          this._diag('insecure_context_escalate_relay', {});
+          return this._startExtensionRelayFallback();
+        }
         this._lastErrorCode = 'insecure-context';
         this.isListening = false;
         this._setLifecycleState('error', 'HTTPS required for microphone');
@@ -896,7 +1059,11 @@
       this._intentionalStop = true;
       this._pendingStartAfterStop = false;
       this._setLifecycleState('paused', 'Paused while speaking');
-      if (this.recognition) {
+      if (this._fallbackMode === 'iframe') {
+        this._postToIframe({ action: 'STOP' });
+      } else if (this._fallbackMode === 'relay' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'SLEEPWALKER_PAUSE_EXT_VOICE_RELAY', lang: this.activeLang }, () => { void chrome.runtime?.lastError; });
+      } else if (this.recognition) {
         try {
           this.recognition.stop();
         } catch (e) {}
@@ -994,6 +1161,15 @@
         this._setLifecycleState('idle', '');
       }
 
+      if (this._fallbackMode === 'iframe') {
+        this._postToIframe({ action: 'STOP' });
+      }
+      if (this._fallbackMode === 'relay' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          type: 'SLEEPWALKER_STOP_EXT_VOICE_RELAY',
+          closeWindow: Boolean(options && options.closeRelayWindow)
+        }, () => { void chrome.runtime?.lastError; });
+      }
       if (this.useOffscreen && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({ type: 'SLEEPWALKER_STOP_OFFSCREEN_VOICE' });
       }
@@ -1108,7 +1284,11 @@
       this.activeLang = this.resolveSpeechLang(normalized);
       this.lastConfidence = null;
 
-      if (this.recognition) {
+      if (this._fallbackMode === 'iframe') {
+        this._postToIframe({ action: 'SET_LANG', lang: this.activeLang });
+      } else if (this._fallbackMode === 'relay' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'SLEEPWALKER_START_EXT_VOICE_RELAY', lang: this.activeLang }, () => { void chrome.runtime?.lastError; });
+      } else if (this.recognition) {
         this.recognition.lang = this.activeLang;
         // If listening, restart with new language without penalizing crash backoff
         if (this.isListening) {

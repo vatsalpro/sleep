@@ -1065,8 +1065,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Top-level Extension Voice Relay Popup (Tier 2 fallback for Permissions-Policy: microphone=() & http:// sites)
+  if (message.type === 'SLEEPWALKER_START_EXT_VOICE_RELAY') {
+    const lang = message.lang || 'en-IN';
+    if (sender && sender.tab && sender.tab.id) {
+      self.__swVoiceRelayTargetTabId = sender.tab.id;
+    }
+    openOrControlVoiceRelayWindow('START', lang)
+      .then((res) => sendResponse(res))
+      .catch((err) => sendResponse({ status: 'error', message: (err && err.message) || 'Relay failed' }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_PAUSE_EXT_VOICE_RELAY') {
+    controlExistingVoiceRelay('PAUSE', message.lang)
+      .then((res) => sendResponse(res))
+      .catch(() => sendResponse({ status: 'paused' }));
+    return true;
+  }
+
+  if (message.type === 'SLEEPWALKER_STOP_EXT_VOICE_RELAY') {
+    const closeWindow = Boolean(message.closeWindow);
+    if (closeWindow && self.__swVoiceRelayWinId) {
+      const winId = self.__swVoiceRelayWinId;
+      self.__swVoiceRelayWinId = null;
+      chrome.windows.remove(winId, () => { void chrome.runtime.lastError; });
+      sendResponse({ status: 'closed' });
+      return false;
+    }
+    controlExistingVoiceRelay('STOP', message.lang)
+      .then((res) => sendResponse(res))
+      .catch(() => sendResponse({ status: 'stopped' }));
+    return true;
+  }
+
   // Start offscreen voice recording
   if (message.type === 'SLEEPWALKER_START_OFFSCREEN_VOICE') {
+    if (sender && sender.tab && sender.tab.id) {
+      self.__swVoiceRelayTargetTabId = sender.tab.id;
+    }
     ensureOffscreenDocument()
       .then(() => {
         chrome.runtime.sendMessage({
@@ -1091,13 +1128,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Relay offscreen events to active tab content script
+  // Relay extension voice-relay / offscreen events directly to the target webpage tab (never to the popup window itself!)
   if (message.type === 'OFFSCREEN_TRANSCRIPT' || message.type === 'OFFSCREEN_ERROR' || message.type === 'OFFSCREEN_STATE_CHANGE') {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs && tabs[0] && tabs[0].id) {
-        chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
-      }
-    });
+    const forwardToTab = (tabId) => {
+      if (!tabId) return;
+      chrome.tabs.sendMessage(tabId, message).catch(() => {});
+    };
+    if (self.__swVoiceRelayTargetTabId) {
+      chrome.tabs.get(self.__swVoiceRelayTargetTabId, (tab) => {
+        if (!chrome.runtime.lastError && tab && tab.id) {
+          forwardToTab(tab.id);
+        } else {
+          self.__swVoiceRelayTargetTabId = null;
+          chrome.tabs.query({ active: true, windowType: 'normal' }, (tabs) => {
+            if (tabs && tabs[0] && tabs[0].id) forwardToTab(tabs[0].id);
+          });
+        }
+      });
+    } else {
+      chrome.tabs.query({ active: true, windowType: 'normal' }, (tabs) => {
+        if (tabs && tabs[0] && tabs[0].id) forwardToTab(tabs[0].id);
+      });
+    }
     return false;
   }
 
@@ -1678,6 +1730,60 @@ async function waitForTabLoadComplete(tabId, timeoutMs = 3500) {
 /**
  * Ensure the offscreen document is created for USER_MEDIA reasons.
  */
+async function controlExistingVoiceRelay(action, lang = 'en-IN') {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'EXT_RELAY_CONTROL', action, lang }, (res) => {
+      void chrome.runtime.lastError;
+      resolve(res || { ok: false });
+    });
+  });
+}
+
+async function openOrControlVoiceRelayWindow(action = 'START', lang = 'en-IN') {
+  if (self.__swVoiceRelayWinId) {
+    const exists = await new Promise((resolve) => {
+      chrome.windows.get(self.__swVoiceRelayWinId, (win) => {
+        if (chrome.runtime.lastError || !win) resolve(false);
+        else resolve(true);
+      });
+    });
+    if (exists) {
+      await controlExistingVoiceRelay(action, lang);
+      return { status: 'started', reused: true };
+    }
+    self.__swVoiceRelayWinId = null;
+  }
+
+  const created = await new Promise((resolve, reject) => {
+    chrome.windows.create(
+      {
+        url: `pages/voice-relay.html?lang=${encodeURIComponent(lang)}`,
+        type: 'popup',
+        width: 320,
+        height: 145,
+        focused: true
+      },
+      (win) => {
+        if (chrome.runtime.lastError || !win) {
+          reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Could not open voice relay window'));
+        } else {
+          resolve(win);
+        }
+      }
+    );
+  });
+  self.__swVoiceRelayWinId = created.id;
+  return { status: 'started', windowId: created.id };
+}
+
+if (typeof chrome !== 'undefined' && chrome.windows && chrome.windows.onRemoved) {
+  chrome.windows.onRemoved.addListener((winId) => {
+    if (self.__swVoiceRelayWinId === winId) {
+      self.__swVoiceRelayWinId = null;
+    }
+  });
+}
+
 async function ensureOffscreenDocument() {
   if (typeof chrome.offscreen === 'undefined') {
     throw new Error('chrome.offscreen API not available in this browser version');

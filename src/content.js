@@ -1704,6 +1704,9 @@
         else if (this.voice) this.voice.stopListening();
         if (this.memory) this.memory.setSessionMode(reason === 'toggle' ? 'ended' : 'hidden');
       }
+      if (this.voice && this.voice._fallbackMode === 'relay') {
+        this.voice.stopListening({ closeRelayWindow: true });
+      }
       if (window.SW_UI) window.SW_UI.hide({ dissolve: reason !== 'instant' });
     }
 

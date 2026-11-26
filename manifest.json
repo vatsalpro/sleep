@@ -95,6 +95,7 @@
       "resources": [
         "src/ui/ui.css",
         "pages/mic-setup.html",
+        "pages/voice-frame.html",
         "data/lexicon.json",
         "data/link-lexicon.json"
       ],
