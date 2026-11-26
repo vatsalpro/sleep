@@ -100,6 +100,20 @@
             <option value="ml-IN">Malayalam</option><option value="pa-IN">Punjabi</option>
           </select>
         </label>
+        <label>Narrator Voice Persona
+          <select id="opt-voice-persona">
+            <option value="nova">Nova — Warm &amp; Natural (Recommended)</option>
+            <option value="aria">Aria — Bright &amp; Expressive</option>
+            <option value="orion">Orion — Deep &amp; Calm Studio</option>
+            <option value="sage">Sage — Crisp Storyteller</option>
+            <option value="breeze">Breeze — Lively Copilot</option>
+          </select>
+        </label>
+        <label>Specific Browser Voice (Optional)
+          <select id="opt-voice-uri">
+            <option value="">Auto (Best Neural / Natural Match)</option>
+          </select>
+        </label>
         <label>Speech Speed
           <select id="opt-rate">
             <option value="0.8">Slow (0.8x)</option>
@@ -114,6 +128,9 @@
             <option value="22">Extra Large (22px)</option>
           </select>
         </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button id="opt-preview-voice" type="button">Preview Narrator Voice</button>
       </div>
       <label class="chk"><input id="opt-glow-enabled" type="checkbox" checked> Show luminous golden threads &amp; subtle focus glow</label>
       <label class="chk"><input id="opt-barge-in" type="checkbox"> Allow interrupting speech while speaking (best with headphones)</label>

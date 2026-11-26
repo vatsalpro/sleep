@@ -2277,6 +2277,18 @@
         ? 'Go forward to next page'
         : (dir === 'refresh' ? 'Reload this page' : 'Go back to previous page');
 
+      const tryReturnToPreviousSleepingTab = () => {
+        if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+          return Promise.resolve({ ok: false });
+        }
+        return new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: 'SLEEPWALKER_RETURN_TO_PREVIOUS_TAB' }, (res) => {
+            void chrome.runtime?.lastError;
+            resolve(res || { ok: false });
+          });
+        });
+      };
+
       const execHistory = async () => {
         await this.saveSessionState({
           active: true,
@@ -2285,10 +2297,37 @@
           lastTargetLabel: label
         });
         if (!win) return { executed: false };
-        if (dir === 'forward' && win.history) win.history.forward();
-        else if (dir === 'refresh' && win.location) win.location.reload();
-        else if (win.history) win.history.back();
-        return { executed: true, dir };
+        if (dir === 'forward' && win.history) {
+          win.history.forward();
+          return { executed: true, dir, verified: true };
+        }
+        if (dir === 'refresh' && win.location) {
+          win.location.reload();
+          return { executed: true, dir, verified: true };
+        }
+        if (dir === 'back') {
+          // If this webpage was opened in a new tab (history.length <= 1) or user asked for previous tab,
+          // switch directly back to the sleeping previous webpage tab without closing anything!
+          if (options.preferPreviousTab || !win.history || Number(win.history.length || 0) <= 1) {
+            const tabRes = await tryReturnToPreviousSleepingTab();
+            if (tabRes && tabRes.ok) {
+              return { executed: true, dir: 'back', switchedToPreviousTab: true, tabId: tabRes.tabId, title: tabRes.title, verified: true };
+            }
+          }
+          const beforeHref = win.location ? win.location.href : '';
+          if (win.history) win.history.back();
+          // Fallback: if history.back() was a no-op on a newly spawned tab, return to the sleeping previous tab!
+          await new Promise((r) => setTimeout(r, 380));
+          const afterHref = win.location ? win.location.href : '';
+          if (afterHref === beforeHref) {
+            const tabRes = await tryReturnToPreviousSleepingTab();
+            if (tabRes && tabRes.ok) {
+              return { executed: true, dir: 'back', switchedToPreviousTab: true, tabId: tabRes.tabId, title: tabRes.title, verified: true };
+            }
+          }
+          return { executed: true, dir: 'back', verified: true };
+        }
+        return { executed: true, dir, verified: true };
       };
 
       if (!options.skipConfirm && !options.fastPath && this.widget && this.widget.confirm) {

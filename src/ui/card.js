@@ -27,7 +27,7 @@
       this.hovered = false; this.focusedWithin = false; this.readingPaused = false;
       this.speechDone = true; this.autoDismissMs = DEFAULT_AUTO_DISMISS_MS;
       this._dismissTimer = null; this._prevFocusEl = null;
-      this._prefs = { lang: 'auto', rate: 1.0, fontSize: 18 };
+      this._prefs = { lang: 'auto', rate: 1.0, fontSize: 18, voicePersona: 'nova' };
       this._mount();
     }
 
@@ -114,10 +114,29 @@
       });
     }
 
+    setPrefs(patch = {}) {
+      if (!patch || typeof patch !== 'object') return;
+      if (patch.lang) this._prefs.lang = String(patch.lang);
+      if (patch.rate) this._prefs.rate = Number(patch.rate) || 1.0;
+      if (patch.fontSize) {
+        this._prefs.fontSize = Number(patch.fontSize) || 18;
+        if (this.el) this.el.style.setProperty('--sw-card-font', `${this._prefs.fontSize}px`);
+      }
+      if (patch.voicePersona) this._prefs.voicePersona = String(patch.voicePersona).toLowerCase();
+      this._syncMenuActive();
+    }
+
     _renderMenu() {
       const m = this.menuEl;
       if (!m) return;
       m.innerHTML = `
+        <div class="sw-menu-row"><span>Voice</span>
+          <button type="button" data-pref="voicePersona" data-val="nova" title="Warm & Natural">Nova</button>
+          <button type="button" data-pref="voicePersona" data-val="aria" title="Bright & Expressive">Aria</button>
+          <button type="button" data-pref="voicePersona" data-val="orion" title="Deep & Calm">Orion</button>
+          <button type="button" data-pref="voicePersona" data-val="sage" title="Crisp Storyteller">Sage</button>
+          <button type="button" data-pref="voicePersona" data-val="breeze" title="Lively Copilot">Breeze</button>
+        </div>
         <div class="sw-menu-row"><span>Lang</span>
           <button type="button" data-pref="lang" data-val="auto">Auto</button>
           <button type="button" data-pref="lang" data-val="en-IN">EN</button>
@@ -140,7 +159,9 @@
           const pref = btn.dataset.pref;
           const val = btn.dataset.val;
           if (pref === 'fontSize') this.el.style.setProperty('--sw-card-font', `${val}px`);
-          if (pref !== 'options') this._prefs[pref] = pref === 'lang' ? val : Number(val);
+          if (pref !== 'options') {
+            this._prefs[pref] = (pref === 'lang' || pref === 'voicePersona') ? val : Number(val);
+          }
           this._syncMenuActive();
           if (this.spec && typeof this.spec.onQuickControl === 'function') this.spec.onQuickControl(pref, val);
           else if (this.orbUi.handlers.onQuickControl) this.orbUi.handlers.onQuickControl(pref, val);

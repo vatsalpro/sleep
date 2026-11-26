@@ -939,19 +939,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     const sessionApi = (chrome.storage && chrome.storage.session) || chrome.storage.local;
     if (tabId && sessionApi) {
-      sessionApi.get(['sleepwalker_active_tab_id'], (prev) => {
-        const oldTabId = prev && prev.sleepwalker_active_tab_id;
-        sessionApi.set({ sleepwalker_active_tab_id: tabId }, () => {
-          if (oldTabId && oldTabId !== tabId && chrome.tabs && chrome.tabs.sendMessage) {
-            chrome.tabs.sendMessage(oldTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED' }, () => { void chrome.runtime.lastError; });
-          }
-          sendResponse({ status: 'ok', tabId });
-        });
+      activateSleepwalkerTabAndSleepOthers(tabId, sessionApi).then(() => {
+        sendResponse({ status: 'ok', tabId });
       });
       return true;
     }
     sendResponse({ status: 'ok' });
     return false;
+  }
+
+  if (message.type === 'SLEEPWALKER_RETURN_TO_PREVIOUS_TAB') {
+    const currentTabId = sender && sender.tab && sender.tab.id;
+    const sessionApi = (chrome.storage && chrome.storage.session) || chrome.storage.local;
+    if (!sessionApi || !chrome.tabs) {
+      sendResponse({ ok: false, reason: 'unavailable' });
+      return false;
+    }
+    sessionApi.get(['sleepwalker_prev_tab_stack'], async (data) => {
+      const stack = Array.isArray(data && data.sleepwalker_prev_tab_stack)
+        ? data.sleepwalker_prev_tab_stack.slice()
+        : [];
+      let targetTab = null;
+      while (stack.length > 0) {
+        const candId = Number(stack.pop());
+        if (!Number.isInteger(candId) || candId === currentTabId) continue;
+        const tabInfo = await new Promise((resolve) => {
+          chrome.tabs.get(candId, (t) => {
+            if (chrome.runtime?.lastError || !t || (t.url && isRestrictedUrl(t.url))) resolve(null);
+            else resolve(t);
+          });
+        });
+        if (tabInfo) {
+          targetTab = tabInfo;
+          break;
+        }
+      }
+      if (!targetTab) {
+        sessionApi.set({ sleepwalker_prev_tab_stack: stack }, () => { void chrome.runtime?.lastError; });
+        sendResponse({ ok: false, reason: 'no_previous_tab' });
+        return;
+      }
+      sessionApi.set({
+        sleepwalker_active_tab_id: targetTab.id,
+        sleepwalker_prev_tab_stack: stack
+      }, () => {
+        void chrome.runtime?.lastError;
+        if (currentTabId && currentTabId !== targetTab.id) {
+          chrome.tabs.sendMessage(currentTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED', reason: 'returned_to_previous_tab' }, () => { void chrome.runtime?.lastError; });
+        }
+        chrome.tabs.update(targetTab.id, { active: true }, () => {
+          void chrome.runtime?.lastError;
+          if (typeof targetTab.windowId === 'number' && chrome.windows && chrome.windows.update) {
+            chrome.windows.update(targetTab.windowId, { focused: true }, () => { void chrome.runtime?.lastError; });
+          }
+          chrome.tabs.sendMessage(targetTab.id, { action: 'SLEEPWALKER_SYNC_SESSION', isForegroundTab: true }, () => { void chrome.runtime?.lastError; });
+          sendResponse({ ok: true, tabId: targetTab.id, title: targetTab.title || '', url: targetTab.url || '' });
+        });
+      });
+    });
+    return true;
   }
 
   // Open mic setup tab
@@ -1814,6 +1860,57 @@ chrome.runtime.onInstalled.addListener((details) => {
   }
 });
 
+async function activateSleepwalkerTabAndSleepOthers(activeTabId, storeOverride = null) {
+  const store = storeOverride || ((chrome.storage && (chrome.storage.session || chrome.storage.local)) || null);
+  if (!store || !Number.isInteger(activeTabId)) return;
+
+  const prev = await new Promise((resolve) => {
+    store.get(['sleepwalker_active_tab_id', 'sleepwalker_prev_tab_stack'], (d) => {
+      void chrome.runtime?.lastError;
+      resolve(d || {});
+    });
+  });
+
+  const oldTabId = prev && Number(prev.sleepwalker_active_tab_id);
+  let stack = Array.isArray(prev && prev.sleepwalker_prev_tab_stack)
+    ? prev.sleepwalker_prev_tab_stack.filter((id) => Number.isInteger(id) && id !== activeTabId)
+    : [];
+  if (Number.isInteger(oldTabId) && oldTabId !== activeTabId) {
+    stack = stack.filter((id) => id !== oldTabId);
+    stack.push(oldTabId);
+    if (stack.length > 12) stack = stack.slice(-12);
+  }
+
+  await new Promise((resolve) => {
+    store.set({
+      sleepwalker_active_tab_id: activeTabId,
+      sleepwalker_prev_tab_stack: stack
+    }, () => {
+      void chrome.runtime?.lastError;
+      resolve();
+    });
+  });
+
+  // Put ALL other webpage tabs' Sleepwalker instances calmly to sleep (without closing them!)
+  if (chrome.tabs && typeof chrome.tabs.query === 'function') {
+    chrome.tabs.query({}, (allTabs) => {
+      void chrome.runtime?.lastError;
+      for (const t of (allTabs || [])) {
+        if (!t || !Number.isInteger(t.id) || t.id === activeTabId) continue;
+        if (self.__swVoiceRelayTabId && t.id === self.__swVoiceRelayTabId) continue;
+        if (t.url && isRestrictedUrl(t.url)) continue;
+        chrome.tabs.sendMessage(t.id, { action: 'SLEEPWALKER_TAB_BACKGROUNDED', activeTabId }, () => {
+          void chrome.runtime?.lastError;
+        });
+      }
+    });
+  } else if (Number.isInteger(oldTabId) && oldTabId !== activeTabId && chrome.tabs && chrome.tabs.sendMessage) {
+    chrome.tabs.sendMessage(oldTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED', activeTabId }, () => {
+      void chrome.runtime?.lastError;
+    });
+  }
+}
+
 // Multi-tab microphone arbitration & cross-redirect / slow-page session sync
 if (typeof chrome !== 'undefined' && chrome.tabs) {
   const getSessionStore = () => (chrome.storage && (chrome.storage.session || chrome.storage.local)) || null;
@@ -1849,20 +1946,17 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
         if (chrome.runtime?.lastError || !activatedTab || (activatedTab.url && isRestrictedUrl(activatedTab.url))) {
           return;
         }
-        store.get(['sleepwalker_session_state_v1', 'sleepwalker_active_tab_id'], (data) => {
+        store.get(['sleepwalker_session_state_v1'], (data) => {
           const sess = data && data.sleepwalker_session_state_v1;
-          const prevTabId = data && data.sleepwalker_active_tab_id;
           const activeModes = ['active_listening', 'active_not_listening', 'paused'];
           if (!sess || !activeModes.includes(sess.sessionMode)) return;
 
-          if (prevTabId && prevTabId !== activeInfo.tabId) {
-            chrome.tabs.sendMessage(prevTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED' }, () => { void chrome.runtime.lastError; });
-          }
-          store.set({ sleepwalker_active_tab_id: activeInfo.tabId });
-          chrome.tabs.sendMessage(activeInfo.tabId, { action: 'SLEEPWALKER_SYNC_SESSION', isForegroundTab: true }, () => {
-            if (chrome.runtime.lastError) {
-              recoverMissingContentScriptSync(activeInfo.tabId, true);
-            }
+          activateSleepwalkerTabAndSleepOthers(activeInfo.tabId, store).then(() => {
+            chrome.tabs.sendMessage(activeInfo.tabId, { action: 'SLEEPWALKER_SYNC_SESSION', isForegroundTab: true }, () => {
+              if (chrome.runtime.lastError) {
+                recoverMissingContentScriptSync(activeInfo.tabId, true);
+              }
+            });
           });
         });
       });
@@ -1873,9 +1967,14 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     chrome.tabs.onRemoved.addListener((removedTabId) => {
       const store = getSessionStore();
       if (!store) return;
-      store.get(['sleepwalker_active_tab_id'], (data) => {
+      store.get(['sleepwalker_active_tab_id', 'sleepwalker_prev_tab_stack'], (data) => {
+        const patch = {};
         if (data && data.sleepwalker_active_tab_id === removedTabId) {
           store.remove(['sleepwalker_active_tab_id'], () => { void chrome.runtime?.lastError; });
+        }
+        if (data && Array.isArray(data.sleepwalker_prev_tab_stack) && data.sleepwalker_prev_tab_stack.includes(removedTabId)) {
+          patch.sleepwalker_prev_tab_stack = data.sleepwalker_prev_tab_stack.filter((id) => id !== removedTabId);
+          store.set(patch, () => { void chrome.runtime?.lastError; });
         }
       });
     });

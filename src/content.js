@@ -300,6 +300,7 @@
           onQuickControl: (pref, val) => {
             if (pref === 'lang') this.setLanguage(val);
             else if (pref === 'rate') this.setRate(Number(val));
+            else if (pref === 'voicePersona') this.setVoicePersona(val, { preview: true });
             else if (pref === 'fontSize') { this.fontSize = Number(val) || 18; this.savePreferences(); }
             else if (pref === 'options' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
               chrome.runtime.sendMessage({ type: 'SLEEPWALKER_OPEN_OPTIONS' });
@@ -540,14 +541,48 @@
       return this.diagnostics ? this.diagnostics.getReport() : { counters: {}, perf: {}, recentEvents: [], recentTraces: [] };
     }
 
+    /**
+     * Put this webpage's Sleepwalker calmly to sleep when the user navigates/clicks to another tab,
+     * WITHOUT closing the page or erasing conversation/task/form context so "go back" resumes seamlessly.
+     */
+    sleepForOtherTab(reason = 'other_tab_active') {
+      const wasAwake = Boolean(
+        this.isOpen ||
+        (this.dialogue && this.dialogue.isActive()) ||
+        (window.SW_UI && window.SW_UI.getState() !== 'idle')
+      );
+      this._sleepingForOtherTab = true;
+      if (wasAwake) {
+        this._wasActiveBeforeTabSleep = true;
+      }
+      // Stop any active speech on this backgrounded webpage so two tabs never speak simultaneously
+      if (this.reader && (this.reader.isPlaying || (typeof this.reader.isStreamingActive === 'function' && this.reader.isStreamingActive()))) {
+        if (typeof this.reader.cancelStream === 'function') this.reader.cancelStream();
+        else this.reader.stop();
+      }
+      // Pause background dialogue silence timers so a sleeping tab never fires "Are you still there?" or ends the foreground session
+      if (this.dialogue && typeof this.dialogue._clearAllTimers === 'function') {
+        this.dialogue._clearAllTimers();
+      }
+      // Release microphone cleanly for the new active webpage
+      if (this.voice && (this.voice.isListening || this.voice.lifecycleState === 'starting')) {
+        this.voice.pauseForTabSwitch();
+      }
+      // Hide floating orb/card on the sleeping tab while preserving memory, dialogue history, and form state
+      if (window.SW_UI && window.SW_UI.getState() !== 'idle') {
+        window.SW_UI.hide({ dissolve: false });
+      }
+      if (this.diagnostics && wasAwake) {
+        this.diagnostics.log('orb', 'slept_for_other_tab', { reason });
+      }
+    }
+
     _installVisibilityAndTabListeners() {
       if (this._visInstalled || typeof document === 'undefined') return;
       this._visInstalled = true;
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
-          if (this.voice && this.voice.isListening) {
-            this.voice.pauseForTabSwitch();
-          }
+          this.sleepForOtherTab('visibility_hidden');
         } else {
           this.syncSessionFromTabActivation({ isForegroundTab: true });
         }
@@ -555,7 +590,11 @@
     }
 
     async syncSessionFromTabActivation({ isForegroundTab = true } = {}) {
-      if (!isForegroundTab || (typeof document !== 'undefined' && document.hidden)) return;
+      if (!isForegroundTab || (typeof document !== 'undefined' && document.hidden)) {
+        this.sleepForOtherTab('background_sync');
+        return;
+      }
+      this._sleepingForOtherTab = false;
       if (this.browserEngine) {
         try {
           this.browserEngine.invalidateCache();
@@ -571,12 +610,29 @@
       const mode = state && state.sessionMode;
       if (mode === 'active_listening' || mode === 'active_not_listening' || mode === 'paused') {
         this.isOpen = true;
+        this._wasActiveBeforeTabSleep = false;
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          try {
+            chrome.runtime.sendMessage({
+              type: 'SLEEPWALKER_SET_ACTIVE_TAB',
+              title: document.title || '',
+              url: window.location.href || ''
+            }, () => { void chrome.runtime?.lastError; });
+          } catch (_e) {}
+        }
         const listenNow = mode === 'active_listening';
         if (this.dialogue) {
           this.dialogue.active = true;
           this.dialogue.resting = false;
           this.dialogue.pausedForSpeech = false;
           this.dialogue._syncSessionIndicators();
+          if (typeof this.dialogue._scheduleSilenceTimers === 'function') {
+            this.dialogue._scheduleSilenceTimers();
+          }
+        }
+        if (window.SW_UI && window.SW_UI.getState() === 'idle') {
+          window.SW_UI.setState('silent');
+          this._setStatusChip(listenNow ? 'Starting microphone...' : 'Ready');
         }
         if (this.voice) {
           this.voice.continuousSession = listenNow;
@@ -584,10 +640,6 @@
             if (this.voice._pausedForTab) this.voice.resumeForTabSwitch();
             else if (!this.voice.isListening) this.voice.startListening();
           }
-        }
-        if (window.SW_UI && window.SW_UI.getState() === 'idle') {
-          window.SW_UI.setState(listenNow ? 'listening' : 'silent');
-          this._setStatusChip(listenNow ? 'Listening... Waiting for the next command' : 'Ready');
         }
         if (this.diagnostics) {
           this.diagnostics.log('orb', 'restored', { durationMs: Date.now() - t0, mode, trigger: 'tab_sync' });
@@ -982,37 +1034,42 @@
       if (mode === 'active_listening' || mode === 'active_not_listening' || mode === 'paused') {
         this.isOpen = true;
         const isForeground = typeof document === 'undefined' || !document.hidden;
-        const listenNow = mode === 'active_listening' && isForeground;
-        if (this.dialogue) {
-          this.dialogue.active = true;
-          this.dialogue.resting = false;
-          this.dialogue.pausedForSpeech = false;
-          this.dialogue._syncSessionIndicators();
-        }
-        if (this.voice) {
-          this.voice.continuousSession = mode === 'active_listening';
-          if (listenNow && this.voice.isSupported && !this.voice.isListening) {
-            this.voice.startListening();
+        if (!isForeground) {
+          // Background tab: stay calmly asleep until the user focuses or goes back to this tab!
+          this.sleepForOtherTab('boot_background_tab');
+        } else {
+          const listenNow = mode === 'active_listening';
+          if (this.dialogue) {
+            this.dialogue.active = true;
+            this.dialogue.resting = false;
+            this.dialogue.pausedForSpeech = false;
+            this.dialogue._syncSessionIndicators();
           }
-        }
-        if (isForeground && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-          try {
-            chrome.runtime.sendMessage({
-              type: 'SLEEPWALKER_SET_ACTIVE_TAB',
-              title: document.title || '',
-              url: window.location.href || ''
-            }, () => { void chrome.runtime.lastError; });
-          } catch (_e) {}
-        }
-        if (window.SW_UI) {
-          window.SW_UI.setState(listenNow ? 'listening' : 'silent');
-          this._setStatusChip(listenNow ? 'Listening... Waiting for the next command' : 'Ready');
-        }
-        if (this.worldModel && isForeground) {
-          this.worldModel.observeTab(document, { force: false }).catch(() => {});
-        }
-        if (this.diagnostics) {
-          this.diagnostics.log('orb', 'restored', { durationMs: Date.now() - t0, mode, isForeground });
+          if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            try {
+              chrome.runtime.sendMessage({
+                type: 'SLEEPWALKER_SET_ACTIVE_TAB',
+                title: document.title || '',
+                url: window.location.href || ''
+              }, () => { void chrome.runtime.lastError; });
+            } catch (_e) {}
+          }
+          if (window.SW_UI) {
+            window.SW_UI.setState('silent');
+            this._setStatusChip(listenNow ? 'Starting microphone...' : 'Ready');
+          }
+          if (this.voice) {
+            this.voice.continuousSession = mode === 'active_listening';
+            if (listenNow && this.voice.isSupported && !this.voice.isListening) {
+              this.voice.startListening();
+            }
+          }
+          if (this.worldModel) {
+            this.worldModel.observeTab(document, { force: false }).catch(() => {});
+          }
+          if (this.diagnostics) {
+            this.diagnostics.log('orb', 'restored', { durationMs: Date.now() - t0, mode, isForeground });
+          }
         }
 
         // Extract compact structured results on destination page if available (helps cross-site lists)
@@ -1298,7 +1355,61 @@
       }
       return { status: 'language_changed', locale, language: langName || locale, answer: msg, verified: true };
     }
-    setRate(r) { this.rate = Math.max(0.6, Math.min(1.8, Number(r) || 1.0)); this.reader.setRate(this.rate); this.savePreferences(); }
+    setRate(r) {
+      this.rate = Math.max(0.6, Math.min(1.8, Number(r) || 1.0));
+      this.reader.setRate(this.rate);
+      if (window.SW_UI && window.SW_UI._orb && window.SW_UI._orb.card && typeof window.SW_UI._orb.card.setPrefs === 'function') {
+        window.SW_UI._orb.card.setPrefs({ rate: this.rate });
+      }
+      this.savePreferences();
+    }
+
+    setVoicePersona(personaId, options = {}) {
+      if (!this.reader || typeof this.reader.setVoicePersona !== 'function') return null;
+      const info = personaId === '__next__'
+        ? this.reader.cycleVoicePersona()
+        : this.reader.setVoicePersona(personaId);
+      this.voicePersona = info.id;
+      if (options.clearSpecificVoice) {
+        this.voiceURI = '';
+        this.reader.setPreferredVoiceURI('');
+      }
+      if (window.SW_UI && window.SW_UI._orb && window.SW_UI._orb.card && typeof window.SW_UI._orb.card.setPrefs === 'function') {
+        window.SW_UI._orb.card.setPrefs({ voicePersona: info.id });
+      }
+      this.savePreferences();
+
+      const sampleMsg = this.lang === 'hi-IN'
+        ? `नमस्ते! अब मेरी आवाज़ ${info.name} (${info.subtitle}) पर सेट है।`
+        : `Hi! Switched narrator voice to ${info.name} — ${info.subtitle}.`;
+
+      if (options.showCard && window.SW_UI) {
+        const allPersonas = typeof this.reader.getVoicePersonas === 'function' ? this.reader.getVoicePersonas() : [];
+        window.SW_UI.showCard({
+          type: 'choices',
+          title: `Narrator Voice: ${info.name}`,
+          text: `${sampleMsg} Tap any voice style below to preview it:`,
+          choices: allPersonas.map((p) => ({
+            id: p.id,
+            label: `${p.name} — ${p.subtitle}${p.id === info.id ? ' ✓' : ''}`
+          })),
+          onAction: (act, payload) => {
+            if (act === 'choose' && payload && payload.choice && payload.choice.id) {
+              this.setVoicePersona(payload.choice.id, { preview: true, showCard: true, clearSpecificVoice: true });
+            }
+          }
+        });
+      }
+      if (options.preview) {
+        this.setAssistantReply(sampleMsg);
+        if (this.dialogue && this.dialogue.isActive()) {
+          this.dialogue._sayAndDisplay(sampleMsg, { openBubble: false, speak: true });
+        } else {
+          this.reader.readText(sampleMsg);
+        }
+      }
+      return info;
+    }
     setAssistantReply(text) { if (this.dialogue && text && !/^(?:Listening\.\.\.|Idle|Ready\b|Reading sentence \d+)/i.test(String(text))) this.dialogue.lastSpokenText = String(text); }
     syncStopButton() {}
     recordError(msg) { if (msg) { this.errors.unshift({ time: new Date().toLocaleTimeString(), message: String(msg) }); this.errors.length = Math.min(10, this.errors.length); } }
@@ -1951,6 +2062,31 @@
 
       const normInput = this._normalizeTaskPhrase(cleanInput);
       const tl = this.taskLifecycle;
+
+      // Fast-Path 0A: Instant Narrator Voice Persona Switch ("change voice", "switch narrator voice", "use deep/male/orion voice", "use aria voice")
+      if (cleanInput && !(tl && tl.state === 'WAITING_FOR_CLARIFICATION')) {
+        const voiceCmdMatch = cleanInput.match(
+          /^(?:(?:change|switch|cycle|try\s+(?:a\s+)?(?:different|another|new)|pick|choose|set|use)\s+(?:the\s+)?(?:narrator\s+|assistant\s+|speaking\s+|tts\s+)?voice(?:\s+(?:to|as)\s+(.+))?|(?:use|switch\s+to|set)\s+(nova|aria|orion|sage|breeze|male|female|deep|warm|bright|calm|lively|storyteller)\s+voice)$/i
+        );
+        if (voiceCmdMatch) {
+          const hint = String(voiceCmdMatch[1] || voiceCmdMatch[2] || '').trim().toLowerCase();
+          let targetPersona = '__next__';
+          if (/\b(?:orion|male|man|deep|calm|low|studio)\b/.test(hint)) targetPersona = 'orion';
+          else if (/\b(?:aria|bright|expressive|energetic|female)\b/.test(hint)) targetPersona = 'aria';
+          else if (/\b(?:nova|warm|natural|default)\b/.test(hint)) targetPersona = 'nova';
+          else if (/\b(?:sage|storyteller|crisp|british)\b/.test(hint)) targetPersona = 'sage';
+          else if (/\b(?:breeze|lively|fast|snappy)\b/.test(hint)) targetPersona = 'breeze';
+          const info = this.setVoicePersona(targetPersona, { preview: true, showCard: true, clearSpecificVoice: true });
+          return Promise.resolve({ ok: true, verified: true, status: 'voice_changed', voicePersona: info && info.id });
+        }
+
+        // Fast-Path 0B: Cross-Tab & In-Tab "Go Back / Previous Page" (wakes sleeping previous webpage tab when current page opened in a new tab!)
+        if (/^(?:go\s+back(?:\s+to\s+(?:the\s+)?(?:previous|last)\s+(?:page|webpage|tab|site))?|(?:go\s+to|open|switch\s+(?:back\s+)?to|return\s+to|back\s+to)\s+(?:the\s+)?(?:previous|last)\s+(?:page|webpage|tab|site))$/i.test(cleanInput) && this.navigator) {
+          const preferTab = /\b(?:tab|webpage|site)\b/i.test(cleanInput);
+          this._setStatusChip('Returning to previous page...');
+          return Promise.resolve(this.navigator.historyAction('back', 0.98, { fastPath: true, skipConfirm: true, preferPreviousTab: preferTab }));
+        }
+      }
 
       // Priority 4A: Immediate cancellation bypasses _commandQueue so active LLM/TTS work aborts right away
       if (cleanInput && this._isTaskCancelPhrase(cleanInput)) {
@@ -3548,7 +3684,7 @@
           }
         }
         this._setStatusChip('Going back to the previous page...');
-        return this.navigator.historyAction('back', 0.95);
+        return this.navigator.historyAction('back', 0.95, { fastPath: true, skipConfirm: true, preferPreviousTab: /\b(?:tab|webpage|site)\b/i.test(raw) });
       }
 
       if (cat === C.PAGE_NAVIGATION && central.subAction === 'semantic_destination' && this.navigator) {
@@ -7048,6 +7184,7 @@
       return new Promise((resolve) => {
         chrome.storage.local.get([
           'sleepwalker_lang', 'sleepwalker_font_size', 'sleepwalker_rate', 'sleepwalker_barge_in',
+          'sleepwalker_voice_persona', 'sleepwalker_voice_uri',
           'sleepwalker_ai_search_enabled', 'sleepwalker_ollama_url', 'sleepwalker_ollama_model',
           'sleepwalker_memory_paused', 'sleepwalker_disable_page_analysis',
           'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
@@ -7057,6 +7194,20 @@
             if (d.sleepwalker_lang) this.setLanguage(d.sleepwalker_lang);
             if (d.sleepwalker_rate) this.setRate(d.sleepwalker_rate);
             if (d.sleepwalker_font_size) this.fontSize = Number(d.sleepwalker_font_size) || 18;
+            this.voicePersona = d.sleepwalker_voice_persona || 'nova';
+            this.voiceURI = d.sleepwalker_voice_uri || '';
+            if (this.reader) {
+              if (typeof this.reader.setVoicePersona === 'function') this.reader.setVoicePersona(this.voicePersona);
+              if (typeof this.reader.setPreferredVoiceURI === 'function') this.reader.setPreferredVoiceURI(this.voiceURI);
+            }
+            if (window.SW_UI && window.SW_UI._orb && window.SW_UI._orb.card && typeof window.SW_UI._orb.card.setPrefs === 'function') {
+              window.SW_UI._orb.card.setPrefs({
+                lang: this.lang || 'auto',
+                rate: this.rate || 1.0,
+                fontSize: this.fontSize || 18,
+                voicePersona: this.voicePersona
+              });
+            }
             this.bargeIn = Boolean(d.sleepwalker_barge_in);
             this.aiSearchEnabled = d.sleepwalker_ai_search_enabled !== false;
             this.ollamaUrl = d.sleepwalker_ollama_url || 'http://localhost:11434';
@@ -7102,6 +7253,17 @@
             }
             if (changes.sleepwalker_genuine_input_enabled) {
               this.setGenuineInputEnabled(changes.sleepwalker_genuine_input_enabled.newValue === true, false);
+            }
+            if (changes.sleepwalker_voice_persona && this.reader && typeof this.reader.setVoicePersona === 'function') {
+              this.voicePersona = changes.sleepwalker_voice_persona.newValue || 'nova';
+              this.reader.setVoicePersona(this.voicePersona);
+              if (window.SW_UI && window.SW_UI._orb && window.SW_UI._orb.card && typeof window.SW_UI._orb.card.setPrefs === 'function') {
+                window.SW_UI._orb.card.setPrefs({ voicePersona: this.voicePersona });
+              }
+            }
+            if (changes.sleepwalker_voice_uri && this.reader && typeof this.reader.setPreferredVoiceURI === 'function') {
+              this.voiceURI = changes.sleepwalker_voice_uri.newValue || '';
+              this.reader.setPreferredVoiceURI(this.voiceURI);
             }
             if (!this.memory) return;
             if (changes.sleepwalker_memory_paused) this.memory.privacy.memoryPaused = Boolean(changes.sleepwalker_memory_paused.newValue);
@@ -7232,7 +7394,12 @@
 
     savePreferences() {
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ sleepwalker_lang: this.lang, sleepwalker_font_size: this.fontSize, sleepwalker_rate: this.rate });
+        chrome.storage.local.set({
+          sleepwalker_lang: this.lang,
+          sleepwalker_font_size: this.fontSize,
+          sleepwalker_rate: this.rate,
+          sleepwalker_voice_persona: this.voicePersona || 'nova'
+        });
       }
     }
   }
@@ -7262,9 +7429,7 @@
           ctrl.syncSessionFromTabActivation({ isForegroundTab: req.isForegroundTab !== false });
           send({ status: 'ok' });
         } else if (req && req.action === 'SLEEPWALKER_TAB_BACKGROUNDED') {
-          if (ctrl.voice && ctrl.voice.isListening) {
-            ctrl.voice.pauseForTabSwitch();
-          }
+          ctrl.sleepForOtherTab(req.reason || 'tab_backgrounded');
           send({ status: 'ok' });
         } else if (req && req.action === 'SLEEPWALKER_REMINDER_DUE') {
           ctrl._handleDueReminderPopup(req.reminder);

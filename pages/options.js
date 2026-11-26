@@ -35,6 +35,7 @@
       'sleepwalker_memory_paused', 'sleepwalker_disable_page_analysis',
       'sleepwalker_adaptive_learning_enabled', 'sleepwalker_proactive_enabled',
       'sleepwalker_lang', 'sleepwalker_rate', 'sleepwalker_font_size',
+      'sleepwalker_voice_persona', 'sleepwalker_voice_uri',
       'sleepwalker_glow_enabled', 'sleepwalker_barge_in', 'sleepwalker_translit',
       'sleepwalker_profile_optin', 'sleepwalker_local_profile',
       'sleepwalker_enable_stagehand_adapter',
@@ -74,6 +75,10 @@
       byId('opt-lang').value = d.sleepwalker_lang || 'auto';
       byId('opt-rate').value = String(d.sleepwalker_rate || 1);
       byId('opt-font-size').value = String(d.sleepwalker_font_size || 18);
+      if (byId('opt-voice-persona')) {
+        byId('opt-voice-persona').value = d.sleepwalker_voice_persona || 'nova';
+      }
+      populateVoiceSelect(d.sleepwalker_voice_uri || '');
       byId('opt-glow-enabled').checked = d.sleepwalker_glow_enabled !== false;
       byId('opt-barge-in').checked = Boolean(d.sleepwalker_barge_in);
       byId('opt-translit').checked = d.sleepwalker_translit !== false;
@@ -86,6 +91,73 @@
       byId('prof-state').value = p.state || '';
       byId('prof-pin').value = p.pincode || '';
     });
+  }
+
+  function populateVoiceSelect(selectedUri = '') {
+    const sel = byId('opt-voice-uri');
+    if (!sel || !('speechSynthesis' in window)) return;
+    const render = () => {
+      const voices = window.speechSynthesis.getVoices() || [];
+      const curVal = selectedUri || sel.value || '';
+      sel.innerHTML = '<option value="">Auto (Best Neural / Natural Match)</option>';
+      const sorted = voices.slice().sort((a, b) => {
+        const aNeural = /\b(?:natural|neural|online|google)\b/i.test(a.name || '') ? 0 : 1;
+        const bNeural = /\b(?:natural|neural|online|google)\b/i.test(b.name || '') ? 0 : 1;
+        if (aNeural !== bNeural) return aNeural - bNeural;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+      });
+      sorted.forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = v.voiceURI || v.name;
+        const tag = /\b(?:natural|neural|online|google)\b/i.test(v.name || '') ? ' ★' : '';
+        opt.textContent = `${v.name} (${v.lang || 'default'})${tag}`;
+        sel.appendChild(opt);
+      });
+      if (curVal) sel.value = curVal;
+    };
+    render();
+    if (!window.__swOptVoicesBound) {
+      window.__swOptVoicesBound = true;
+      window.speechSynthesis.onvoiceschanged = () => render();
+    }
+  }
+
+  function previewSelectedVoice() {
+    if (!('speechSynthesis' in window)) {
+      setStatus('SpeechSynthesis is not available in this browser.');
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const persona = (byId('opt-voice-persona') && byId('opt-voice-persona').value) || 'nova';
+    const explicitUri = (byId('opt-voice-uri') && byId('opt-voice-uri').value) || '';
+    const rate = Number((byId('opt-rate') && byId('opt-rate').value) || 1.0) || 1.0;
+    const personaMap = {
+      nova: { name: 'Nova', pitch: 1.04, mul: 1.00, rx: /aria|jenny|neerja|natural|google us|google uk.*female/i },
+      aria: { name: 'Aria', pitch: 1.11, mul: 1.04, rx: /sonia|natasha|clara|aria|google us|natural/i },
+      orion: { name: 'Orion', pitch: 0.90, mul: 0.98, rx: /guy|ryan|christopher|prabhat|madhur|male|daniel/i },
+      sage: { name: 'Sage', pitch: 0.98, mul: 0.96, rx: /libby|google uk|rishi|emily|natural/i },
+      breeze: { name: 'Breeze', pitch: 1.07, mul: 1.08, rx: /google|online|neural|natural/i }
+    };
+    const cfg = personaMap[persona] || personaMap.nova;
+    const voices = window.speechSynthesis.getVoices() || [];
+    let chosen = explicitUri ? voices.find((v) => v.voiceURI === explicitUri || v.name === explicitUri) : null;
+    if (!chosen) {
+      const enPool = voices.filter((v) => /^en/i.test(v.lang || ''));
+      const pool = enPool.length > 0 ? enPool : voices;
+      chosen = pool.find((v) => cfg.rx.test(v.name || '') && !/\bdesktop\b/i.test(v.name || '')) ||
+        pool.find((v) => /\b(?:natural|neural|online|google)\b/i.test(v.name || '')) ||
+        pool[0] ||
+        null;
+    }
+    const utt = new SpeechSynthesisUtterance(`Hi there! I'm ${cfg.name}, your Sleepwalker voice assistant. Ready whenever you are.`);
+    utt.pitch = cfg.pitch;
+    utt.rate = Math.max(0.65, Math.min(2.0, rate * cfg.mul));
+    if (chosen) {
+      utt.voice = chosen;
+      if (chosen.lang) utt.lang = chosen.lang;
+    }
+    window.speechSynthesis.speak(utt);
+    setStatus(`Previewing ${cfg.name}${chosen ? ` (${chosen.name})` : ''}...`);
   }
 
   function setStatus(msg) {
@@ -128,6 +200,8 @@
       sleepwalker_lang: byId('opt-lang').value || 'auto',
       sleepwalker_rate: Number(byId('opt-rate').value) || 1.0,
       sleepwalker_font_size: Number(byId('opt-font-size').value) || 18,
+      sleepwalker_voice_persona: (byId('opt-voice-persona') && byId('opt-voice-persona').value) || 'nova',
+      sleepwalker_voice_uri: (byId('opt-voice-uri') && byId('opt-voice-uri').value) || '',
       sleepwalker_glow_enabled: byId('opt-glow-enabled').checked,
       sleepwalker_barge_in: byId('opt-barge-in').checked,
       sleepwalker_translit: byId('opt-translit').checked,
@@ -502,6 +576,7 @@
     });
     byId('opt-open-shelf').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'SLEEPWALKER_OPEN_SHELF_SETUP' }));
     byId('opt-open-mic').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'SLEEPWALKER_OPEN_MIC_SETUP' }));
+    if (byId('opt-preview-voice')) byId('opt-preview-voice').addEventListener('click', previewSelectedVoice);
     byId('opt-load-diag').addEventListener('click', refreshLiveHealth);
   });
 })();

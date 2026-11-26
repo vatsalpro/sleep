@@ -16,6 +16,56 @@
   // Prevent multiple instantiations if injected repeatedly
   if (window.SleepwalkerReader) return;
 
+  const VOICE_PERSONAS = Object.freeze({
+    nova: {
+      id: 'nova',
+      name: 'Nova',
+      subtitle: 'Warm & Natural',
+      pitch: 1.04,
+      rateMul: 1.00,
+      genderPref: 'female',
+      keywords: ['aria', 'jenny', 'neerja', 'swara', 'natural', 'google us english', 'google uk english female', 'samantha', 'ava']
+    },
+    aria: {
+      id: 'aria',
+      name: 'Aria',
+      subtitle: 'Bright & Expressive',
+      pitch: 1.11,
+      rateMul: 1.04,
+      genderPref: 'female',
+      keywords: ['sonia', 'natasha', 'clara', 'emma', 'aria', 'google us english', 'natural', 'zira']
+    },
+    orion: {
+      id: 'orion',
+      name: 'Orion',
+      subtitle: 'Deep & Calm',
+      pitch: 0.90,
+      rateMul: 0.98,
+      genderPref: 'male',
+      keywords: ['guy', 'ryan', 'christopher', 'prabhat', 'madhur', 'google uk english male', 'daniel', 'eric', 'roger']
+    },
+    sage: {
+      id: 'sage',
+      name: 'Sage',
+      subtitle: 'Crisp Storyteller',
+      pitch: 0.98,
+      rateMul: 0.96,
+      genderPref: 'any',
+      keywords: ['libby', 'google uk english female', 'google uk english male', 'rishi', 'emily', 'thomas', 'natural']
+    },
+    breeze: {
+      id: 'breeze',
+      name: 'Breeze',
+      subtitle: 'Lively Copilot',
+      pitch: 1.07,
+      rateMul: 1.08,
+      genderPref: 'any',
+      keywords: ['google', 'online', 'neural', 'natural', 'michelle', 'steffan', 'ana']
+    }
+  });
+
+  const PERSONA_ORDER = ['nova', 'aria', 'orion', 'sage', 'breeze'];
+
   class SleepwalkerReader {
     constructor() {
       this.sentences = [];       // Array of { text, element }
@@ -24,6 +74,8 @@
       this.isPaused = false;     // Reading temporarily paused
       this.rate = 1.0;           // Speech speed (0.8x to 1.5x)
       this.lang = 'en-IN';       // 'en-IN' or 'hi-IN'
+      this.voicePersona = 'nova'; // 'nova' | 'aria' | 'orion' | 'sage' | 'breeze'
+      this.preferredVoiceURI = ''; // Optional exact system/browser voice URI override
       this.activeHighlight = null; // Currently highlighted element
       this._retriedWithDefaultVoice = false; // Flag for fallback attempt
       this.lastMode = 'page'; // 'page' | 'elements' | 'text'
@@ -78,27 +130,115 @@
       document.head.appendChild(style);
     }
 
+    getVoicePersonas() {
+      return PERSONA_ORDER.map((id) => ({ ...VOICE_PERSONAS[id] }));
+    }
+
+    getCurrentPersonaInfo() {
+      return VOICE_PERSONAS[this.voicePersona] || VOICE_PERSONAS.nova;
+    }
+
+    setVoicePersona(personaId) {
+      const clean = String(personaId || '').trim().toLowerCase();
+      if (VOICE_PERSONAS[clean]) {
+        this.voicePersona = clean;
+      } else {
+        this.voicePersona = 'nova';
+      }
+      return this.getCurrentPersonaInfo();
+    }
+
+    cycleVoicePersona() {
+      const idx = PERSONA_ORDER.indexOf(this.voicePersona);
+      const next = PERSONA_ORDER[(idx + 1) % PERSONA_ORDER.length];
+      return this.setVoicePersona(next);
+    }
+
+    setPreferredVoiceURI(uri = '') {
+      this.preferredVoiceURI = String(uri || '').trim();
+    }
+
     /**
-     * Pick best voice matching selected language (en-IN or hi-IN).
+     * Score & pick the most natural, expressive neural/cloud voice matching the selected
+     * language and active voice persona — avoiding robotic legacy SAPI5 Desktop voices whenever possible.
      */
     getBestVoice(lang) {
       if (!this.voices || this.voices.length === 0) {
         this.loadVoices();
       }
+      if (!this.voices || this.voices.length === 0) return null;
 
-      const normalizedLang = (lang || 'en-IN').toLowerCase();
-      const langPrefix = normalizedLang.split('-')[0]; // 'en' or 'hi'
+      const normalizedLang = (lang || this.lang || 'en-IN').toLowerCase();
+      const langPrefix = normalizedLang.split('-')[0]; // 'en', 'hi', etc.
+      const persona = this.getCurrentPersonaInfo();
 
-      // 1. Exact match (e.g. en-IN or hi-IN)
-      let match = this.voices.find(v => v.lang && v.lang.toLowerCase() === normalizedLang);
-      if (match) return match;
+      // 1. Honor explicit user-chosen voiceURI when compatible with the target language
+      if (this.preferredVoiceURI) {
+        const explicit = this.voices.find((v) => v && (v.voiceURI === this.preferredVoiceURI || v.name === this.preferredVoiceURI));
+        if (explicit && (!explicit.lang || explicit.lang.toLowerCase().startsWith(langPrefix))) {
+          return explicit;
+        }
+      }
 
-      // 2. Prefix match (e.g. any Hindi voice, or any English voice)
-      match = this.voices.find(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
-      if (match) return match;
+      // 2. Filter voices matching target language family (fallback to all voices if none match)
+      let pool = this.voices.filter((v) => v && v.lang && v.lang.toLowerCase().startsWith(langPrefix));
+      if (pool.length === 0) {
+        pool = this.voices.slice();
+      }
 
-      // 3. Fallback to default or first available voice
-      return this.voices.find(v => v.default) || this.voices[0] || null;
+      const MALE_HINTS = /\b(?:male|guy|ryan|christopher|prabhat|madhur|david|mark|daniel|george|rishi|james|eric|roger|steffan|thomas)\b/i;
+      const FEMALE_HINTS = /\b(?:female|aria|jenny|sonia|natasha|neerja|swara|heera|zira|samantha|victoria|karen|libby|clara|emma|ava|michelle)\b/i;
+
+      let bestVoice = null;
+      let bestScore = -9999;
+
+      for (const v of pool) {
+        const nameLower = String(v.name || '').toLowerCase();
+        const uriLower = String(v.voiceURI || '').toLowerCase();
+        const vLang = String(v.lang || '').toLowerCase();
+        let score = 0;
+
+        // Strongly prefer Neural / Natural / Online / Google cloud voices over old robotic SAPI5 "Desktop" voices!
+        if (/\b(?:natural|neural|online)\b/.test(nameLower) || /\b(?:natural|neural)\b/.test(uriLower)) {
+          score += 65;
+        } else if (nameLower.includes('google')) {
+          score += 54;
+        } else if (v.localService === false) {
+          score += 38;
+        }
+        if (/\bdesktop\b/.test(nameLower) || /\b(?:espeak|microsoft david|microsoft mark|microsoft ravi|microsoft heera)\b/.test(nameLower)) {
+          score -= 42;
+        }
+
+        // Persona keyword & vocal character affinity
+        for (let i = 0; i < persona.keywords.length; i++) {
+          if (nameLower.includes(persona.keywords[i])) {
+            score += (38 - i * 2);
+            break;
+          }
+        }
+        if (persona.genderPref === 'male') {
+          if (MALE_HINTS.test(nameLower)) score += 28;
+          else if (FEMALE_HINTS.test(nameLower)) score -= 18;
+        } else if (persona.genderPref === 'female') {
+          if (FEMALE_HINTS.test(nameLower)) score += 24;
+          else if (MALE_HINTS.test(nameLower)) score -= 16;
+        }
+
+        // Locale closeness (note: a Natural en-US/en-GB voice sounds MUCH better than a robotic SAPI5 en-IN Desktop voice!)
+        if (vLang === normalizedLang) {
+          score += 18;
+        } else if (vLang.startsWith(langPrefix)) {
+          score += 10;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestVoice = v;
+        }
+      }
+
+      return bestVoice || this.voices.find((v) => v.default) || this.voices[0] || null;
     }
 
     /**
@@ -550,14 +690,21 @@
         window.__SW_ECHO_TRACKER__.note(speakText);
       }
 
+      const persona = this.getCurrentPersonaInfo();
       const utterance = new SpeechSynthesisUtterance(speakText);
-      utterance.rate = this.rate;
+      const effectiveRate = Math.max(0.65, Math.min(2.0, (this.rate || 1.0) * (persona.rateMul || 1.0)));
+      const cadenceJitter = (this.sentences.length > 1) ? (((this.currentIndex % 3) - 1) * 0.018) : 0;
+      utterance.rate = effectiveRate;
+      utterance.pitch = Math.max(0.75, Math.min(1.35, (persona.pitch || 1.0) + cadenceJitter));
       utterance.lang = this.lang;
       this._currentUtterance = utterance;
 
       const voice = this.getBestVoice(this.lang);
       if (voice) {
-        try { utterance.voice = voice; } catch (_e) {}
+        try {
+          utterance.voice = voice;
+          if (voice.lang) utterance.lang = voice.lang;
+        } catch (_e) {}
       }
 
       let sawStart = false;
