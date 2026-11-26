@@ -61,6 +61,7 @@
       recognition.lang = lang;
       recognition.continuous = true;
       recognition.interimResults = true;
+      recognition.maxAlternatives = 4;
 
       recognition.onstart = () => {
         isListening = true;
@@ -72,19 +73,46 @@
       recognition.onresult = (event) => {
         let interim = '';
         let final = '';
+        const finalSegs = [];
+        const interimSegs = [];
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const t = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
+          const res = event.results[i];
+          const t = res[0].transcript;
+          const segAlts = [];
+          const len = Math.min(4, Number(res.length) || 1);
+          for (let k = 0; k < len; k++) {
+            if (res[k] && res[k].transcript) {
+              segAlts.push({ transcript: String(res[k].transcript), confidence: typeof res[k].confidence === 'number' ? res[k].confidence : null });
+            }
+          }
+          if (res.isFinal) {
             final += t;
+            if (segAlts.length > 0) finalSegs.push(segAlts);
           } else {
             interim += t;
+            if (segAlts.length > 0) interimSegs.push(segAlts);
+          }
+        }
+        const activeSegs = finalSegs.length > 0 ? finalSegs : interimSegs;
+        const alternatives = [];
+        if (activeSegs.length > 0) {
+          const maxK = Math.min(4, Math.max(...activeSegs.map((s) => s.length)));
+          const seen = new Set();
+          for (let k = 0; k < maxK; k++) {
+            const joined = activeSegs.map((s) => s[Math.min(k, s.length - 1)].transcript).join('').trim();
+            const norm = joined.toLowerCase().replace(/\s+/g, ' ');
+            if (joined && !seen.has(norm)) {
+              seen.add(norm);
+              alternatives.push({ transcript: joined, confidence: activeSegs[0][Math.min(k, activeSegs[0].length - 1)].confidence, rank: k });
+            }
           }
         }
 
         chrome.runtime.sendMessage({
           type: 'OFFSCREEN_TRANSCRIPT',
           interim: interim.trim(),
-          final: final.trim()
+          final: final.trim(),
+          alternatives
         });
       };
 

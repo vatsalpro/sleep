@@ -893,11 +893,515 @@
     return val <= cap ? val : null;
   }
 
+  // =========================================================================
+  // Page-Grounded Fuzzy Matching & Chrome N-Best Backup Guess Re-Ranker
+  // =========================================================================
+  const SENSITIVE_ACTION_LABEL_RE = /\b(?:sign\s*out|log\s*out|delete|remove|erase|unsubscribe|deactivate|close\s+account|pay\b|payment|purchase|buy\s+now|place\s+order|checkout|check\s+out|submit|transfer|wire|send\s+money|reset\s+all)\b/i;
+
+  function isSensitiveActionLabel(label) {
+    return SENSITIVE_ACTION_LABEL_RE.test(String(label || ''));
+  }
+
+  function normalizeCompoundHomophones(rawText) {
+    let s = String(rawText || '')
+      .normalize('NFC')
+      .toLowerCase()
+      .replace(/['’`]/g, '')
+      .replace(/[-_/]+/g, ' ')
+      .replace(/[.,!?;:()\[\]{}"“”]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!s) return '';
+
+    return s
+      .replace(/\byou\s+tube\b/g, 'youtube')
+      .replace(/\byoutube\s+stud(?:y(?:\s+oh)?|i|eo|ios)\b/g, 'youtube studio')
+      .replace(/\bcreator\s+stud(?:y(?:\s+oh)?|i|eo|ios)\b/g, 'creator studio')
+      .replace(/\bsine\s+in\b|\bsignin\b/g, 'sign in')
+      .replace(/\bsine\s+up\b|\bsignup\b/g, 'sign up')
+      .replace(/\blogin\b/g, 'log in')
+      .replace(/\blogout\b/g, 'log out')
+      .replace(/\bsignout\b/g, 'sign out')
+      .replace(/\bsub\s+scriptions?\b|\bsub\s+descriptions?\b|\bsubscrib\s*tions?\b/g, 'subscriptions')
+      .replace(/\bset\s+tings?\b/g, 'settings')
+      .replace(/\bplay\s+lists?\b/g, 'playlists')
+      .replace(/\bwatch\s*later\b/g, 'watch later')
+      .replace(/\bdark\s+(?:theam|team|mod)\b/g, 'dark theme')
+      .replace(/\blight\s+(?:theam|team|mod)\b/g, 'light theme')
+      .replace(/\bfull\s+screen\b/g, 'fullscreen')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function jaroWinklerSimilarity(a, b) {
+    const s1 = String(a || '');
+    const s2 = String(b || '');
+    if (s1 === s2) return s1.length > 0 ? 1.0 : 0;
+    const len1 = s1.length;
+    const len2 = s2.length;
+    if (len1 === 0 || len2 === 0) return 0;
+
+    const matchDist = Math.max(0, Math.floor(Math.max(len1, len2) / 2) - 1);
+    const s1Matches = new Array(len1).fill(false);
+    const s2Matches = new Array(len2).fill(false);
+
+    let matches = 0;
+    for (let i = 0; i < len1; i++) {
+      const start = Math.max(0, i - matchDist);
+      const end = Math.min(i + matchDist + 1, len2);
+      for (let j = start; j < end; j++) {
+        if (s2Matches[j] || s1[i] !== s2[j]) continue;
+        s1Matches[i] = true;
+        s2Matches[j] = true;
+        matches += 1;
+        break;
+      }
+    }
+    if (matches === 0) return 0;
+
+    let transpositions = 0;
+    let k = 0;
+    for (let i = 0; i < len1; i++) {
+      if (!s1Matches[i]) continue;
+      while (!s2Matches[k]) k += 1;
+      if (s1[i] !== s2[k]) transpositions += 1;
+      k += 1;
+    }
+
+    const jaro = ((matches / len1) + (matches / len2) + ((matches - transpositions / 2) / matches)) / 3;
+    let prefix = 0;
+    const maxPrefix = Math.min(4, len1, len2);
+    while (prefix < maxPrefix && s1[prefix] === s2[prefix]) prefix += 1;
+    return Math.min(1.0, jaro + prefix * 0.1 * (1 - jaro));
+  }
+
+  /**
+   * Bounded fuzzy + phonetic + compound similarity score (0..1) between a target query
+   * and a visible UI label. Refuses short-word (<3 char) false positives and caps
+   * destructive/sensitive labels unless virtually exact.
+   */
+  function fuzzyLabelScore(query, candidateLabel, options = {}) {
+    const qNorm = normalizeCompoundHomophones(query);
+    const cNorm = normalizeCompoundHomophones(candidateLabel);
+    if (!qNorm || !cNorm) return 0;
+
+    if (qNorm === cNorm) return 1.0;
+
+    // Short queries ("ok", "no", "up", "go") must match exactly — never fuzzy-match short words!
+    if (qNorm.length <= 2 || cNorm.length <= 2) {
+      return 0;
+    }
+
+    let best = scoreFieldText(qNorm, cNorm, options);
+
+    // Collapsed compound comparison ("sub scription" <-> "subscriptions", "sign in" <-> "signin")
+    const qCollapsed = qNorm.replace(/\s+/g, '');
+    const cCollapsed = cNorm.replace(/\s+/g, '');
+    if (qCollapsed.length >= 4 && cCollapsed.length >= 4) {
+      if (qCollapsed === cCollapsed) {
+        best = Math.max(best, 0.97);
+      } else {
+        const cDist = editDistance(qCollapsed, cCollapsed);
+        const maxLen = Math.max(qCollapsed.length, cCollapsed.length);
+        const editSim = 1 - (cDist / maxLen);
+        const jw = jaroWinklerSimilarity(qCollapsed, cCollapsed);
+        if (cDist <= 1 && maxLen >= 5) {
+          best = Math.max(best, 0.93);
+        } else if (cDist <= 2 && maxLen >= 8 && editSim >= 0.78) {
+          best = Math.max(best, 0.88);
+        } else if (jw >= 0.90 && editSim >= 0.74) {
+          best = Math.max(best, Math.min(0.91, 0.78 + (jw - 0.88) * 1.1));
+        }
+      }
+    }
+
+    // Token-aligned fuzzy matching for multi-word UI labels ("acount setings" -> "Account settings")
+    const qWords = qNorm.split(' ').filter((w) => w.length > 0 && !LABEL_STRIP_WORDS.has(w));
+    const cWords = cNorm.split(' ').filter((w) => w.length > 0 && !LABEL_STRIP_WORDS.has(w));
+    if (qWords.length > 0 && cWords.length > 0) {
+      let matchedSum = 0;
+      for (const qw of qWords) {
+        let bestTok = 0;
+        for (const cw of cWords) {
+          if (qw === cw || stemToken(qw) === stemToken(cw)) {
+            bestTok = 1.0;
+            break;
+          }
+          const minW = Math.min(qw.length, cw.length);
+          const maxW = Math.max(qw.length, cw.length);
+          if (minW >= 4) {
+            const d = editDistance(qw, cw);
+            if (d <= 1) bestTok = Math.max(bestTok, 0.92);
+            else if (d <= 2 && maxW >= 7) bestTok = Math.max(bestTok, 0.85);
+            else {
+              const tokJw = jaroWinklerSimilarity(qw, cw);
+              if (tokJw >= 0.89 && (1 - d / maxW) >= 0.70) bestTok = Math.max(bestTok, 0.84);
+            }
+          }
+        }
+        matchedSum += bestTok;
+      }
+      const qCov = matchedSum / qWords.length;
+      const cCov = Math.min(1, matchedSum / cWords.length);
+      if (qCov >= 0.84 && cCov >= 0.80) {
+        best = Math.max(best, Math.min(0.94, 0.76 * qCov + 0.18 * cCov));
+      } else if (qCov >= 0.88 && cWords.length <= qWords.length + 1) {
+        best = Math.max(best, 0.84);
+      }
+    }
+
+    // Safety cap: never allow loose fuzzy matching onto destructive/payment/sign-out controls
+    if (!options.allowSensitiveFuzzy && isSensitiveActionLabel(cNorm) && best < 0.96) {
+      return Math.min(best, 0.55);
+    }
+
+    return Math.min(1.0, best);
+  }
+
+  function repairLeadingCommandVerb(rawText) {
+    const trimmed = String(rawText || '').trim();
+    if (!trimmed) return { text: '', verbRepaired: false };
+
+    const rules = [
+      [/^(?:clik|clck|clic|klick|clcik)\s+(.+)$/i, 'click $1'],
+      [/^(?:opin|opne|opn|openn)\s+(.+)$/i, 'open $1'],
+      [/^(?:selct|slect|selec|slecte)\s+(.+)$/i, 'select $1'],
+      [/^(?:scrol|scorll|scrool)\s+(up\b|down\b|top\b|bottom\b|to\s+.+)$/i, 'scroll $1'],
+      [/^(?:serch|saerch|seach|reserch)\s+(.+)$/i, 'search $1'],
+      [/^(?:sumarize|summerize|summrize)\s*(.*)$/i, (_m, rest) => (rest ? `summarize ${rest}` : 'summarize this page')]
+    ];
+
+    for (const [re, repl] of rules) {
+      if (re.test(trimmed)) {
+        const next = typeof repl === 'function' ? trimmed.replace(re, repl) : trimmed.replace(re, repl);
+        return { text: next.trim(), verbRepaired: true };
+      }
+    }
+    return { text: trimmed, verbRepaired: false };
+  }
+
+  const FREEFORM_PAYLOAD_CMD_RE = /^(?:search|google|look\s+up|find\s+videos?|type|write|enter|dictate|paste|remind\s+me|teach|calculate|compute)\b/i;
+  const BUILTIN_NAV_GRAMMAR_RE = /^(?:scroll\s+(?:down|up|to\s+(?:the\s+)?(?:top|bottom))|go\s+(?:back|forward)|read\s+(?:this\s+page|the\s+page|page|aloud|it\s+again|again)|(?:stop|pause|resume)(?:\s+reading)?|(?:summarize|summarise|explain)(?:\s+(?:this|the)\s+(?:page|webpage|article))?|outline|show\s+outline|list\s+tabs|you\s+can\s+rest|cancel|stop)$/i;
+  const DESKTOP_GUARD_RE = /\b(?:notepad|calculator|calc\.exe|windows\s+settings|file\s+explorer|desktop\s+(?:app|window|document)|local\s+(?:file|document))\b/i;
+
+  function findBestPageCandidateMatch(targetQuery, candidates, allowedKinds = null) {
+    const cleanQ = String(targetQuery || '').replace(/^(?:on|the|a|an)\s+/i, '').replace(/\s+(?:button|link|option|menu|item|tab|field|input)$/i, '').trim();
+    if (!cleanQ || cleanQ.length < 3) {
+      return { best: null, bestScore: 0, secondScore: 0, lead: 0 };
+    }
+    const byNormLabel = new Map();
+    for (const c of (candidates || [])) {
+      if (!c || !c.label) continue;
+      if (allowedKinds && !allowedKinds.has(c.kind || 'control')) continue;
+      const lbl = String(c.label).replace(/\s+/g, ' ').trim();
+      if (!lbl || lbl.length > 90) continue;
+      const key = lbl.toLowerCase();
+      let s = fuzzyLabelScore(cleanQ, lbl);
+      if (s > 0 && c.kind === 'open_menu') {
+        s = Math.min(1.0, s + 0.04);
+      }
+      const prev = byNormLabel.get(key);
+      if (!prev || s > prev.score) {
+        byNormLabel.set(key, {
+          label: lbl,
+          kind: c.kind || 'control',
+          isSensitive: Boolean(c.isSensitive || isSensitiveActionLabel(lbl)),
+          score: s,
+          rawScore: fuzzyLabelScore(cleanQ, lbl, { allowSensitiveFuzzy: true })
+        });
+      }
+    }
+    const ranked = Array.from(byNormLabel.values()).sort((a, b) => b.score - a.score);
+    const top = ranked[0] || null;
+    const second = ranked[1] || null;
+    return {
+      best: top,
+      bestScore: top ? top.score : 0,
+      secondScore: second ? second.score : 0,
+      lead: top ? (top.score - (second ? second.score : 0)) : 0
+    };
+  }
+
+  function evaluateCommandHypothesis(rawHypothesis, rank, candidates, inputSource = 'voice') {
+    const repaired = repairLeadingCommandVerb(rawHypothesis);
+    let working = repaired.text;
+    const rankPenalty = Math.max(0, Number(rank) || 0) * 0.03;
+
+    if (!working) {
+      return { text: '', netScore: 0, rawMatchScore: 0, matchedLabel: null, isSensitive: false, reason: 'empty', rank };
+    }
+
+    // Never mutate free-form search/dictation/desktop payloads
+    if (FREEFORM_PAYLOAD_CMD_RE.test(working) || DESKTOP_GUARD_RE.test(working)) {
+      return {
+        text: working,
+        netScore: Math.max(0, (repaired.verbRepaired ? 0.78 : 0.72) - rankPenalty),
+        rawMatchScore: repaired.verbRepaired ? 0.78 : 0.72,
+        matchedLabel: null,
+        isSensitive: false,
+        reason: repaired.verbRepaired ? 'verb_typo_repair' : 'passthrough_freeform',
+        rank,
+        changedFromRaw: working !== String(rawHypothesis || '').trim()
+      };
+    }
+
+    // Built-in navigation / reading / control commands
+    if (BUILTIN_NAV_GRAMMAR_RE.test(working)) {
+      return {
+        text: working,
+        netScore: Math.max(0, 0.93 - rankPenalty),
+        rawMatchScore: 0.93,
+        matchedLabel: null,
+        isSensitive: false,
+        reason: 'builtin_command_grammar',
+        rank,
+        changedFromRaw: working !== String(rawHypothesis || '').trim()
+      };
+    }
+
+    // Form field fill ("fill <field> with <value>") -> ONLY match <field>, NEVER touch <value>!
+    const fillMatch = working.match(/^(fill(?:\s+in|\s+out)?)\s+(?:the\s+)?(.+?)\s+(with|as|to)\s+(.+)$/i);
+    if (fillMatch) {
+      const verbPart = fillMatch[1];
+      const fieldQuery = fillMatch[2].trim();
+      const prepPart = fillMatch[3];
+      const valuePart = fillMatch[4]; // strictly untouched!
+      const m = findBestPageCandidateMatch(fieldQuery, candidates, new Set(['input']));
+      if (m.best && m.bestScore >= 0.85 && m.lead >= 0.12 && !m.best.isSensitive) {
+        const snapped = `${verbPart} ${m.best.label} ${prepPart} ${valuePart}`;
+        return {
+          text: snapped,
+          netScore: Math.max(0, m.bestScore - rankPenalty),
+          rawMatchScore: m.bestScore,
+          matchedLabel: m.best.label,
+          isSensitive: false,
+          reason: 'form_field_fuzzy_match',
+          rank,
+          changedFromRaw: snapped.toLowerCase() !== String(rawHypothesis || '').trim().toLowerCase()
+        };
+      }
+      return {
+        text: working,
+        netScore: Math.max(0, 0.68 - rankPenalty),
+        rawMatchScore: m.bestScore || 0.68,
+        matchedLabel: null,
+        isSensitive: false,
+        reason: 'fill_passthrough',
+        rank,
+        changedFromRaw: working !== String(rawHypothesis || '').trim()
+      };
+    }
+
+    // Hierarchical command ("open <Menu> and select <Option>" / "under <Menu> select <Option>")
+    const hierAndMatch = working.match(/^((?:open|expand|click)\s+(?:the\s+)?)(.+?)(\s+(?:and|then)\s+(?:select|choose|pick|click|open)\s+(?:the\s+)?)(.+)$/i);
+    if (hierAndMatch) {
+      const menuQ = hierAndMatch[2].trim();
+      const optQ = normalizeCompoundHomophones(hierAndMatch[4].trim());
+      const mMenu = findBestPageCandidateMatch(menuQ, candidates);
+      const mOpt = findBestPageCandidateMatch(optQ, candidates);
+      const bestMenuLbl = (mMenu.best && mMenu.bestScore >= 0.86 && mMenu.lead >= 0.12 && !mMenu.best.isSensitive) ? mMenu.best.label : hierAndMatch[2].trim();
+      const bestOptLbl = (mOpt.best && mOpt.bestScore >= 0.86 && mOpt.lead >= 0.12 && !mOpt.best.isSensitive)
+        ? mOpt.best.label
+        : (optQ !== hierAndMatch[4].trim().toLowerCase() ? optQ : hierAndMatch[4].trim());
+      const rebuilt = `${hierAndMatch[1]}${bestMenuLbl}${hierAndMatch[3]}${bestOptLbl}`.replace(/\s+/g, ' ').trim();
+      const combinedScore = Math.max(mOpt.bestScore, mMenu.bestScore * 0.9, optQ !== hierAndMatch[4].trim().toLowerCase() ? 0.86 : 0.72);
+      return {
+        text: rebuilt,
+        netScore: Math.max(0, combinedScore - rankPenalty),
+        rawMatchScore: combinedScore,
+        matchedLabel: (mOpt.best && mOpt.best.label) || bestOptLbl,
+        isSensitive: Boolean((mOpt.best && mOpt.best.isSensitive) || isSensitiveActionLabel(bestOptLbl)),
+        reason: 'hierarchical_target_match',
+        rank,
+        changedFromRaw: rebuilt.toLowerCase() !== String(rawHypothesis || '').trim().toLowerCase()
+      };
+    }
+
+    // Acoustic verb confusions in voice mode ("clip subscriptions" -> "click Subscriptions", "hop in settings" -> "open Settings")
+    // Strictly gated: ONLY if the target strongly matches a real visible element on screen (>= 0.90)!
+    if (inputSource === 'voice') {
+      const acousticMatch = working.match(/^(clip|lip|hop\s+in)\s+(?:on\s+)?(?:the\s+)?(.+)$/i);
+      if (acousticMatch) {
+        const mappedVerb = /^hop/i.test(acousticMatch[1]) ? 'open' : 'click';
+        const targetRaw = acousticMatch[2].trim();
+        const m = findBestPageCandidateMatch(targetRaw, candidates);
+        if (m.best && m.bestScore >= 0.90 && m.lead >= 0.14 && !m.best.isSensitive) {
+          const snapped = `${mappedVerb} ${m.best.label}`;
+          return {
+            text: snapped,
+            netScore: Math.max(0, m.bestScore - rankPenalty),
+            rawMatchScore: m.bestScore,
+            matchedLabel: m.best.label,
+            isSensitive: false,
+            reason: 'acoustic_verb_and_dom_match',
+            rank,
+            changedFromRaw: true
+          };
+        }
+      }
+    }
+
+    // Standard single-target browser action ("click/open/select/choose/expand/scroll to <Target>")
+    const actionMatch = working.match(/^(click|tap|press|open|select|choose|pick|expand|collapse|toggle|hover(?:\s+over)?|scroll\s+to)\s+(?:on\s+)?(?:the\s+)?(.+)$/i);
+    if (actionMatch) {
+      const verb = actionMatch[1];
+      const rawRest = actionMatch[2].trim();
+      // Skip URLs or multi-clause commands
+      if (/^(?:https?:\/\/|www\.)/i.test(rawRest) || /\b(?:and\s+then|and\s+(?:click|select|open|type|fill|write)|under\s+|inside\s+|from\s+)\b/i.test(rawRest)) {
+        const homophoneFixed = `${verb} ${normalizeCompoundHomophones(rawRest) || rawRest}`;
+        return {
+          text: /\byoutube\s+studio|creator\s+studio|dark\s+theme|light\s+theme|subscriptions\b/i.test(homophoneFixed) ? homophoneFixed : working,
+          netScore: Math.max(0, 0.74 - rankPenalty),
+          rawMatchScore: 0.74,
+          matchedLabel: null,
+          isSensitive: isSensitiveActionLabel(rawRest),
+          reason: 'complex_action_passthrough',
+          rank,
+          changedFromRaw: false
+        };
+      }
+
+      const m = findBestPageCandidateMatch(rawRest, candidates);
+      if (m.best && m.bestScore >= 0.85 && m.lead >= 0.12 && !m.best.isSensitive) {
+        const snapped = `${verb} ${m.best.label}`;
+        return {
+          text: snapped,
+          netScore: Math.max(0, m.bestScore - rankPenalty),
+          rawMatchScore: m.bestScore,
+          matchedLabel: m.best.label,
+          isSensitive: false,
+          reason: 'dom_target_fuzzy_snap',
+          rank,
+          changedFromRaw: snapped.toLowerCase() !== String(rawHypothesis || '').trim().toLowerCase()
+        };
+      }
+
+      // Even if target is inside a closed submenu (not yet visible in DOM!), fix known compound homophones like "open youtube study oh" -> "open youtube studio"
+      const normTarget = normalizeCompoundHomophones(rawRest);
+      if (normTarget && normTarget !== rawRest.toLowerCase() && /\b(?:youtube studio|creator studio|subscriptions|dark theme|light theme|watch later|sign in)\b/.test(normTarget)) {
+        const homophoneCmd = `${verb} ${normTarget}`;
+        return {
+          text: homophoneCmd,
+          netScore: Math.max(0, 0.86 - rankPenalty),
+          rawMatchScore: 0.86,
+          matchedLabel: normTarget,
+          isSensitive: isSensitiveActionLabel(normTarget),
+          reason: 'compound_homophone_repair',
+          rank,
+          changedFromRaw: true
+        };
+      }
+
+      return {
+        text: working,
+        netScore: Math.max(0, Math.max(0.65, m.bestScore) - rankPenalty),
+        rawMatchScore: m.bestScore || 0.65,
+        matchedLabel: m.best ? m.best.label : null,
+        isSensitive: Boolean(m.best && m.best.isSensitive),
+        reason: repaired.verbRepaired ? 'verb_typo_repair' : 'action_unmatched',
+        rank,
+        changedFromRaw: working !== String(rawHypothesis || '').trim()
+      };
+    }
+
+    // Bare phrase when an open popup/menu is active on screen (e.g. user says just "YouTube Studio" while Account menu is open)
+    const wordCount = working.split(/\s+/).filter(Boolean).length;
+    if (wordCount >= 1 && wordCount <= 5) {
+      const openMenuMatch = findBestPageCandidateMatch(working, candidates, new Set(['open_menu']));
+      if (openMenuMatch.best && openMenuMatch.bestScore >= 0.88 && openMenuMatch.lead >= 0.12 && !openMenuMatch.best.isSensitive) {
+        const snapped = `select ${openMenuMatch.best.label}`;
+        return {
+          text: snapped,
+          netScore: Math.max(0, openMenuMatch.bestScore - rankPenalty),
+          rawMatchScore: openMenuMatch.bestScore,
+          matchedLabel: openMenuMatch.best.label,
+          isSensitive: false,
+          reason: 'open_menu_bare_option_match',
+          rank,
+          changedFromRaw: true
+        };
+      }
+    }
+
+    return {
+      text: working,
+      netScore: Math.max(0, 0.60 - rankPenalty),
+      rawMatchScore: 0.60,
+      matchedLabel: null,
+      isSensitive: isSensitiveActionLabel(working),
+      reason: repaired.verbRepaired ? 'verb_typo_repair' : 'unchanged',
+      rank,
+      changedFromRaw: working !== String(rawHypothesis || '').trim()
+    };
+  }
+
+  /**
+   * Re-ranks Chrome's primary transcript + N-best backup guesses (rank 0..3) against
+   * live page elements and built-in command grammar, snapping clear typos/homophones
+   * to exact page labels while strictly protecting search/dictation/sensitive controls.
+   */
+  function resolveFuzzyCommandAndAlternatives(options = {}) {
+    const primaryRaw = String(options.primaryText || '').trim();
+    const inputSource = options.inputSource || 'voice';
+    const candidates = Array.isArray(options.candidates) ? options.candidates : [];
+    const rawAlts = Array.isArray(options.alternatives) ? options.alternatives : [];
+
+    if (!primaryRaw) {
+      return { text: '', changed: false, usedAlternativeRank: 0, matchedTargetLabel: null, reason: 'empty', alternatives: [] };
+    }
+
+    const hypotheses = [{ transcript: primaryRaw, confidence: null, rank: 0 }];
+    const seen = new Set([primaryRaw.toLowerCase().replace(/\s+/g, ' ')]);
+    for (let i = 0; i < rawAlts.length && hypotheses.length < 4; i++) {
+      const item = rawAlts[i];
+      const tr = String((typeof item === 'string' ? item : (item && item.transcript)) || '').trim();
+      const key = tr.toLowerCase().replace(/\s+/g, ' ');
+      if (tr && !seen.has(key)) {
+        seen.add(key);
+        hypotheses.push({
+          transcript: tr,
+          confidence: item && typeof item.confidence === 'number' ? item.confidence : null,
+          rank: typeof (item && item.rank) === 'number' ? Math.max(1, item.rank) : hypotheses.length
+        });
+      }
+    }
+
+    const evaluated = hypotheses.map((h) => evaluateCommandHypothesis(h.transcript, h.rank, candidates, inputSource));
+    const primaryEval = evaluated[0];
+    let chosen = primaryEval;
+
+    // Only upgrade to a Chrome backup guess (rank >= 1) if it is strongly grounded (>= 0.84)
+    // AND beats Guess #1 by a clear margin (>= 0.11), and never loosely triggers sensitive actions!
+    for (let i = 1; i < evaluated.length; i++) {
+      const cand = evaluated[i];
+      if (cand.isSensitive && cand.rawMatchScore < 0.96) continue;
+      if (cand.netScore >= 0.84 && (cand.netScore - primaryEval.netScore) >= 0.11 && cand.netScore > chosen.netScore) {
+        chosen = cand;
+      }
+    }
+
+    return {
+      text: chosen.text || primaryRaw,
+      originalText: primaryRaw,
+      changed: (chosen.text || primaryRaw).toLowerCase() !== primaryRaw.toLowerCase(),
+      usedAlternativeRank: chosen.rank || 0,
+      matchedTargetLabel: chosen.matchedLabel || null,
+      reason: chosen.rank > 0 ? `chrome_backup_guess_${chosen.rank}_${chosen.reason}` : chosen.reason,
+      score: chosen.netScore,
+      alternatives: hypotheses.map((h) => h.transcript)
+    };
+  }
+
   const api = {
     phoneticSkeleton,
     phoneticKey,
     phoneticTokens,
     normalizeSpelledLetters,
+    normalizeCompoundHomophones,
+    jaroWinklerSimilarity,
+    isSensitiveActionLabel,
+    fuzzyLabelScore,
+    resolveFuzzyCommandAndAlternatives,
     stemToken,
     editDistance,
     scoreFieldText,

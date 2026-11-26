@@ -98,6 +98,7 @@
       this._startingWatchdogTimer = null;
       this._lastErrorCode = '';
       this.lastInterim = '';
+      this.lastInterimAlternatives = [];
       this.useOffscreen = false;
       this._fallbackMode = 'none'; // 'none' | 'iframe' | 'relay'
       this._startEpoch = 0;
@@ -231,12 +232,14 @@
             if (message.interim) {
               this._micBoost = 0.72;
               this.lastInterim = message.interim;
+              this.lastInterimAlternatives = Array.isArray(message.alternatives) ? message.alternatives : [];
               if (this.onActivity) this.onActivity({ type: 'interim' });
               if (this.onTranscript) {
                 this.onTranscript({
                   text: message.interim,
                   isFinal: false,
                   confidence: null,
+                  alternatives: this.lastInterimAlternatives,
                   activeLang: this.activeLang,
                   mode: this.mode
                 });
@@ -244,11 +247,14 @@
             }
             if (message.final) {
               const confidence = typeof message.confidence === 'number' ? message.confidence : null;
+              const alternatives = Array.isArray(message.alternatives) ? message.alternatives : [];
               this.lastInterim = '';
+              this.lastInterimAlternatives = [];
               this.lastConfidence = confidence;
               if (this.onActivity) this.onActivity({ type: 'final' });
               const meta = {
                 confidence,
+                alternatives,
                 activeLang: this.activeLang,
                 mode: this.mode
               };
@@ -303,16 +309,19 @@
           if (data.interim) {
             this._micBoost = 0.72;
             this.lastInterim = data.interim;
+            this.lastInterimAlternatives = Array.isArray(data.alternatives) ? data.alternatives : [];
             if (this.onActivity) this.onActivity({ type: 'interim' });
             if (this.onTranscript) {
-              this.onTranscript({ text: data.interim, isFinal: false, confidence: null, activeLang: this.activeLang, mode: this.mode });
+              this.onTranscript({ text: data.interim, isFinal: false, confidence: null, alternatives: this.lastInterimAlternatives, activeLang: this.activeLang, mode: this.mode });
             }
           }
           if (data.final) {
+            const alternatives = Array.isArray(data.alternatives) ? data.alternatives : [];
             this.lastInterim = '';
+            this.lastInterimAlternatives = [];
             this.lastConfidence = typeof data.confidence === 'number' ? data.confidence : null;
             if (this.onActivity) this.onActivity({ type: 'final' });
-            const meta = { confidence: this.lastConfidence, activeLang: this.activeLang, mode: this.mode };
+            const meta = { confidence: this.lastConfidence, alternatives, activeLang: this.activeLang, mode: this.mode };
             if (this.onTranscript) {
               this.onTranscript({ text: data.final, isFinal: true, ...meta });
             }
@@ -644,7 +653,7 @@
       this.recognition = new SpeechRecognition();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.maxAlternatives = 1;
+      this.recognition.maxAlternatives = 4;
       this.recognition.lang = this.activeLang;
 
       this.recognition.onstart = () => {
@@ -693,17 +702,31 @@
           this._finalizedResults.clear();
         }
 
+        const finalSegments = [];
+        const interimSegments = [];
         for (let i = baseIdx; i < event.results.length; ++i) {
           const result = event.results[i];
           const alt = result && result[0];
           if (!alt) continue;
           const transcript = alt.transcript || '';
+          const segAlts = [];
+          const altLen = Math.min(4, Number(result.length) || 1);
+          for (let k = 0; k < altLen; k++) {
+            const a = result[k];
+            if (a && a.transcript) {
+              segAlts.push({
+                transcript: String(a.transcript),
+                confidence: typeof a.confidence === 'number' && !Number.isNaN(a.confidence) ? a.confidence : null
+              });
+            }
+          }
           if (result.isFinal) {
             if (event.results.length > 1 && this._finalizedResults.get(i) === transcript) {
               continue;
             }
             this._finalizedResults.set(i, transcript);
             finalTranscript += transcript;
+            if (segAlts.length > 0) finalSegments.push(segAlts);
             if (typeof alt.confidence === 'number' && !Number.isNaN(alt.confidence)) {
               if (alt.confidence > 0) {
                 confidenceSum += alt.confidence;
@@ -714,8 +737,43 @@
             }
           } else {
             interimTranscript += transcript;
+            if (segAlts.length > 0) interimSegments.push(segAlts);
           }
         }
+
+        const buildRankedAlternatives = (segments) => {
+          if (!segments || segments.length === 0) return [];
+          const maxK = Math.min(4, Math.max(...segments.map((s) => s.length)));
+          const out = [];
+          const seen = new Set();
+          for (let k = 0; k < maxK; k++) {
+            let textAcc = '';
+            let confSum = 0;
+            let confCnt = 0;
+            for (const seg of segments) {
+              const chosen = seg[Math.min(k, seg.length - 1)];
+              if (!chosen) continue;
+              textAcc += chosen.transcript;
+              if (typeof chosen.confidence === 'number' && chosen.confidence > 0) {
+                confSum += chosen.confidence;
+                confCnt += 1;
+              }
+            }
+            const cleanAlt = textAcc.trim();
+            const key = cleanAlt.toLowerCase().replace(/\s+/g, ' ');
+            if (cleanAlt && !seen.has(key)) {
+              seen.add(key);
+              out.push({
+                transcript: cleanAlt,
+                confidence: confCnt > 0 ? confSum / confCnt : null,
+                rank: k
+              });
+            }
+          }
+          return out;
+        };
+        const finalAlternatives = buildRankedAlternatives(finalSegments);
+        const interimAlternatives = buildRankedAlternatives(interimSegments);
 
         if (confidenceCount > 0) {
           finalConfidence = confidenceSum / confidenceCount;
@@ -732,10 +790,12 @@
           const nextInterimTrim = interimTranscript.trim().toLowerCase();
           const interimTextChanged = nextInterimTrim !== prevInterimTrim;
           this.lastInterim = interimTranscript;
+          this.lastInterimAlternatives = interimAlternatives;
           this.onTranscript({
             text: interimTranscript.trim(),
             isFinal: false,
             confidence: null,
+            alternatives: interimAlternatives,
             activeLang: this.activeLang,
             mode: this.mode
           });
@@ -752,13 +812,16 @@
               if (this.isListening && !this.isPaused && this.lastInterim.trim().length > 0) {
                 console.log('[Sleepwalker Voice] Silence timeout (1.5s), executing command:', this.lastInterim);
                 const text = this.lastInterim.trim();
+                const alts = Array.isArray(this.lastInterimAlternatives) ? this.lastInterimAlternatives.slice() : [];
                 const meta = {
                   confidence: null,
+                  alternatives: alts,
                   activeLang: this.activeLang,
                   mode: this.mode,
                   isInterimCommit: true
                 };
                 this.lastInterim = '';
+                this.lastInterimAlternatives = [];
                 this._lastInterimCommit = { text: text.toLowerCase(), time: Date.now() };
                 if (this.continuousSession) {
                   // Flush current Chrome recognition buffer without penalizing restart attempts
@@ -779,6 +842,7 @@
           this._restartAttempts = 0;
           if (this.onActivity) this.onActivity({ type: 'interim' });
           this.lastInterim = interimTranscript;
+          this.lastInterimAlternatives = interimAlternatives;
         }
 
         // Process final speech recognition result
@@ -790,6 +854,7 @@
             this.silenceTimer = null;
           }
           this.lastInterim = '';
+          this.lastInterimAlternatives = [];
           this.lastConfidence = finalConfidence;
 
           const cleanFinal = finalTranscript.trim();
@@ -804,6 +869,7 @@
 
           const meta = {
             confidence: finalConfidence,
+            alternatives: finalAlternatives,
             activeLang: this.activeLang,
             mode: this.mode
           };
@@ -906,10 +972,13 @@
             this.silenceTimer = null;
           }
           const pendingText = this.lastInterim.trim();
+          const pendingAlts = Array.isArray(this.lastInterimAlternatives) ? this.lastInterimAlternatives.slice() : [];
           this.lastInterim = '';
+          this.lastInterimAlternatives = [];
           this._lastInterimCommit = { text: pendingText.toLowerCase(), time: Date.now() };
           const meta = {
             confidence: null,
+            alternatives: pendingAlts,
             activeLang: this.activeLang,
             mode: this.mode,
             isInterimCommit: true

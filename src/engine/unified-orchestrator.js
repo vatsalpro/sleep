@@ -2202,6 +2202,33 @@
               ? this.classifyAndRoute(text, context, { requestedBackend: options.requestedBackend, strictRejectMismatch: options.strictRejectMismatch })
               : initialRouting);
 
+        // Chrome N-Best Backup Guess Routing Rescue: if Guess #1 remained ambiguous, check if a high-confidence backup guess cleanly routes!
+        if (routing.route === 'clarification' && Array.isArray(options.asrAlternatives) && options.asrAlternatives.length > 0) {
+          for (let aIdx = 0; aIdx < options.asrAlternatives.length; aIdx++) {
+            const altItem = options.asrAlternatives[aIdx];
+            const altText = String((typeof altItem === 'string' ? altItem : (altItem && altItem.transcript)) || '').trim();
+            if (!altText || altText.toLowerCase() === text.toLowerCase()) continue;
+            if (/\b(?:sign\s*out|log\s*out|delete|remove|pay\b|purchase|buy\b|checkout|submit)\b/i.test(altText)) continue;
+            const altRoute = this.classifyAndRoute(altText, context, {
+              requestedBackend: options.requestedBackend,
+              strictRejectMismatch: options.strictRejectMismatch,
+              dryRun: true
+            });
+            if (
+              altRoute &&
+              (altRoute.route === 'browser' || altRoute.route === 'desktop' || altRoute.route === 'cross_backend') &&
+              Number(altRoute.confidence || 0) >= 0.88
+            ) {
+              routing = {
+                ...altRoute,
+                rescuedFromAlternative: altText
+              };
+              sharedArtifacts.rescuedAsrAlternative = altText;
+              break;
+            }
+          }
+        }
+
         // If caller explicitly supplied a structured plan, derive route from plan backends instead of stalling in clarification
         if (options.explicitPlan && Array.isArray(options.explicitPlan) && options.explicitPlan.length > 0 && routing.route === 'clarification') {
           const backends = new Set(options.explicitPlan.map((s) => s.backend).filter(Boolean));
@@ -2277,8 +2304,9 @@
           detail: `Planning ${routing.route} workflow`
         });
 
+        const effectivePlanText = routing.rescuedFromAlternative || text;
         if (!options.explicitPlan && routing.intent === 'BROWSER_SEARCH_AND_SELECT' && !options.skipLocalAiFallback) {
-          const aiPlanInfo = await this._enrichCompoundPlanWithLocalAi(text, abortCtrl ? abortCtrl.signal : null);
+          const aiPlanInfo = await this._enrichCompoundPlanWithLocalAi(effectivePlanText, abortCtrl ? abortCtrl.signal : null);
           if (aiPlanInfo && aiPlanInfo.understanding) {
             sharedArtifacts.localAiPlanUnderstanding = {
               model: aiPlanInfo.model || 'qwen2.5:1.5b',
@@ -2304,7 +2332,7 @@
                 ...s
               }))
             }
-          : this.buildPlan(text, routing, context, options);
+          : this.buildPlan(effectivePlanText, routing, context, options);
 
         if (!plan.steps || plan.steps.length === 0) {
           this.lifecycle.transition(commandId, LIFECYCLE_STATES.FAILED, {

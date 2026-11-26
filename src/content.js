@@ -333,6 +333,7 @@
           this._setStatusChip(`Command received: "${cmd.raw}"`);
           return this.handleUserInput(cmd.raw, 'voice', {
             asrConfidence: meta.confidence ?? cmd.confidence ?? null,
+            asrAlternatives: Array.isArray(meta.alternatives) ? meta.alternatives : [],
             activeLang: meta.activeLang || this.voice.activeLang,
             mode: meta.mode || this.voice.mode
           });
@@ -1842,11 +1843,112 @@
       return this.handleUserInput(clean, opts.source || 'voice', { simulated: true, asrConfidence: opts.confidence ?? 0.98 });
     }
 
+    _collectLiveCommandCandidates() {
+      if (typeof document === 'undefined') return [];
+      const out = [];
+      const seen = new Set();
+      const pushLabel = (raw, kind) => {
+        const lbl = String(raw || '').replace(/\s*\*\s*$/, '').replace(/\s+/g, ' ').trim();
+        if (!lbl || lbl.length < 2 || lbl.length > 80) return;
+        const key = `${kind}:${lbl.toLowerCase()}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ label: lbl, kind });
+      };
+
+      try {
+        // 1. Open popup / dropdown / menu items first (highest contextual relevance)
+        if (this.unifiedOrchestrator && this.unifiedOrchestrator.browserAdapter && typeof this.unifiedOrchestrator.browserAdapter._listOpenMenuOptions === 'function') {
+          for (const opt of this.unifiedOrchestrator.browserAdapter._listOpenMenuOptions()) {
+            if (opt && opt.label) pushLabel(opt.label, 'open_menu');
+          }
+        }
+
+        // 2. Visible interactive controls (buttons, links, tabs, menuitems)
+        const ctrlNodes = document.querySelectorAll(
+          'button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="tab"], [role="option"], ytd-guide-entry-renderer a#endpoint, ytd-compact-link-renderer'
+        );
+        for (let i = 0; i < ctrlNodes.length && out.length < 110; i++) {
+          const el = ctrlNodes[i];
+          if (el.closest && el.closest('#sleepwalker-root, .sleepwalker-exclude, [aria-hidden="true"]')) continue;
+          const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+          if (!r || r.width <= 0 || r.height <= 0) continue;
+          const label = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+          if (label) pushLabel(label, 'control');
+        }
+
+        // 3. Visible form inputs / question labels
+        const inputNodes = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select, [role="textbox"], [role="combobox"]');
+        for (let i = 0; i < inputNodes.length && out.length < 145; i++) {
+          const el = inputNodes[i];
+          if (el.disabled || el.readOnly) continue;
+          let lbl = '';
+          const lbIds = (el.getAttribute && el.getAttribute('aria-labelledby')) || '';
+          if (lbIds) {
+            lbl = lbIds.split(/\s+/).map((id) => {
+              const n = id && document.getElementById(id);
+              return n ? (n.innerText || n.textContent || '').trim() : '';
+            }).filter(Boolean).join(' ');
+          }
+          if (!lbl) {
+            const cardH = el.closest && el.closest('[role="listitem"], .question-container')?.querySelector('[role="heading"], h2, h3, h4');
+            if (cardH) lbl = (cardH.innerText || cardH.textContent || '').trim();
+          }
+          if (!lbl && el.id) {
+            const forLbl = document.querySelector(`label[for="${CSS.escape ? CSS.escape(el.id) : el.id}"]`);
+            if (forLbl) lbl = (forLbl.innerText || forLbl.textContent || '').trim();
+          }
+          if (!lbl) {
+            const aria = (el.getAttribute('aria-label') || '').trim();
+            if (aria && !/^(?:your\s+answer|short\s+answer|long\s+answer)$/i.test(aria)) lbl = aria;
+          }
+          if (!lbl) lbl = (el.getAttribute('placeholder') || el.name || '').trim();
+          if (lbl) pushLabel(lbl, 'input');
+        }
+      } catch (_e) {}
+
+      return out;
+    }
+
     handleUserInput(text, inputSource = 'voice', meta = {}) {
       const rawTrim = String(text || '').trim();
-      const cleanInput = (this.voice && typeof this.voice.stripWakePrefix === 'function')
+      let cleanInput = (this.voice && typeof this.voice.stripWakePrefix === 'function')
         ? this.voice.stripWakePrefix(rawTrim)
         : rawTrim;
+
+      // Page-grounded Fuzzy Matcher + Chrome N-Best Backup Guess Re-Ranker (< 2ms, 0-LLM)
+      if (
+        cleanInput &&
+        !(meta && (meta.skipFuzzyNormalize || meta.internalResumeTaskId)) &&
+        !(this.taskLifecycle && this.taskLifecycle.state === 'WAITING_FOR_CLARIFICATION') &&
+        typeof window !== 'undefined' &&
+        window.SleepwalkerMatch &&
+        typeof window.SleepwalkerMatch.resolveFuzzyCommandAndAlternatives === 'function'
+      ) {
+        try {
+          const candidates = this._collectLiveCommandCandidates();
+          const resolved = window.SleepwalkerMatch.resolveFuzzyCommandAndAlternatives({
+            primaryText: cleanInput,
+            alternatives: (meta && meta.asrAlternatives) || [],
+            candidates,
+            inputSource
+          });
+          if (resolved && resolved.changed && resolved.text) {
+            console.log(`[Sleepwalker Fuzzy/N-Best] "${cleanInput}" -> "${resolved.text}" (${resolved.reason})`);
+            cleanInput = resolved.text;
+            text = resolved.text;
+            meta = {
+              ...(meta || {}),
+              originalRawText: rawTrim,
+              fuzzyResolution: resolved
+            };
+            if (inputSource === 'voice') {
+              this._setStatusChip(`Command matched: "${resolved.text}"`);
+            }
+          }
+        } catch (_e) {}
+      }
+
       const normInput = this._normalizeTaskPhrase(cleanInput);
       const tl = this.taskLifecycle;
 
@@ -2052,6 +2154,7 @@
         taskId: effectiveTaskIdStr,
         commandId: cmdId,
         inputSource,
+        asrAlternatives: Array.isArray(turnCtx.asrAlternatives) ? turnCtx.asrAlternatives : [],
         onBeforeNavigationStep: navCallbacks.recordBeforeNav,
         onAfterInPageStep: navCallbacks.clearAfterInPage,
         inBrowserTab: true,

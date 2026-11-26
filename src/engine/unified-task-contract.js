@@ -1688,6 +1688,41 @@
       return el;
     }
 
+    _fuzzyDomTextScore(needle, candidateText) {
+      const q = String(needle || '').trim();
+      const c = String(candidateText || '').trim();
+      if (!q || !c || q.length < 3 || c.length < 3) return 0;
+      const matchApi = (typeof rootScope !== 'undefined' && rootScope.SleepwalkerMatch) ||
+        (typeof window !== 'undefined' && window.SleepwalkerMatch) ||
+        null;
+      if (matchApi && typeof matchApi.fuzzyLabelScore === 'function') {
+        return matchApi.fuzzyLabelScore(q, c);
+      }
+      // Standalone fallback when running in isolated unit tests without match.js loaded
+      const a = q.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, '');
+      const b = c.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, '');
+      if (!a || !b || a.length < 4 || b.length < 4) return 0;
+      if (/\b(?:sign\s*out|log\s*out|delete|remove|pay|purchase|buy|checkout|submit)\b/i.test(c)) return 0;
+      if (a === b) return 0.96;
+      const m = a.length;
+      const n = b.length;
+      if (Math.abs(m - n) > 2) return 0;
+      const dp = Array.from({ length: n + 1 }, (_, j) => j);
+      for (let i = 1; i <= m; i++) {
+        let prev = dp[0];
+        dp[0] = i;
+        for (let j = 1; j <= n; j++) {
+          const tmp = dp[j];
+          dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1]);
+          prev = tmp;
+        }
+      }
+      const dist = dp[n];
+      if (dist <= 1 && Math.max(m, n) >= 5) return 0.91;
+      if (dist <= 2 && Math.max(m, n) >= 8) return 0.86;
+      return 0;
+    }
+
     _findOpenPopupItem(optionLabel) {
       if (typeof document === 'undefined' || !optionLabel) return null;
       const needle = String(optionLabel).trim().toLowerCase();
@@ -1699,6 +1734,9 @@
 
       let best = null;
       let bestScore = 0;
+      let bestPrimaryKey = '';
+      let bestUsedFuzzy = false;
+      let secondScore = 0;
       const seen = new Set();
       for (const pop of popupContainers) {
         const items = this._collectShadowData(pop, itemSel).elements;
@@ -1706,22 +1744,40 @@
           if (seen.has(rawEl)) continue;
           seen.add(rawEl);
           if (!this._isElementVisibleNow(rawEl)) continue;
+          const primaryLabel = (rawEl.innerText || rawEl.textContent || rawEl.getAttribute('aria-label') || rawEl.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
           const text = `${rawEl.getAttribute('aria-label') || ''} ${rawEl.innerText || rawEl.textContent || ''} ${rawEl.getAttribute('title') || ''} ${rawEl.getAttribute('data-value') || ''}`
             .replace(/\s+/g, ' ')
             .trim()
             .toLowerCase();
           if (!text) continue;
           let s = 0;
+          let usedFuzzy = false;
           if (text === needle) s = 1.15;
           else if (text.startsWith(needle)) s = 1.02;
           else if (text.includes(needle)) s = 0.92;
           else if (needleTokens.length > 0 && needleTokens.every((tok) => text.includes(tok))) s = 0.82;
+          else if (primaryLabel) {
+            const fz = this._fuzzyDomTextScore(needle, primaryLabel);
+            if (fz >= 0.84) {
+              s = fz * 0.94;
+              usedFuzzy = true;
+            }
+          }
+          const labelKey = (primaryLabel || text).toLowerCase();
           if (s > bestScore) {
+            if (bestPrimaryKey && bestPrimaryKey !== labelKey) {
+              secondScore = Math.max(secondScore, bestScore);
+            }
             bestScore = s;
+            bestPrimaryKey = labelKey;
+            bestUsedFuzzy = usedFuzzy;
             best = this._unwrapActionableMenuItem(rawEl);
+          } else if (labelKey !== bestPrimaryKey && s > secondScore) {
+            secondScore = s;
           }
         }
       }
+      if (bestUsedFuzzy && (bestScore - secondScore) < 0.08) return null;
       return bestScore >= 0.78 ? best : null;
     }
 
@@ -1774,12 +1830,17 @@
           if (seen.has(el) || el === triggerEl) continue;
           seen.add(el);
           if (!this._isElementVisibleNow(el)) continue;
+          const primaryOptLabel = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
           const text = `${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''} ${el.getAttribute('data-value') || ''}`.replace(/\s+/g, ' ').trim().toLowerCase();
           if (!text) continue;
           let s = 0;
           if (text === needle) s = 1.0;
           else if (text.includes(needle)) s = 0.88;
           else if (needleTokens.length > 0 && needleTokens.every((tok) => text.includes(tok))) s = 0.78;
+          else if (primaryOptLabel) {
+            const fz = this._fuzzyDomTextScore(needle, primaryOptLabel);
+            if (fz >= 0.85) s = fz * 0.90;
+          }
           if (s > 0) {
             s += scopeBoost;
             if (s > bestScore) {
@@ -2942,6 +3003,9 @@
       ).elements;
       let best = null;
       let bestScore = 0;
+      let bestPrimaryKey = '';
+      let bestUsedFuzzy = false;
+      let secondScore = 0;
       const ctxWords = ctxHint.split(/\s+/).filter((w) => w.length > 2);
       const isMenuSettingTarget = needle ? this._isKnownMenuOrSettingTarget(needle) : false;
       for (const el of candidates) {
@@ -2954,13 +3018,22 @@
         if (isMenuSettingTarget && el.closest && el.closest('main, article, ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer')) {
           continue;
         }
+        const primaryText = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || el.value || '').replace(/\s+/g, ' ').trim();
         const text = `${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''} ${el.getAttribute('title') || ''} ${el.value || ''}`.replace(/\s+/g, ' ').trim().toLowerCase();
         const href = String(el.href || (el.getAttribute && el.getAttribute('href')) || '').toLowerCase();
         let s = 0;
+        let usedFuzzy = false;
         if (hrefHint && href.includes(hrefHint)) s = 1.15;
         else if (needle && text === needle) s = 1.0;
         else if (needle && text.includes(needle)) s = 0.85;
         else if (needle && needle.split(/\s+/).filter((w) => w.length > 1).every((w) => text.includes(w))) s = 0.72;
+        else if (needle && primaryText && primaryText.length <= 80) {
+          const fz = this._fuzzyDomTextScore(needle, primaryText);
+          if (fz >= 0.85) {
+            s = fz * 0.84;
+            usedFuzzy = true;
+          }
+        }
         if (s > 0 && ctxWords.length > 0) {
           const card = (el.closest && el.closest('article, section, li, tr, [class*="card"], [class*="item"], div')) || el.parentElement;
           const rootHost = el.getRootNode && el.getRootNode().host;
@@ -2968,11 +3041,20 @@
           const hits = ctxWords.filter((w) => ctxText.includes(w)).length;
           s += (hits / ctxWords.length) * 0.35;
         }
+        const labelKey = (primaryText || text).toLowerCase();
         if (s > bestScore) {
+          if (bestPrimaryKey && bestPrimaryKey !== labelKey) {
+            secondScore = Math.max(secondScore, bestScore);
+          }
           bestScore = s;
+          bestPrimaryKey = labelKey;
+          bestUsedFuzzy = usedFuzzy;
           best = el;
+        } else if (labelKey !== bestPrimaryKey && s > secondScore) {
+          secondScore = s;
         }
       }
+      if (bestUsedFuzzy && (bestScore - secondScore) < 0.08) return null;
       return bestScore >= 0.65 ? this._unwrapActionableMenuItem(best) : null;
     }
 
@@ -3046,11 +3128,16 @@
           }
         } else if (needle) {
           const cleanLabelled = labelledBy.toLowerCase();
+          const primaryFieldName = (labelledBy || cardHeading || ariaLabel || (lbl && lbl.textContent) || (wrapLbl && wrapLbl.textContent) || el.getAttribute('placeholder') || el.name || '').replace(/\s+/g, ' ').trim();
           if (cleanLabelled === needle || desc.trim() === needle || String(el.name || '').toLowerCase() === needle) score += 150;
           else if (cleanLabelled && (cleanLabelled.includes(needle) || needle.includes(cleanLabelled))) score += 125;
           else if (desc.includes(needle)) score += 110;
           else if (hintWords.length > 0 && hintWords.every((w) => desc.includes(w))) score += 85;
-          else score -= 30;
+          else if (primaryFieldName) {
+            const fz = this._fuzzyDomTextScore(needle, primaryFieldName);
+            if (fz >= 0.84) score += Math.round(fz * 95);
+            else score -= 30;
+          } else score -= 30;
         }
         if (score > bestScore) {
           bestScore = score;
