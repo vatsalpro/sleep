@@ -1431,25 +1431,30 @@
       this.levelMode = 'synthetic_listening';
 
       if (!this._micMonitorActive || !this.isListening || this.isPaused) return;
-      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(() => fn(Date.now()), 50);
-      const step = (ts) => {
+      const step = () => {
         if (!this._micMonitorActive || !this.isListening || this.isPaused) return;
-        const t = (ts || Date.now()) / 1000;
-        let level = 0.24 + 0.22 * Math.abs(Math.sin(t * 3.8) * Math.cos(t * 2.1));
-        if (this._micBoost > 0.05) {
-          level = Math.max(level, this._micBoost);
-          this._micBoost *= 0.88;
+        if (typeof document === 'undefined' || !document.hidden) {
+          const t = Date.now() / 1000;
+          let level = 0.22 + 0.20 * Math.abs(Math.sin(t * 3.6) * Math.cos(t * 2.0));
+          if (this._micBoost > 0.05) {
+            level = Math.max(level, this._micBoost);
+            this._micBoost *= 0.78;
+          }
+          if (typeof this.onLevel === 'function') this.onLevel(level, this.levelMode);
         }
-        if (typeof this.onLevel === 'function') this.onLevel(level, this.levelMode);
-        this._levelRaf = raf(step);
+        this._levelTimer = setTimeout(step, 75);
       };
-      this._levelRaf = raf(step);
+      step();
     }
 
     _stopLevelMonitor() {
       this._micMonitorActive = false;
       this.levelMode = 'idle';
       this._micBoost = 0;
+      if (this._levelTimer) {
+        clearTimeout(this._levelTimer);
+        this._levelTimer = 0;
+      }
       if (this._levelRaf) {
         if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._levelRaf);
         else clearTimeout(this._levelRaf);

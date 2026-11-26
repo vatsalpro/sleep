@@ -1145,24 +1145,24 @@
         ring.setAttribute('aria-hidden', 'true');
         ring.style.cssText = [
           'position:fixed',
-          `left:${Math.max(0, Math.round(r.left) - 4)}px`,
-          `top:${Math.max(0, Math.round(r.top) - 4)}px`,
-          `width:${Math.round(r.width) + 8}px`,
-          `height:${Math.round(r.height) + 8}px`,
-          'border-radius:8px',
-          'border:2.5px solid #06b6d4',
-          'box-shadow:0 0 0 3px rgba(217,155,38,0.35), 0 0 16px rgba(6,182,212,0.55)',
+          `left:${Math.max(0, Math.round(r.left) - 5)}px`,
+          `top:${Math.max(0, Math.round(r.top) - 5)}px`,
+          `width:${Math.round(r.width) + 10}px`,
+          `height:${Math.round(r.height) + 10}px`,
+          'border-radius:10px',
+          'border:2px solid rgba(56,189,248,0.95)',
+          'box-shadow:0 0 0 4px rgba(139,92,246,0.22), 0 0 22px rgba(6,182,212,0.52), inset 0 0 10px rgba(56,189,248,0.16)',
           'pointer-events:none',
           'z-index:2147483643',
           'opacity:1',
-          reducedMotion ? '' : 'transition:opacity 320ms ease-out, transform 240ms ease-out;transform:scale(1.03)'
+          reducedMotion ? '' : 'will-change:transform,opacity;transition:opacity 320ms cubic-bezier(0.16,1,0.3,1), transform 260ms cubic-bezier(0.22,1,0.36,1);transform:scale(1.06)'
         ].filter(Boolean).join(';') + ';';
         document.documentElement.appendChild(ring);
         if (!reducedMotion && typeof requestAnimationFrame === 'function') {
           requestAnimationFrame(() => { ring.style.transform = 'scale(1)'; });
         }
-        setTimeout(() => { ring.style.opacity = '0'; }, 420);
-        setTimeout(() => { try { ring.remove(); } catch (_e) {} }, 760);
+        setTimeout(() => { ring.style.opacity = '0'; if (!reducedMotion) ring.style.transform = 'scale(0.985)'; }, 440);
+        setTimeout(() => { try { ring.remove(); } catch (_e) {} }, 780);
       } catch (_e) {}
     }
 

@@ -223,8 +223,44 @@
       this.el.dataset.streamStatus = spec.streamStatus || (badgeText === 'Thinking...' ? 'thinking' : (/^(?:Streaming|Live(?:\s|·|$))/i.test(badgeText) ? 'streaming' : 'complete'));
       this.badgeEl.hidden = !badgeText;
       this.badgeEl.textContent = badgeText;
-      this._renderBody(this.spec, targetType);
+
+      // Flicker-free incremental DOM diffing when streaming plain text responses
+      const canPatchPlainText = Boolean(
+        spec.text &&
+        !Array.isArray(this.spec.topics) &&
+        !this.spec.table &&
+        !Array.isArray(this.spec.numberedItems) &&
+        !Array.isArray(this.spec.summaryLines) &&
+        this.bodyEl.children.length === 1 &&
+        this.bodyEl.firstElementChild &&
+        this.bodyEl.firstElementChild.classList.contains('sw-card-p')
+      );
+      if (canPatchPlainText) {
+        this._patchSentenceSpansIncremental(this.bodyEl.firstElementChild, this.spec.text);
+      } else {
+        this._renderBody(this.spec, targetType);
+      }
       this._syncExpandVisibility();
+    }
+
+    _patchSentenceSpansIncremental(pEl, text) {
+      const parts = String(text || '').match(/[^.!?।]+[.!?।]*/g) || [String(text || '')];
+      const existing = pEl.children;
+      for (let i = 0; i < parts.length; i++) {
+        const desired = (i > 0 ? ' ' : '') + parts[i].trim();
+        if (i < existing.length) {
+          if (existing[i].textContent !== desired) {
+            existing[i].textContent = desired;
+          }
+        } else {
+          const sp = mk('span', 'sw-sentence sw-sentence-enter', desired);
+          sp.dataset.sIdx = String(i);
+          pEl.appendChild(sp);
+        }
+      }
+      while (pEl.children.length > parts.length) {
+        pEl.lastElementChild.remove();
+      }
     }
 
     _renderBody(spec, type) {
@@ -297,6 +333,7 @@
           const label = typeof ch === 'string' ? ch : (ch.label || ch.title || `Option ${idx + 1}`);
           const btn = mk('button', 'sw-choice-btn', `${idx + 1}. ${label}`);
           btn.type = 'button';
+          btn.style.setProperty('--sw-item-idx', String(idx));
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
             if (typeof spec.onAction === 'function') spec.onAction('choose', { index: idx, choice: ch });
@@ -307,7 +344,7 @@
       }
       if ((type === 'plan' || type === 'answer') && Array.isArray(spec.steps) && spec.steps.length > 0) {
         const ol = mk('ol', type === 'plan' ? 'sw-plan-list' : 'sw-plan-list sw-plan-compact');
-        spec.steps.slice(0, 7).forEach((st) => {
+        spec.steps.slice(0, 7).forEach((st, idx) => {
           const sStatus = typeof st === 'object' ? st.status : '';
           const mark = sStatus === 'done'
             ? '✓'
@@ -317,6 +354,7 @@
                 ? '✗'
                 : (sStatus === 'skipped' ? '–' : '○')));
           const li = mk('li', sStatus ? `sw-plan-step-${sStatus}` : '', `${mark} ${st.label || st}`);
+          li.style.setProperty('--sw-item-idx', String(idx));
           ol.appendChild(li);
         });
         b.appendChild(ol);

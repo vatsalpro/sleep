@@ -107,9 +107,9 @@
             </div>
           </div>
           <div id="sw-ui-quick-chips" class="sw-quick-chips" role="group" aria-label="Quick commands" hidden>
-            <button type="button" class="sw-quick-chip" data-cmd="Explain this page">Explain page</button>
-            <button type="button" class="sw-quick-chip" data-cmd="Summarize this webpage">Summarize</button>
-            <button type="button" class="sw-quick-chip" data-cmd="Read this page">Read aloud</button>
+            <button type="button" class="sw-quick-chip" style="--sw-item-idx:0;" data-cmd="Explain this page">Explain page</button>
+            <button type="button" class="sw-quick-chip" style="--sw-item-idx:1;" data-cmd="Summarize this webpage">Summarize</button>
+            <button type="button" class="sw-quick-chip" style="--sw-item-idx:2;" data-cmd="Read this page">Read aloud</button>
           </div>
           <div id="sw-ui-transcript" class="sw-transcript-chip" aria-live="polite" data-visible="false"></div>
           <form id="sw-ui-type-form" class="sw-type-form" hidden>
@@ -170,12 +170,26 @@
     _observeDockLayout() {
       if (this._layoutObserved) return;
       this._layoutObserved = true;
+      this._layoutRaf = null;
+      this._lastClearancePx = 0;
       if (typeof rootScope.addEventListener === 'function') {
-        rootScope.addEventListener('resize', () => this.syncLayout(), { passive: true });
+        rootScope.addEventListener('resize', () => this._scheduleSyncLayout(), { passive: true });
       }
       if (typeof ResizeObserver === 'function' && this.dockEl) {
-        this._dockObserver = new ResizeObserver(() => this.syncLayout());
+        this._dockObserver = new ResizeObserver(() => this._scheduleSyncLayout());
         this._dockObserver.observe(this.dockEl);
+      }
+    }
+
+    _scheduleSyncLayout() {
+      if (this._layoutRaf !== null) return;
+      if (typeof rootScope.requestAnimationFrame === 'function') {
+        this._layoutRaf = rootScope.requestAnimationFrame(() => {
+          this._layoutRaf = null;
+          this.syncLayout();
+        });
+      } else {
+        this.syncLayout();
       }
     }
 
@@ -185,14 +199,18 @@
       const typeOpen = Boolean(this.typeForm && !this.typeForm.hidden);
       const hasTranscript = Boolean(this.transcriptEl && this.transcriptEl.dataset.visible === 'true');
       let clearance = (typeOpen ? 186 : 132) + (hasTranscript ? 42 : 0);
-      if (this.dockEl && typeof this.dockEl.getBoundingClientRect === 'function') {
+      if (this.dockEl && typeof this.dockEl.getBoundingClientRect === 'function' && this.state !== 'idle') {
         const rect = this.dockEl.getBoundingClientRect();
         if (rect && rect.height > 0 && rect.top > 0 && rect.top <= vh) {
           clearance = Math.max(clearance, (vh - rect.top) + 14);
         }
       }
       const maxClearance = Math.max(124, Math.floor(vh * 0.48));
-      this.rootEl.style.setProperty('--sw-dock-clearance', `${Math.min(maxClearance, Math.ceil(clearance))}px`);
+      const finalPx = Math.min(maxClearance, Math.ceil(clearance));
+      if (finalPx !== this._lastClearancePx) {
+        this._lastClearancePx = finalPx;
+        this.rootEl.style.setProperty('--sw-dock-clearance', `${finalPx}px`);
+      }
     }
 
     _isUntrustedWebEvent(e) {
@@ -212,9 +230,24 @@
       }
 
       if (this.orbBtn) {
+        this.orbBtn.addEventListener('pointermove', (e) => {
+          if (!this.fluidOrb || typeof this.fluidOrb.setPointerOffset !== 'function') return;
+          const r = this.orbBtn.getBoundingClientRect();
+          if (!r || r.width <= 0 || r.height <= 0) return;
+          const nx = ((e.clientX - (r.left + r.width * 0.5)) / (r.width * 0.5));
+          const ny = ((e.clientY - (r.top + r.height * 0.5)) / (r.height * 0.5));
+          this.fluidOrb.setPointerOffset(nx, ny);
+        }, { passive: true });
+        this.orbBtn.addEventListener('pointerleave', () => {
+          if (this.fluidOrb && typeof this.fluidOrb.setPointerOffset !== 'function') return;
+          if (this.fluidOrb) this.fluidOrb.setPointerOffset(0, 0);
+        }, { passive: true });
         this.orbBtn.addEventListener('click', (e) => {
           if (this._isUntrustedWebEvent(e)) return;
           e.stopPropagation();
+          if (this.fluidOrb && typeof this.fluidOrb.triggerImpulse === 'function') {
+            this.fluidOrb.triggerImpulse(0.18);
+          }
           if (typeof this.handlers.onOrbClick === 'function') {
             this.handlers.onOrbClick({ state: this.state });
           }
@@ -388,6 +421,9 @@
       this.auroraEl.dataset.taskState = st;
       this.auroraEl.dataset.lifecycleState = String(safe.lifecycleState || st).toUpperCase();
       this.auroraEl.dataset.backend = String(safe.backend || '');
+      if (this.edgeAuroraEl) {
+        this.edgeAuroraEl.dataset.taskState = st;
+      }
       if (Number.isFinite(safe.completedCount)) {
         this.auroraEl.dataset.completedCount = String(safe.completedCount);
       }
@@ -488,6 +524,10 @@
         this.rootEl.dataset.state = mappedState;
         this.rootEl.dataset.active = isActive ? 'true' : 'false';
       }
+      if (this.edgeAuroraEl) {
+        this.edgeAuroraEl.hidden = !isActive;
+        this.edgeAuroraEl.dataset.orbState = mappedState;
+      }
 
       // Update orb icons
       if (this.completedIcon) {
@@ -547,22 +587,31 @@
       this.level = clamped;
       if (this.fluidOrb) {
         this.fluidOrb.setAudioLevel(clamped);
-      }
-      for (let i = 0; i < this.bars.length; i++) {
-        const w = BAR_BASE_WEIGHTS[i] || 0.5;
-        const scale = Math.min(1, 0.16 + clamped * w * 0.88);
-        this.bars[i].style.setProperty('--bar-scale', scale.toFixed(3));
+      } else {
+        for (let i = 0; i < this.bars.length; i++) {
+          const w = BAR_BASE_WEIGHTS[i] || 0.5;
+          const scale = Math.min(1, 0.16 + clamped * w * 0.88);
+          this.bars[i].style.setProperty('--bar-scale', scale.toFixed(3));
+        }
       }
       if (this.threads) this.threads.setLevel(clamped);
     }
 
     setTranscript(text = '') {
       const clean = String(text || '').trim();
+      const prev = this.transcript;
       this.transcript = clean;
       if (!this.transcriptEl) return;
-      this.transcriptEl.textContent = clean;
-      this.transcriptEl.dataset.visible = (clean && this.state !== 'idle') ? 'true' : 'false';
-      this.syncLayout();
+      if (clean !== prev) {
+        this.transcriptEl.textContent = clean;
+      }
+      const nextVis = (clean && this.state !== 'idle') ? 'true' : 'false';
+      if (this.transcriptEl.dataset.visible !== nextVis) {
+        this.transcriptEl.dataset.visible = nextVis;
+        this._scheduleSyncLayout();
+      } else if (Math.abs(clean.length - (prev || '').length) > 28) {
+        this._scheduleSyncLayout();
+      }
     }
 
     beginRequest(reqId, text = '') {
@@ -631,7 +680,7 @@
       } else {
         finish();
       }
-      this._hideTimer = setTimeout(finish, 220);
+      this._hideTimer = setTimeout(finish, 280);
     }
 
     injectCssText(cssText) {

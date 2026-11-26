@@ -1535,10 +1535,12 @@ svg {
 
 
 /* =========================================================================
-   Sleepwalker Siri-Inspired 60 FPS Fluid Liquid-Glass Orb Overrides
+   Sleepwalker Siri-Inspired 60/120 FPS Fluid Liquid-Glass & Spring Choreography
    ========================================================================= */
 :host {
   --sw-orb-size-active: 92px;
+  --sw-spring-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --sw-spring-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .sw-orb-wrap:has(.sw-orb-fluid) .sw-orb-halo {
@@ -1561,23 +1563,32 @@ svg {
   position: relative;
   cursor: pointer;
   pointer-events: auto;
-  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  transition: transform 280ms var(--sw-spring-pop);
 }
 
 .sw-orb-btn.sw-orb-fluid:hover {
-  transform: scale(1.06);
+  transform: scale(1.07);
 }
 
 .sw-orb-btn.sw-orb-fluid:active {
-  transform: scale(0.96);
+  transform: scale(0.94);
+  transition-duration: 110ms;
 }
 
+/* Native in-canvas glow replaces expensive per-frame CSS drop-shadow blur rasterization! */
 .sw-orb-canvas {
   width: 92px;
   height: 92px;
   display: block;
   pointer-events: none;
-  filter: drop-shadow(0 8px 20px rgba(37, 99, 235, 0.22));
+  filter: none;
+}
+
+/* Self-drawing stroke animation for Completion Checkmark & Error Icon */
+@keyframes sw-icon-draw {
+  0% { stroke-dashoffset: 36; opacity: 0; transform: scale(0.75); }
+  100% { stroke-dashoffset: 0; opacity: 1; transform: scale(1); }
 }
 
 .sw-orb-btn.sw-orb-fluid .sw-state-icon {
@@ -1587,4 +1598,240 @@ svg {
   color: #ffffff;
   filter: drop-shadow(0 2px 6px rgba(15, 23, 42, 0.35));
   pointer-events: none;
+  stroke-dasharray: 36;
+  stroke-dashoffset: 0;
+  animation: sw-icon-draw 320ms var(--sw-spring-out) both;
+}
+
+/* Feather-Soft Ambient Viewport Edge Aura (GPU opacity-only, zero layout cost) */
+.sw-edge-aurora {
+  position: fixed;
+  inset: 0;
+  pointer-events: none !important;
+  z-index: 1;
+  opacity: 0;
+  background:
+    radial-gradient(60% 180px at 50% 100%, rgba(56, 189, 248, 0.16) 0%, rgba(139, 92, 246, 0.08) 48%, transparent 100%);
+  transition: opacity 420ms ease;
+  will-change: opacity;
+}
+
+.sw-edge-aurora[hidden] {
+  display: none;
+}
+
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="listening"] {
+  opacity: 0.9;
+  background: radial-gradient(58% 190px at 50% 100%, rgba(6, 182, 212, 0.18) 0%, rgba(59, 130, 246, 0.09) 50%, transparent 100%);
+}
+
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="processing"],
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-task-state="processing"] {
+  opacity: 1;
+  background: radial-gradient(62% 210px at 50% 100%, rgba(139, 92, 246, 0.20) 0%, rgba(236, 72, 153, 0.09) 48%, transparent 100%);
+}
+
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="executing"],
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="observing"] {
+  opacity: 0.95;
+  background: radial-gradient(60% 200px at 50% 100%, rgba(2, 132, 199, 0.19) 0%, rgba(34, 211, 238, 0.10) 50%, transparent 100%);
+}
+
+.sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="completed"] {
+  opacity: 0.85;
+  background: radial-gradient(55% 170px at 50% 100%, rgba(16, 185, 129, 0.18) 0%, rgba(56, 189, 248, 0.07) 50%, transparent 100%);
+}
+
+/* Spring Entrance Choreography for Cards, Chips, Status Pill, and Type Bar */
+@keyframes sw-card-spring-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, 14px, 0) scale(0.965);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(-50%, 0, 0) scale(1);
+  }
+}
+
+@keyframes sw-card-side-spring-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale(0.965);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes sw-pill-pop-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes sw-sentence-glide {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sw-shimmer-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(220%); }
+}
+
+@keyframes sw-dot-ring-pulse {
+  0% { transform: scale(0.9); opacity: 0.75; }
+  70% { transform: scale(2.2); opacity: 0; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.sw-card.sw-card-open {
+  animation: sw-card-spring-in 300ms var(--sw-spring-out) both;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 18px 44px -8px rgba(15, 23, 42, 0.15),
+    0 4px 12px rgba(37, 99, 235, 0.06);
+}
+
+.sw-card.sw-card-open.sw-pos-left,
+.sw-card.sw-card-open.sw-pos-right {
+  animation: sw-card-side-spring-in 300ms var(--sw-spring-out) both;
+}
+
+.sw-sentence-enter {
+  display: inline;
+  animation: sw-sentence-glide 200ms var(--sw-spring-out) both;
+}
+
+/* Streaming badge gentle luminous pulse */
+.sw-card[data-stream-status="thinking"] .sw-card-badge,
+.sw-card[data-stream-status="streaming"] .sw-card-badge {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(139, 92, 246, 0.16));
+  color: #4f46e5;
+}
+
+/* Status Pill & Active Dot Halo Pulse + Shimmering Progress Bar */
+.sw-aurora-bar:not([hidden]) {
+  animation: sw-pill-pop-in 240ms var(--sw-spring-out) both;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 8px 24px rgba(15, 23, 42, 0.10);
+}
+
+.sw-aurora-bar[data-task-state="processing"] .sw-aurora-dot,
+.sw-aurora-bar[data-task-state="observing"] .sw-aurora-dot,
+.sw-aurora-bar[data-task-state="executing"] .sw-aurora-dot {
+  position: relative;
+}
+
+.sw-aurora-bar[data-task-state="processing"] .sw-aurora-dot::after,
+.sw-aurora-bar[data-task-state="observing"] .sw-aurora-dot::after,
+.sw-aurora-bar[data-task-state="executing"] .sw-aurora-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  color: var(--sw-cyan);
+  animation: sw-dot-ring-pulse 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.sw-progress-fill {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(90deg, #06b6d4 0%, #3b82f6 50%, #8b5cf6 100%);
+  transition: width 320ms var(--sw-spring-out);
+}
+
+.sw-progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  animation: sw-shimmer-sweep 1.5s ease-in-out infinite;
+}
+
+/* Staggered Quick Chips, Choice Buttons & Plan Steps */
+.sw-quick-chip {
+  animation: sw-pill-pop-in 260ms var(--sw-spring-out) both;
+  animation-delay: calc(var(--sw-item-idx, 0) * 42ms);
+  will-change: transform, opacity;
+  transition: transform 180ms var(--sw-spring-pop), background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.sw-quick-chip:hover {
+  background: #f0f9ff;
+  border-color: #38bdf8;
+  box-shadow: 0 6px 16px rgba(6, 182, 212, 0.18);
+  transform: translate3d(0, -2px, 0) scale(1.02);
+}
+
+.sw-quick-chip:active {
+  transform: translate3d(0, 0, 0) scale(0.96);
+}
+
+.sw-choice-btn,
+.sw-plan-list > li {
+  animation: sw-pill-pop-in 240ms var(--sw-spring-out) both;
+  animation-delay: calc(var(--sw-item-idx, 0) * 35ms);
+}
+
+.sw-choice-btn {
+  transition: transform 170ms var(--sw-spring-out), background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.sw-choice-btn:hover {
+  transform: translate3d(3px, 0, 0);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.10);
+}
+
+/* Tactile Type Pill & Action Buttons */
+.sw-type-form:not([hidden]) {
+  animation: sw-pill-pop-in 220ms var(--sw-spring-out) both;
+  transition: box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.sw-type-form:focus-within {
+  border-color: #06b6d4;
+  box-shadow: 0 8px 26px rgba(6, 182, 212, 0.20), 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
+.sw-type-btn,
+.sw-act-btn,
+.sw-ctrl-btn,
+.sw-tool-btn {
+  transition: transform 160ms var(--sw-spring-pop), background 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.sw-type-btn:hover,
+.sw-act-btn:hover,
+.sw-ctrl-btn:hover {
+  transform: translate3d(0, -1.5px, 0);
+}
+
+.sw-type-btn:active,
+.sw-act-btn:active,
+.sw-ctrl-btn:active {
+  transform: scale(0.96);
+}
+
+.sw-transcript-chip {
+  transition: opacity 200ms var(--sw-spring-out), transform 220ms var(--sw-spring-out);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 6px 20px rgba(15, 23, 42, 0.09);
 }
