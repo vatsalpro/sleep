@@ -351,13 +351,16 @@
         );
         if (lifecycleState === 'starting') {
           if (!turnBusy) {
-            window.SW_UI.setState('listening');
-            this._setStatusChip(detail || 'Listening...');
+            window.SW_UI.setState('silent');
+            this._setStatusChip(detail || 'Starting microphone...');
           }
         } else if (lifecycleState === 'listening') {
           if (!turnBusy) {
             window.SW_UI.setState('listening');
-            if (!window.SW_UI.transcript) this._setStatusChip(detail || 'Listening...');
+            const curTr = String(window.SW_UI.transcript || '');
+            if (!curTr || /^(Starting microphone|Allow microphone|Connecting|Opening|Requesting microphone|Waiting for next command|Recovering)/i.test(curTr)) {
+              this._setStatusChip(detail || 'Listening...');
+            }
           }
         } else if (lifecycleState === 'committing') {
           window.SW_UI.setState('thinking');
@@ -381,6 +384,9 @@
             window.SW_UI.setState('silent');
           }
         }
+        if (on && this.dialogue && this.dialogue.isActive() && typeof this.dialogue._scheduleSilenceTimers === 'function') {
+          this.dialogue._scheduleSilenceTimers();
+        }
         if (this.memory) {
           if (on && this.dialogue && this.dialogue.isActive()) {
             this.memory.setSessionMode('active_listening');
@@ -390,7 +396,7 @@
         }
       };
 
-      this.voice.onError = ({ error, message, isPermissionDenied }) => {
+      this.voice.onError = ({ error, message, isPermissionDenied, isSiteBlocked }) => {
         this.recordError(message);
         if (window.SW_UI) {
           const hasInteractiveCard = Boolean(
@@ -404,13 +410,24 @@
           } else {
             window.SW_UI.setState('error');
             const isInsecure = error === 'insecure-context';
+            const hasExtRuntime = Boolean(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
             const actions = [];
-            if (!isInsecure) {
+            if (isSiteBlocked && hasExtRuntime) {
+              actions.push({ id: 'use_ext_mic', label: 'Use Sleepwalker Mic', primary: true });
+              if (typeof window !== 'undefined' && window.isSecureContext !== false) {
+                actions.push({ id: 'allow_mic', label: 'Allow Site Mic' });
+              }
+            } else if (!isInsecure) {
               actions.push({
                 id: isPermissionDenied ? 'allow_mic' : 'retry_mic',
                 label: isPermissionDenied ? 'Allow Microphone' : 'Retry Microphone',
                 primary: true
               });
+              if (isPermissionDenied && hasExtRuntime) {
+                actions.push({ id: 'use_ext_mic', label: 'Use Sleepwalker Mic' });
+              }
+            } else if (hasExtRuntime) {
+              actions.push({ id: 'use_ext_mic', label: 'Use Sleepwalker Mic', primary: true });
             }
             actions.push({ id: 'mic_setup', label: 'Mic Diagnostics' });
             window.SW_UI.showCard({
@@ -424,18 +441,20 @@
                   if (this.voice) this.voice.openMicSetup();
                   return;
                 }
-                if (actId === 'allow_mic' || actId === 'retry_mic') {
+                if (actId === 'use_ext_mic' || actId === 'allow_mic' || actId === 'retry_mic') {
                   window.SW_UI.hideCard();
-                  window.SW_UI.setState('listening');
-                  this._setStatusChip('Requesting microphone...');
+                  window.SW_UI.setState('silent');
+                  this._setStatusChip('Starting microphone...');
                   if (this.dialogue) {
                     this.dialogue.active = true;
                     this.dialogue.resting = false;
                     this.dialogue.pausedForSpeech = false;
                   }
-                  const ok = (actId === 'allow_mic' && this.voice)
-                    ? await this.voice.requestMicPermissionWithGesture()
-                    : (this.voice ? (this.voice._recreateRecognition(), this.voice.startListening()) : false);
+                  const ok = actId === 'use_ext_mic'
+                    ? (this.voice && typeof this.voice.useExtensionMicRelay === 'function' ? this.voice.useExtensionMicRelay() : false)
+                    : ((actId === 'allow_mic' && this.voice)
+                      ? await this.voice.requestMicPermissionWithGesture()
+                      : (this.voice ? (this.voice._recreateRecognition(), this.voice.startListening()) : false));
                   if (ok && this.memory) {
                     this.memory.setSessionMode('active_listening');
                   }
@@ -1742,8 +1761,8 @@
         this._pausedMicForTyping = false;
         if (window.SW_UI) {
           window.SW_UI.hideCard();
-          window.SW_UI.setState('listening');
-          window.SW_UI.setTranscript('Listening...');
+          window.SW_UI.setState('silent');
+          window.SW_UI.setTranscript('Starting microphone...');
         }
         if (this.dialogue) {
           this.dialogue.active = true;
@@ -1788,8 +1807,8 @@
         } catch (_e) {}
       }
       if (window.SW_UI) {
-        window.SW_UI.setState('listening');
-        window.SW_UI.setTranscript('Listening...');
+        window.SW_UI.setState('silent');
+        window.SW_UI.setTranscript('Starting microphone...');
       }
       this.isOpen = true;
       if (this.worldModel) {

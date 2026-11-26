@@ -1754,25 +1754,32 @@ async function openOrControlVoiceRelayWindow(action = 'START', lang = 'en-IN') {
     self.__swVoiceRelayWinId = null;
   }
 
-  const created = await new Promise((resolve, reject) => {
-    chrome.windows.create(
-      {
-        url: `pages/voice-relay.html?lang=${encodeURIComponent(lang)}`,
-        type: 'popup',
-        width: 320,
-        height: 145,
-        focused: true
-      },
-      (win) => {
-        if (chrome.runtime.lastError || !win) {
-          reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Could not open voice relay window'));
-        } else {
-          resolve(win);
+  self.__swVoiceRelayOpening = true;
+  let created;
+  try {
+    created = await new Promise((resolve, reject) => {
+      chrome.windows.create(
+        {
+          url: `pages/voice-relay.html?lang=${encodeURIComponent(lang)}`,
+          type: 'popup',
+          width: 320,
+          height: 145,
+          focused: true
+        },
+        (win) => {
+          if (chrome.runtime.lastError || !win) {
+            reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Could not open voice relay window'));
+          } else {
+            resolve(win);
+          }
         }
-      }
-    );
-  });
+      );
+    });
+  } finally {
+    self.__swVoiceRelayOpening = false;
+  }
   self.__swVoiceRelayWinId = created.id;
+  self.__swVoiceRelayTabId = (created.tabs && created.tabs[0] && created.tabs[0].id) || null;
   return { status: 'started', windowId: created.id };
 }
 
@@ -1780,6 +1787,7 @@ if (typeof chrome !== 'undefined' && chrome.windows && chrome.windows.onRemoved)
   chrome.windows.onRemoved.addListener((winId) => {
     if (self.__swVoiceRelayWinId === winId) {
       self.__swVoiceRelayWinId = null;
+      self.__swVoiceRelayTabId = null;
     }
   });
 }
@@ -1829,20 +1837,33 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
     chrome.tabs.onActivated.addListener((activeInfo) => {
       const store = getSessionStore();
       if (!store || !activeInfo || !activeInfo.tabId) return;
-      store.get(['sleepwalker_session_state_v1', 'sleepwalker_active_tab_id'], (data) => {
-        const sess = data && data.sleepwalker_session_state_v1;
-        const prevTabId = data && data.sleepwalker_active_tab_id;
-        const activeModes = ['active_listening', 'active_not_listening', 'paused'];
-        if (!sess || !activeModes.includes(sess.sessionMode)) return;
-
-        if (prevTabId && prevTabId !== activeInfo.tabId) {
-          chrome.tabs.sendMessage(prevTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED' }, () => { void chrome.runtime.lastError; });
+      // Ignore extension popup/helper tabs (e.g. voice-relay.html, mic-setup.html) so they never background-pause the real webpage tab!
+      if (
+        self.__swVoiceRelayOpening ||
+        (self.__swVoiceRelayWinId && activeInfo.windowId === self.__swVoiceRelayWinId) ||
+        (self.__swVoiceRelayTabId && activeInfo.tabId === self.__swVoiceRelayTabId)
+      ) {
+        return;
+      }
+      chrome.tabs.get(activeInfo.tabId, (activatedTab) => {
+        if (chrome.runtime?.lastError || !activatedTab || (activatedTab.url && isRestrictedUrl(activatedTab.url))) {
+          return;
         }
-        store.set({ sleepwalker_active_tab_id: activeInfo.tabId });
-        chrome.tabs.sendMessage(activeInfo.tabId, { action: 'SLEEPWALKER_SYNC_SESSION', isForegroundTab: true }, () => {
-          if (chrome.runtime.lastError) {
-            recoverMissingContentScriptSync(activeInfo.tabId, true);
+        store.get(['sleepwalker_session_state_v1', 'sleepwalker_active_tab_id'], (data) => {
+          const sess = data && data.sleepwalker_session_state_v1;
+          const prevTabId = data && data.sleepwalker_active_tab_id;
+          const activeModes = ['active_listening', 'active_not_listening', 'paused'];
+          if (!sess || !activeModes.includes(sess.sessionMode)) return;
+
+          if (prevTabId && prevTabId !== activeInfo.tabId) {
+            chrome.tabs.sendMessage(prevTabId, { action: 'SLEEPWALKER_TAB_BACKGROUNDED' }, () => { void chrome.runtime.lastError; });
           }
+          store.set({ sleepwalker_active_tab_id: activeInfo.tabId });
+          chrome.tabs.sendMessage(activeInfo.tabId, { action: 'SLEEPWALKER_SYNC_SESSION', isForegroundTab: true }, () => {
+            if (chrome.runtime.lastError) {
+              recoverMissingContentScriptSync(activeInfo.tabId, true);
+            }
+          });
         });
       });
     });

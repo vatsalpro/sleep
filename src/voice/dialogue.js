@@ -253,10 +253,15 @@
             this.widget.reader.readText(msg);
           }
         } else {
+          const isVoiceLive = Boolean(this.widget.voice && this.widget.voice.lifecycleState === 'listening');
           if (this.widget.pill) {
-            this.widget.pill.setListening('Listening... Continuous mode active');
+            if (isVoiceLive) {
+              this.widget.pill.setListening('Listening... Continuous mode active');
+            } else {
+              this.widget.pill.setStatus('Starting microphone...');
+            }
           }
-          if (this.widget.glow) {
+          if (this.widget.glow && isVoiceLive) {
             this.widget.glow.setListening();
           }
         }
@@ -1190,10 +1195,12 @@
     _scheduleSilenceTimers() {
       this._clearSilenceTimers();
       if (!this.active || this._isSystemSpeaking() || this._isProcessingTurn || this._externalTurnInProgress || this._promptedSilence || this._isUserTypingInOrb()) return;
+      if (this.widget && this.widget.voice && (this.widget.voice.lifecycleState === 'starting' || this.widget.voice.lifecycleState === 'error')) return;
 
       this._silencePromptTimer = setTimeout(() => {
         this._silencePromptTimer = null;
         if (!this.active || this._isSystemSpeaking() || this._isProcessingTurn || this._externalTurnInProgress || this._isUserTypingInOrb()) return;
+        if (this.widget && this.widget.voice && (this.widget.voice.lifecycleState === 'starting' || this.widget.voice.lifecycleState === 'error')) return;
         this._promptedSilence = true;
         const msg = this.widget && this.widget.lang === 'hi-IN'
           ? 'क्या आप अभी भी सुन रहे हैं?'

@@ -100,6 +100,10 @@
       this.lastInterim = '';
       this.useOffscreen = false;
       this._fallbackMode = 'none'; // 'none' | 'iframe' | 'relay'
+      this._startEpoch = 0;
+      this._awaitingPermissionPrompt = false;
+      this._lastPageMicPerm = 'unknown';
+      this._extMicGranted = false;
       this._iframeEl = null;
       this._iframeReady = false;
       this._iframePendingStart = false;
@@ -260,7 +264,7 @@
             if (message.isListening) {
               this.isListening = true;
               this.isPaused = false;
-              this._setLifecycleState('listening', 'Listening via Sleepwalker Mic...');
+              this._setLifecycleState('listening', 'Listening...');
               this._startLevelMonitor();
             }
             if (this.onStateChange) {
@@ -316,8 +320,22 @@
           }
         } else if (data.kind === 'error') {
           if (data.error === 'not-allowed' || data.error === 'service-not-allowed') {
-            this._diag('iframe_blocked_escalate_relay', { error: data.error });
-            this._startExtensionRelayFallback();
+            this._fallbackMode = 'none';
+            if (this._extMicGranted) {
+              this._diag('iframe_blocked_escalate_relay', { error: data.error });
+              this._startExtensionRelayFallback();
+            } else {
+              this.isListening = false;
+              this._setLifecycleState('error', 'Microphone blocked on this site');
+              if (this.onError) {
+                this.onError({
+                  error: 'not-allowed',
+                  message: 'This site blocks in-page microphone access. Click Use Sleepwalker Mic below to speak here.',
+                  isPermissionDenied: true,
+                  isSiteBlocked: true
+                });
+              }
+            }
           } else if (data.error === 'audio-capture') {
             this.isListening = false;
             this._setLifecycleState('error', 'No microphone detected');
@@ -327,6 +345,62 @@
           }
         }
       });
+    }
+
+    _isPageMicHardBlockedByBrowser() {
+      if (typeof window !== 'undefined' && window.isSecureContext === false) {
+        return true;
+      }
+      if (typeof document !== 'undefined') {
+        try {
+          const policy = document.permissionsPolicy || document.featurePolicy;
+          if (policy && typeof policy.allowsFeature === 'function' && policy.allowsFeature('microphone') === false) {
+            return true;
+          }
+        } catch (_e) {}
+      }
+      return false;
+    }
+
+    async _probeMicEnvironment() {
+      const hardBlocked = this._isPageMicHardBlockedByBrowser();
+      let pagePerm = 'unknown';
+      let extMicGranted = Boolean(this._extMicGranted);
+
+      const permTask = (async () => {
+        try {
+          if (typeof navigator !== 'undefined' && navigator.permissions && typeof navigator.permissions.query === 'function') {
+            const st = await navigator.permissions.query({ name: 'microphone' });
+            if (st && typeof st.state === 'string') return st.state;
+          }
+        } catch (_e) {}
+        return 'unknown';
+      })();
+
+      const storageTask = (async () => {
+        try {
+          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === 'function') {
+            return await new Promise((resolve) => {
+              chrome.storage.local.get(['sleepwalker_mic_permission'], (items) => {
+                void chrome.runtime?.lastError;
+                resolve(Boolean(items && items.sleepwalker_mic_permission === 'granted'));
+              });
+            });
+          }
+        } catch (_e) {}
+        return extMicGranted;
+      })();
+
+      try {
+        const timeout = new Promise((resolve) => setTimeout(() => resolve(['unknown', extMicGranted]), 120));
+        const res = await Promise.race([Promise.all([permTask, storageTask]), timeout]);
+        pagePerm = res[0] || 'unknown';
+        extMicGranted = Boolean(res[1]);
+      } catch (_e) {}
+
+      this._lastPageMicPerm = pagePerm;
+      this._extMicGranted = extMicGranted;
+      return { hardBlocked, pagePerm, extMicGranted };
     }
 
     _postToIframe(msg) {
@@ -364,7 +438,7 @@
       } else {
         this._iframePendingStart = true;
       }
-      this._setLifecycleState('starting', 'Connecting Sleepwalker microphone...');
+      this._setLifecycleState('starting', 'Starting microphone...');
       return true;
     }
 
@@ -377,7 +451,7 @@
       this.isListening = true;
       this.isPaused = false;
       this._intentionalStop = false;
-      this._setLifecycleState('starting', 'Opening Sleepwalker Mic Relay for restricted site...');
+      this._setLifecycleState('starting', 'Starting microphone...');
       chrome.runtime.sendMessage(
         { type: 'SLEEPWALKER_START_EXT_VOICE_RELAY', lang: this.activeLang },
         (res) => {
@@ -389,13 +463,32 @@
               this.onError({
                 error: 'not-allowed',
                 message: 'This site blocks in-page microphone access. Click Allow Microphone below to enable Sleepwalker Mic.',
-                isPermissionDenied: true
+                isPermissionDenied: true,
+                isSiteBlocked: true
               });
             }
           }
         }
       );
       return true;
+    }
+
+    /**
+     * Explicitly switch to Sleepwalker's extension-origin microphone relay on user request.
+     */
+    useExtensionMicRelay() {
+      this._startEpoch += 1;
+      this._awaitingPermissionPrompt = false;
+      if (this._startingWatchdogTimer) {
+        clearTimeout(this._startingWatchdogTimer);
+        this._startingWatchdogTimer = null;
+      }
+      if (this.recognition) {
+        try { this.recognition.abort(); } catch (_e) {}
+      }
+      this._recognitionRunning = false;
+      this._startInFlight = false;
+      return this._startExtensionRelayFallback();
     }
 
     /**
@@ -416,7 +509,10 @@
       this._restartAttempts = 0;
       this._lastRecoverableError = '';
       this._lastErrorCode = '';
-      if (typeof window !== 'undefined' && window.isSecureContext === false) {
+      if (this._isPageMicHardBlockedByBrowser()) {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+          return this.useExtensionMicRelay();
+        }
         this._setLifecycleState('error', 'HTTPS required for microphone');
         if (typeof this.onError === 'function') {
           this.onError({
@@ -553,6 +649,8 @@
 
       this.recognition.onstart = () => {
         this._startInFlight = false;
+        this._awaitingPermissionPrompt = false;
+        this._lastPageMicPerm = 'granted';
         if (this._startingWatchdogTimer) {
           clearTimeout(this._startingWatchdogTimer);
           this._startingWatchdogTimer = null;
@@ -719,6 +817,8 @@
 
       this.recognition.onerror = (event) => {
         console.warn('[Sleepwalker Voice] Recognition error:', event.error);
+        this._startInFlight = false;
+        this._awaitingPermissionPrompt = false;
         if (this._startingWatchdogTimer) {
           clearTimeout(this._startingWatchdogTimer);
           this._startingWatchdogTimer = null;
@@ -733,24 +833,12 @@
           case 'not-allowed':
           case 'service-not-allowed':
             this._recognitionRunning = false;
-            if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
-              if (typeof window !== 'undefined' && window.isSecureContext !== false && this._fallbackMode === 'none') {
-                this._diag('site_mic_blocked_try_iframe', { error: event.error });
-                this._startIframeFallback();
-                return;
-              }
-              if (this._fallbackMode !== 'relay') {
-                this._diag('site_mic_blocked_try_relay', { error: event.error });
-                this._startExtensionRelayFallback();
-                return;
-              }
-            }
             isPermissionDenied = true;
             this.isListening = false;
-            this._setLifecycleState('error', 'Microphone permission denied');
+            this._setLifecycleState('error', 'Microphone permission needed');
             userMessage = (typeof window !== 'undefined' && window.isSecureContext === false)
-              ? 'Chrome requires an HTTPS webpage (or localhost) for microphone access. Open an https:// page or use the typed input box below.'
-              : 'Microphone permission was blocked for this site. Click Allow Microphone below, or click the site icon in Chrome’s address bar -> Allow Microphone.';
+              ? 'Chrome requires an HTTPS webpage (or localhost) for microphone access. Click Use Sleepwalker Mic below, or use the Type input box.'
+              : 'Microphone permission was not granted for this site. Click Allow Microphone below, or click Use Sleepwalker Mic if this site blocks microphone access.';
             break;
           case 'no-speech':
             // Harmless; user was quiet — keep session alive without error card
@@ -913,18 +1001,93 @@
             if (chrome.runtime.lastError || !res || res.status !== 'started') {
               console.warn('[Sleepwalker Voice] Offscreen start unavailable; using content script recognition.');
               this.useOffscreen = false;
-              this._startContentRecognition();
+              this._selectAndStartSingleMicSource(options);
             }
           }
         );
         return true;
       }
 
-      return this._startContentRecognition();
+      return this._selectAndStartSingleMicSource(options);
     }
 
-    _startContentRecognition() {
+    _selectAndStartSingleMicSource(options = {}) {
+      const epoch = ++this._startEpoch;
+      this.isListening = true;
+      this.isPaused = false;
+      this._pausedForTab = false;
+      this._intentionalStop = false;
+
+      // Fast synchronous check for http:// or Permissions-Policy: microphone=()
+      const syncHardBlocked = this._isPageMicHardBlockedByBrowser();
+      if (!syncHardBlocked && this._lastPageMicPerm === 'granted') {
+        return this._startContentRecognition({ pagePerm: 'granted' });
+      }
+
+      this._setLifecycleState('starting', 'Starting microphone...');
+      this._probeMicEnvironment().then(({ hardBlocked, pagePerm, extMicGranted }) => {
+        if (epoch !== this._startEpoch || !this.isListening || this.isPaused || this._pausedForTab || this._intentionalStop) {
+          return;
+        }
+        const hasExtRuntime = Boolean(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
+
+        // Case 1: Webpage hard-blocks microphone via http:// or Permissions-Policy: microphone=()
+        if (hardBlocked) {
+          if (hasExtRuntime && (extMicGranted || options.forceRelay)) {
+            this._diag('hard_blocked_use_relay', { pagePerm });
+            this._startExtensionRelayFallback();
+            return;
+          }
+          this.isListening = false;
+          this._lastErrorCode = 'not-allowed';
+          this._setLifecycleState('error', 'Microphone blocked on this site');
+          if (this.onError) {
+            this.onError({
+              error: 'not-allowed',
+              message: hasExtRuntime
+                ? 'This site blocks direct microphone access. Click Use Sleepwalker Mic below to enable voice on this site.'
+                : 'Chrome only allows microphone access on HTTPS websites (or localhost). Use the Type input box below.',
+              isPermissionDenied: true,
+              isSiteBlocked: true
+            });
+          }
+          return;
+        }
+
+        // Case 2: User/site explicitly has microphone permission set to 'denied' on this origin
+        if (pagePerm === 'denied') {
+          if (hasExtRuntime && extMicGranted) {
+            this._diag('site_denied_use_iframe', {});
+            this._startIframeFallback();
+            return;
+          }
+          if (hasExtRuntime && options.forceRelay) {
+            this._startExtensionRelayFallback();
+            return;
+          }
+          this.isListening = false;
+          this._lastErrorCode = 'not-allowed';
+          this._setLifecycleState('error', 'Microphone blocked on this site');
+          if (this.onError) {
+            this.onError({
+              error: 'not-allowed',
+              message: 'Microphone access is blocked for this site. Click Use Sleepwalker Mic below, or allow Microphone in Chrome’s address bar.',
+              isPermissionDenied: true,
+              isSiteBlocked: true
+            });
+          }
+          return;
+        }
+
+        // Case 3: Normal site ('granted', 'prompt', or 'unknown') -> strictly use in-page SpeechRecognition only!
+        this._startContentRecognition({ pagePerm });
+      });
+      return true;
+    }
+
+    _startContentRecognition(meta = {}) {
       if (!this.isSupported) {
+        this.isListening = false;
         this._setLifecycleState('error', 'Speech recognition not supported');
         if (this.onError) {
           this.onError({
@@ -936,23 +1099,9 @@
         return false;
       }
 
-      if (typeof window !== 'undefined' && window.isSecureContext === false) {
-        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
-          this._diag('insecure_context_escalate_relay', {});
-          return this._startExtensionRelayFallback();
-        }
-        this._lastErrorCode = 'insecure-context';
-        this.isListening = false;
-        this._setLifecycleState('error', 'HTTPS required for microphone');
-        if (this.onError) {
-          this.onError({
-            error: 'not-allowed',
-            message: 'Chrome only allows microphone access on HTTPS websites (or localhost). Open an https:// page or use the typed input box below.',
-            isPermissionDenied: true
-          });
-        }
-        return false;
-      }
+      const pagePerm = meta.pagePerm || this._lastPageMicPerm || 'unknown';
+      const awaitingPrompt = pagePerm === 'prompt';
+      this._awaitingPermissionPrompt = awaitingPrompt;
 
       if (this._restartTimer) {
         clearTimeout(this._restartTimer);
@@ -979,7 +1128,7 @@
               this._pendingStartAfterStop = false;
               this._startInFlight = false;
               this._recreateRecognition();
-              this._startContentRecognition();
+              this._startContentRecognition({ pagePerm: this._lastPageMicPerm });
             }
           }, 900);
           return true;
@@ -991,18 +1140,26 @@
       }
       this._startInFlight = true;
 
-      this._setLifecycleState('starting', 'Starting microphone...');
+      this._setLifecycleState(
+        'starting',
+        awaitingPrompt ? 'Allow microphone in browser prompt...' : 'Starting microphone...'
+      );
       const armStartWatchdog = () => {
         if (this._startingWatchdogTimer) clearTimeout(this._startingWatchdogTimer);
+        // Never abort SpeechRecognition while Chrome is waiting on the user's permission prompt!
+        if (this._awaitingPermissionPrompt || pagePerm !== 'granted') {
+          return;
+        }
         this._startingWatchdogTimer = setTimeout(() => {
           this._startingWatchdogTimer = null;
-          if (this.lifecycleState === 'starting' && !this._recognitionRunning && this.isListening && !this.isPaused && !this._intentionalStop) {
+          if (this.lifecycleState === 'starting' && !this._recognitionRunning && !this._awaitingPermissionPrompt && this.isListening && !this.isPaused && !this._intentionalStop) {
             this._pendingStartAfterStop = false;
+            this._startInFlight = false;
             this._recreateRecognition();
             this._setLifecycleState('recovering', 'Recovering microphone...');
-            this._startContentRecognition();
+            this._startContentRecognition({ pagePerm: 'granted' });
           }
-        }, 1200);
+        }, 1800);
       };
 
       try {
@@ -1012,15 +1169,17 @@
         if (!this._recognitionRunning && this.lifecycleState === 'starting') armStartWatchdog();
         return true;
       } catch (err) {
+        this._startInFlight = false;
+        this._awaitingPermissionPrompt = false;
         const errName = (err && (err.name || err.message)) || '';
         if (/NotAllowedError|SecurityError/i.test(errName)) {
           this.isListening = false;
           this._lastErrorCode = 'not-allowed';
-          this._setLifecycleState('error', 'Microphone permission denied');
+          this._setLifecycleState('error', 'Microphone permission needed');
           if (this.onError) {
             this.onError({
               error: 'not-allowed',
-              message: 'Microphone permission is needed for this site. Click Allow Microphone below, or allow Microphone in Chrome’s address bar.',
+              message: 'Microphone permission is needed for this site. Click Allow Microphone below, or click Use Sleepwalker Mic.',
               isPermissionDenied: true
             });
           }
@@ -1029,11 +1188,14 @@
         if (/InvalidStateError/i.test(errName) && !this._recognitionRunning) {
           this._recreateRecognition();
           try {
+            this._startInFlight = true;
             this.recognition.lang = this.activeLang;
             this.recognition.start();
             if (!this._recognitionRunning && this.lifecycleState === 'starting') armStartWatchdog();
             return true;
-          } catch (_retryErr) {}
+          } catch (_retryErr) {
+            this._startInFlight = false;
+          }
         }
         // Still finalizing a previous stop(): queue a start on onend, guarded by watchdog so 'starting' cannot deadlock
         this._pendingStartAfterStop = true;
@@ -1104,7 +1266,11 @@
       this._intentionalStop = true;
       this._pendingStartAfterStop = false;
       this._setLifecycleState('paused', 'Paused in background tab');
-      if (this.recognition) {
+      if (this._fallbackMode === 'iframe') {
+        this._postToIframe({ action: 'STOP' });
+      } else if (this._fallbackMode === 'relay' && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'SLEEPWALKER_PAUSE_EXT_VOICE_RELAY', lang: this.activeLang }, () => { void chrome.runtime?.lastError; });
+      } else if (this.recognition) {
         try { this.recognition.stop(); } catch (_e) {}
       }
       this._stopLevelMonitor();
@@ -1147,6 +1313,8 @@
         clearTimeout(this._startingWatchdogTimer);
         this._startingWatchdogTimer = null;
       }
+      this._startEpoch += 1;
+      this._awaitingPermissionPrompt = false;
       this.isListening = false;
       this.isPaused = false;
       this._pausedForTab = false;
