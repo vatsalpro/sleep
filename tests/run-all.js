@@ -347,8 +347,8 @@ async function auditSite(page, sw, getTabId, site) {
     const channelClosedByNav = Boolean(clickRes && /message channel closed before a response/i.test(String(clickRes.error || '')));
     const r = clickRes && clickRes.res;
     const execOk = Boolean(r && (
-      r.ok || r.verified || r.verificationResult === 'verified' ||
-      /^(?:navigated|clicked|completed|disambiguate|confirm|needs_confirmation)$/i.test(String(r.status || ''))
+      r.ok || r.verified || r.executed || r.verificationResult === 'verified' ||
+      /^(?:navigated|clicked|completed|disambiguate|confirm|needs_confirmation|awaiting_confirmation|dispatched)$/i.test(String(r.status || ''))
     ));
 
     if (navigated || stateToggled || channelClosedByNav || execOk) {

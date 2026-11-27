@@ -24,7 +24,9 @@
 
   const TARGET_SELECTOR = [
     'a[href]',
+    'a.nav-link',
     'a.dropdown-toggle',
+    'a.dropdown-item',
     'a[data-toggle]',
     'a[data-bs-toggle]',
     'button',
@@ -44,7 +46,7 @@
     '[tabindex]'
   ].join(', ');
 
-  const AD_OR_COOKIE_NOISE_RE = /\b(?:accept\s+all\s+cookies|manage\s+cookies|cookie\s+(?:settings|preferences|policy)|adchoices|sponsored\s+ad|advertisement)\b/i;
+  const AD_OR_COOKIE_NOISE_RE = /\b(?:accept\s+all\s+cookies|manage\s+cookies|cookie(?:\s+(?:settings|preferences|policy|notice|consent))?|adchoices|sponsored(?:\s+ad)?|advertisement)\b/i;
 
   const LOGOUT_RE = /\b(?:log\s*out|sign\s*out|logout|signout|log\s*off|exit\s+account|लॉगआउट|लॉग\s*आउट)\b/i;
   const DELETE_RE = /\b(?:delete|remove|erase|destroy|deactivate\s+account|close\s+account|हटाएं|डिलीट)\b/i;
@@ -208,7 +210,7 @@
       if (!el || el.nodeType !== 1) return false;
       const tag = String(el.tagName || '').toLowerCase();
       const role = String((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
-      if (tag === 'a' && (el.hasAttribute('href') || (el.classList && el.classList.contains('dropdown-toggle')) || el.hasAttribute('data-toggle') || el.hasAttribute('data-bs-toggle') || el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup'))) return true;
+      if (tag === 'a' && (el.hasAttribute('href') || (el.classList && (el.classList.contains('dropdown-toggle') || el.classList.contains('nav-link') || el.classList.contains('dropdown-item'))) || el.hasAttribute('data-toggle') || el.hasAttribute('data-bs-toggle') || el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup'))) return true;
       if (tag === 'button' || tag === 'summary') return true;
       if (role === 'link' || role === 'button' || role === 'tab' || role === 'menuitem') return true;
       if (el.hasAttribute && (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup'))) return true;
@@ -351,6 +353,8 @@
       }
 
       let label = ariaLabel || labelledByText || inner || valueCap || imgAlt || title || '';
+      // Strip decorative trailing menu chevrons/guillemets ("Company »" -> "Company") so spoken labels are clean
+      label = label.replace(/\s*[»›▾▼⌄▸►]+\s*$/g, '').trim();
 
       // Enrich cryptic icon/1-char labels into clear human-readable spoken labels!
       const elId = String(el.id || '');
@@ -825,9 +829,7 @@
       for (let i = 0; i < rawEntries.length; i++) {
         const item = rawEntries[i];
         const normLabel = cleanSpace(item.label).toLowerCase();
-        const key = item.rawHref
-          ? `href|${item.href}|${normLabel}`
-          : `btn|${item.role}|${normLabel}|${cleanSpace(item.contextHeading || '').toLowerCase()}`;
+        const key = `${item.role}|${normLabel}|${item.href || ''}`;
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);
         deduped.push(item);

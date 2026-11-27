@@ -43,7 +43,7 @@ function buildVoiceCorpus() {
   ]);
 
   // 2. ROMANIZED HINDI (~55)
-  add('romanized_hindi', ['READ_PAGE'], [
+  add('romanized_hindi', ['READ_PAGE', 'READ_AGAIN'], [
     'yeh page padho', 'ye page padho', 'page padho', 'pura padho', 'padho',
     'sunao', 'is page ko padho', 'shuru se padho', 'padhna shuru karo', 'page sunao'
   ]);
@@ -119,7 +119,7 @@ function buildVoiceCorpus() {
     'pricing section pe scroll karo', 'faq section dikhao', 'footer pe jao',
     'top pe le chalo', 'back jao', 'page reload karo'
   ]);
-  add('hinglish', ['STOP', 'PAUSE', 'RESUME', 'HELP'], [
+  add('hinglish', ['STOP', 'PAUSE', 'RESUME', 'READ_AGAIN', 'OUTLINE', 'HELP'], [
     'stop kar do', 'reading pause karo', 'continue karo', 'resume kar do',
     'cancel kar do', 'sleepwalker rest karo', 'thoda ruko', 'help chahiye',
     'kya commands hain', 'what can i do here batao', 'aur options batao',
@@ -187,7 +187,7 @@ function buildVoiceCorpus() {
     'stop', 'cancel', 'shut up', 'be quiet', 'pause', 'hold on', 'wait',
     'resume', 'continue', 'keep reading', 'play', 'read it again', 'read again', 'repeat', 'start over'
   ]);
-  add('english_core', ['QUERY_OR_SEARCH'], [
+  add('english_core', ['HELP', 'QUERY_OR_SEARCH'], [
     'say more', 'more options', 'scroll down', 'scroll up', 'go back', 'click trains',
     'select second option', 'fill name with Rahul'
   ]);
