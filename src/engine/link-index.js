@@ -18,23 +18,33 @@
 })(typeof globalThis !== 'undefined' ? globalThis : window, function (root) {
   'use strict';
 
-  const MAX_TARGETS = 300;
+  const MAX_TARGETS = 500;
   const MUTATION_DEBOUNCE_MS = 300;
   const CONTEXT_SNIPPET_MAX = 120;
 
   const TARGET_SELECTOR = [
     'a[href]',
+    'a.dropdown-toggle',
+    'a[data-toggle]',
+    'a[data-bs-toggle]',
     'button',
+    'details > summary',
     '[role="link"]',
     '[role="button"]',
     '[role="tab"]',
     '[role="menuitem"]',
+    '[aria-expanded]',
+    '[aria-haspopup]',
+    '.dropdown-toggle',
+    '.ui-tabs-tab',
     'input[type="submit"]',
     'input[type="button"]',
     'input[type="reset"]',
     '[onclick]',
     '[tabindex]'
   ].join(', ');
+
+  const AD_OR_COOKIE_NOISE_RE = /\b(?:accept\s+all\s+cookies|manage\s+cookies|cookie\s+(?:settings|preferences|policy)|adchoices|sponsored\s+ad|advertisement)\b/i;
 
   const LOGOUT_RE = /\b(?:log\s*out|sign\s*out|logout|signout|log\s*off|exit\s+account|लॉगआउट|लॉग\s*आउट)\b/i;
   const DELETE_RE = /\b(?:delete|remove|erase|destroy|deactivate\s+account|close\s+account|हटाएं|डिलीट)\b/i;
@@ -198,9 +208,11 @@
       if (!el || el.nodeType !== 1) return false;
       const tag = String(el.tagName || '').toLowerCase();
       const role = String((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
-      if (tag === 'a' && el.hasAttribute && el.hasAttribute('href')) return true;
-      if (tag === 'button') return true;
+      if (tag === 'a' && (el.hasAttribute('href') || (el.classList && el.classList.contains('dropdown-toggle')) || el.hasAttribute('data-toggle') || el.hasAttribute('data-bs-toggle') || el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup'))) return true;
+      if (tag === 'button' || tag === 'summary') return true;
       if (role === 'link' || role === 'button' || role === 'tab' || role === 'menuitem') return true;
+      if (el.hasAttribute && (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup'))) return true;
+      if (el.classList && (el.classList.contains('dropdown-toggle') || el.classList.contains('ui-tabs-tab'))) return true;
       if (tag === 'input') {
         const type = String((el.getAttribute && el.getAttribute('type')) || el.type || '').toLowerCase();
         return type === 'submit' || type === 'button' || type === 'reset';
@@ -279,8 +291,20 @@
         }
       }
 
+      // Skip CSS visually-hidden / screen-reader-only traps (e.g. "Skip to main content" clipped to 1px)
+      const clsStr = typeof el.className === 'string' ? el.className : '';
+      if (/\b(?:visually-hidden|sr-only|screen-reader-text)\b/i.test(clsStr)) return false;
+      if (win && typeof win.getComputedStyle === 'function') {
+        try {
+          const ownSt = win.getComputedStyle(el);
+          if (ownSt && (ownSt.clip === 'rect(0px, 0px, 0px, 0px)' || ownSt.clip === 'rect(1px, 1px, 1px, 1px)' || /^inset\(50%\)/.test(ownSt.clipPath || ''))) {
+            return false;
+          }
+        } catch (_e) {}
+      }
+
       if (rect) {
-        if (rect.width <= 0 || rect.height <= 0) return false;
+        if (rect.width <= 1 || rect.height <= 1) return false;
         const vw = (topWin && topWin.innerWidth) || 1280;
         const vh = (topWin && topWin.innerHeight) || 800;
         // Skip offscreen-fixed junk and clipped/screen-reader-only -9999px traps.
@@ -326,7 +350,49 @@
         if (img) imgAlt = cleanSpace(img.getAttribute('alt') || '');
       }
 
-      const label = ariaLabel || labelledByText || inner || valueCap || imgAlt || title || '';
+      let label = ariaLabel || labelledByText || inner || valueCap || imgAlt || title || '';
+
+      // Enrich cryptic icon/1-char labels into clear human-readable spoken labels!
+      const elId = String(el.id || '');
+      const elCls = typeof el.className === 'string' ? el.className : '';
+      if (/^[×✕✖✗x]$/i.test(label)) {
+        label = title || (/close|dismiss|modal/i.test(`${elId} ${elCls}`) ? 'Close dialog' : 'Close');
+      } else if (/^a[+-]?$/i.test(label)) {
+        if (title) label = title;
+        else if (/\+|inc|plus|large/i.test(`${label} ${elId}`)) label = 'Increase font size';
+        else if (/-|dec|minus|small/i.test(`${label} ${elId}`)) label = 'Decrease font size';
+        else if (/font|reset|text/i.test(`${elId} ${elCls}`)) label = 'Reset font size';
+      } else if (/^\d{1,2}$/.test(label)) {
+        const inCarousel = Boolean(el.closest && el.closest('.carousel, .carousel-indicators, .slick-dots, .owl-dots, .swiper-pagination, [data-slide-to], [data-bs-slide-to]')) ||
+          Boolean(attr('data-slide-to') || attr('data-bs-slide-to'));
+        if (title) label = title;
+        else if (inCarousel) label = `Slide ${label}`;
+        else label = `Page ${label}`;
+      } else if (/^(?:click\s*here|here|read\s+more|learn\s+more|know\s+more|more|view|details)$/i.test(label)) {
+        // Enrich generic links ("Click here", "Read more") with surrounding row/card/paragraph context
+        const ctxEl = el.closest && el.closest('li, td, tr, p, .card, article, .alert, .notice, .banner');
+        let ctxText = '';
+        if (ctxEl) {
+          ctxText = cleanSpace(ctxEl.innerText || ctxEl.textContent || '')
+            .replace(new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'ig'), '')
+            .replace(/^[\s:–—-]+|[\s:–—-]+$/g, '')
+            .trim();
+        }
+        if (title && title.length > label.length) {
+          label = title;
+        } else if (ctxText && ctxText.length >= 4) {
+          label = `${ctxText.slice(0, 46).trim()} (${label})`;
+        } else {
+          const hrefHint = extractHrefWords(attr('href'));
+          if (hrefHint && hrefHint.length >= 3) label = `${hrefHint.slice(0, 36)} (${label})`;
+        }
+      }
+
+      // Drop cookie-consent & sponsored-ad clutter from actionable voice targets
+      if (AD_OR_COOKIE_NOISE_RE.test(label)) {
+        return { label: '', ariaLabel: '', title: '' };
+      }
+
       return { label, ariaLabel: ariaLabel || labelledByText, title };
     }
 
@@ -753,7 +819,7 @@
       const visitedEls = new Set();
       this._collectRoots(doc.body || doc.documentElement, topWin, doc, null, visitedEls, rawEntries);
 
-      // Deduplicate identical (href + label) entries; keep distinct same-label buttons if no href or different context.
+      // Deduplicate identical (href + label) entries; keep distinct same-label buttons only when in distinct headings.
       const deduped = [];
       const seenKeys = new Set();
       for (let i = 0; i < rawEntries.length; i++) {
@@ -761,7 +827,7 @@
         const normLabel = cleanSpace(item.label).toLowerCase();
         const key = item.rawHref
           ? `href|${item.href}|${normLabel}`
-          : `btn|${normLabel}|${cleanSpace(item.context).toLowerCase()}`;
+          : `btn|${item.role}|${normLabel}|${cleanSpace(item.contextHeading || '').toLowerCase()}`;
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);
         deduped.push(item);

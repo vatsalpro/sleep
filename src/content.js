@@ -1364,6 +1364,92 @@
       this.savePreferences();
     }
 
+    _buildPageActionCatalog() {
+      const linkIdx = typeof window !== 'undefined' ? window.SleepwalkerLinkIndexInstance : null;
+      const formIdx = typeof window !== 'undefined' ? window.SleepwalkerFormIndex : null;
+      const rawLinks = linkIdx && typeof linkIdx.getTargets === 'function' ? linkIdx.getTargets(true) : [];
+      const rawForms = formIdx && typeof formIdx.buildFormIndex === 'function' ? formIdx.buildFormIndex(document) : [];
+
+      const seen = new Set();
+      const skipRe = /^(?:skip\s+to|main\s+content|slide\s+\d+|page\s+\d+|close(?:\s+dialog)?|accept\s+all\s+cookies|manage\s+cookies)$/i;
+      const items = [];
+
+      const addItem = (label, kind, priority, commandText) => {
+        const clean = String(label || '').replace(/\s+/g, ' ').trim();
+        if (!clean || clean.length < 3 || clean.length > 52) return;
+        if (skipRe.test(clean) || /^[\W_\d]+$/.test(clean)) return;
+        const key = clean.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({ label: clean, kind, priority, commandText });
+      };
+
+      for (const f of rawForms) {
+        if (!f || !f.label) continue;
+        addItem(f.sensitive ? `${f.label} (manual field)` : `Fill ${f.label}`, 'input', f.sensitive ? 3 : 8, `fill ${f.label}`);
+      }
+      for (const t of rawLinks) {
+        if (!t || !t.label) continue;
+        const p = (t.area === 'main' || t.area === 'card') ? 10 : (t.area === 'nav' || t.area === 'header' ? 9 : 5);
+        addItem(t.label, t.role || 'link', p, `open ${t.label}`);
+      }
+
+      items.sort((a, b) => b.priority - a.priority);
+      return items.slice(0, 42);
+    }
+
+    _handleWhatCanIDoHere(isMore = false) {
+      const curUrl = typeof window !== 'undefined' && window.location ? window.location.href : '';
+      const pageSize = 6;
+      if (!isMore || !this._pageActionsCatalog || this._pageActionsCatalog.url !== curUrl || !Array.isArray(this._pageActionsCatalog.items) || this._pageActionsCatalog.items.length === 0) {
+        this._pageActionsCatalog = {
+          url: curUrl,
+          items: this._buildPageActionCatalog(),
+          pageIndex: 0,
+          pageSize
+        };
+      } else {
+        const totalPages = Math.max(1, Math.ceil(this._pageActionsCatalog.items.length / pageSize));
+        this._pageActionsCatalog.pageIndex = (this._pageActionsCatalog.pageIndex + 1) % totalPages;
+      }
+
+      const cat = this._pageActionsCatalog;
+      const total = cat.items.length;
+      if (total === 0) {
+        const emptyMsg = 'I did not find clickable options on this page yet. Try scrolling or saying "Explain this page".';
+        this.lastSpokenUnifiedReply = emptyMsg;
+        if (window.SW_UI) window.SW_UI.showCard({ type: 'answer', title: 'Page Options', text: emptyMsg });
+        return { ok: true, verified: true, status: 'what_can_i_do_empty', count: 0 };
+      }
+
+      const start = cat.pageIndex * pageSize;
+      const slice = cat.items.slice(start, start + pageSize);
+      const end = start + slice.length;
+      const hasMore = total > pageSize;
+      const numberedSummary = slice.map((it, i) => `${i + 1}. ${it.label}`).join('\n');
+      const spoken = `${isMore ? 'More options' : 'Here are the top options'} (${start + 1} to ${end} of ${total}): ${slice.map((it, i) => `${i + 1}. ${it.label}`).join(', ')}.${hasMore ? ' Say a number or say "Say more" for more.' : ''}`;
+
+      this.lastSpokenUnifiedReply = `${numberedSummary}\n${hasMore ? 'Say a number or "Say more" for more options.' : ''}`;
+      this.setAssistantReply(spoken);
+      if (window.SW_UI) {
+        window.SW_UI.showCard({
+          type: 'choices',
+          title: `${isMore ? 'More Page Options' : 'What You Can Do Here'} (${start + 1}–${end} of ${total})`,
+          text: hasMore ? 'Pick a number, click an option, or say "Say more" for the next batch:' : 'Pick a number or click an option:',
+          choices: slice.map((it) => ({ label: it.label, commandText: it.commandText, kind: it.kind })),
+          onAction: (act, payload) => {
+            if (act === 'choose' && payload && payload.choice && payload.choice.commandText) {
+              this.handleUserInput(payload.choice.commandText, 'typed', {});
+            }
+          }
+        });
+      }
+      if (this.dialogue && this.dialogue.isActive()) {
+        this.dialogue._sayAndDisplay(spoken, { openBubble: false, speak: true });
+      }
+      return { ok: true, verified: true, status: isMore ? 'say_more_page' : 'what_can_i_do', start: start + 1, end, total, count: slice.length };
+    }
+
     setVoicePersona(personaId, options = {}) {
       if (!this.reader || typeof this.reader.setVoicePersona !== 'function') return null;
       const info = personaId === '__next__'
@@ -2078,6 +2164,14 @@
           else if (/\b(?:breeze|lively|fast|snappy)\b/.test(hint)) targetPersona = 'breeze';
           const info = this.setVoicePersona(targetPersona, { preview: true, showCard: true, clearSpecificVoice: true });
           return Promise.resolve({ ok: true, verified: true, status: 'voice_changed', voicePersona: info && info.id });
+        }
+
+        // Fast-Path 0C: "What can I do here" & "Say more" paginated page action guide (universal across all websites)
+        if (/^(?:what\s+can\s+(?:i|we)\s+do(?:\s+here|\s+on\s+this\s+page)?|what\s+options\s+are\s+(?:here|available)|show\s+(?:me\s+)?(?:the\s+)?(?:page\s+)?actions|yahan\s+kya\s+kar\s+sakte\s+(?:hain|ho)|ಇಲ್ಲಿ\s+ಏನು\s+ಮಾಡಬಹುದು)$/i.test(cleanInput)) {
+          return Promise.resolve(this._handleWhatCanIDoHere(false));
+        }
+        if (/^(?:say\s+more|more\s+options|show\s+more\s+options|next\s+options|aur\s+(?:options|dikhao|batao)|और\s+(?:बताओ|दिखाओ)|ಇನ್ನಷ್ಟು(?:\s+ತೋರಿಸಿ)?)$/i.test(cleanInput) && this._pageActionsCatalog && this._pageActionsCatalog.items && this._pageActionsCatalog.items.length > 0) {
+          return Promise.resolve(this._handleWhatCanIDoHere(true));
         }
 
         // Fast-Path 0B: Cross-Tab & In-Tab "Go Back / Previous Page" (wakes sleeping previous webpage tab when current page opened in a new tab!)
@@ -7467,6 +7561,87 @@
             }))
             .catch((err) => send({ ok: false, error: (err && err.message) || String(err) }));
           return true;
+        } else if (req && req.action === 'SLEEPWALKER_SW_AUDIT_SNAPSHOT') {
+          const cssPath = (el) => {
+            if (!el || !el.tagName) return 'unknown';
+            const tag = el.tagName.toLowerCase();
+            if (el.id) return `${tag}#${el.id}`;
+            const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+            return cls ? `${tag}.${cls}` : tag;
+          };
+          const isVis = (el) => {
+            try {
+              const st = getComputedStyle(el);
+              if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) === 0) return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 1 && r.height > 1;
+            } catch (_e) { return false; }
+          };
+          if (req.mode === 'scan') {
+            const idx = window.SleepwalkerLinkIndexInstance;
+            const swLinks = idx ? idx.getTargets(document, { force: true }) : [];
+            const swFields = (window.SleepwalkerFormIndex && typeof window.SleepwalkerFormIndex.indexFields === 'function')
+              ? window.SleepwalkerFormIndex.indexFields(document)
+              : [];
+            const items = [];
+            for (const t of swLinks) {
+              items.push({
+                kind: t.role || 'link',
+                label: String(t.label || '').trim(),
+                href: String(t.href || ''),
+                tag: t.element && t.element.tagName ? t.element.tagName.toLowerCase() : '',
+                selector: cssPath(t.element),
+                visible: t.element ? isVis(t.element) : true,
+                isAccordionOrTab: Boolean(t.element && (t.element.getAttribute('role') === 'tab' || t.element.hasAttribute('aria-expanded') || t.element.tagName === 'SUMMARY'))
+              });
+            }
+            for (const f of swFields) {
+              items.push({
+                kind: 'input',
+                label: String(f.label || f.name || '').trim(),
+                href: '',
+                tag: f.element && f.element.tagName ? f.element.tagName.toLowerCase() : 'input',
+                selector: cssPath(f.element),
+                visible: f.element ? isVis(f.element) : true,
+                isAccordionOrTab: false
+              });
+            }
+            send({ ok: true, swLinkCount: swLinks.length, swFieldCount: swFields.length, items });
+          } else if (req.mode === 'reach') {
+            const match = window.SleepwalkerMatch;
+            const idx = window.SleepwalkerLinkIndexInstance;
+            const targets = idx ? idx.getTargets(document, { force: false }) : [];
+            const ordChecks = [['1', 1], ['2', 2], ['3', 3], ['पहला', 1], ['दूसरा', 2]];
+            const ordOk = match ? ordChecks.every(([q, exp]) => match.parseOrdinalChoice(q, 5) === exp) : false;
+            const out = (Array.isArray(req.samples) ? req.samples : []).map((s) => {
+              const enDec = match ? match.decideMatch(targets, { target: s.label, action: 'CLICK' }) : null;
+              const hiDec = match ? match.decideMatch(targets, { target: `${s.label} खोलो`, action: 'CLICK' }) : null;
+              return {
+                label: s.label,
+                selector: s.selector,
+                enHit: Boolean(enDec && enDec.best && enDec.outcome !== 'no_match'),
+                hiHit: Boolean(hiDec && hiDec.best && hiDec.outcome !== 'no_match'),
+                enOutcome: enDec ? enDec.outcome : 'none',
+                hiOutcome: hiDec ? hiDec.outcome : 'none'
+              };
+            });
+            send({ ok: true, ordOk, out });
+          } else if (req.mode === 'echo') {
+            const P = window.SleepwalkerVoicePipeline;
+            if (!P || !P.EchoTracker) { send({ ok: false, detail: 'EchoTracker missing' }); return false; }
+            const tr = new P.EchoTracker(3500);
+            tr.note('Here are the top options on this page.');
+            const blockedExact = tr.isEcho('Here are the top options on this page.');
+            const blockedSub = tr.isEcho('top options on this page');
+            const allowedShortCmd = !tr.isEcho('options');
+            const allowedUserCmd = !tr.isEcho('open settings');
+            send({ ok: blockedExact && blockedSub && allowedShortCmd && allowedUserCmd, detail: `exact=${blockedExact}, sub3=${blockedSub}, shortAllowed=${allowedShortCmd}, newCmdAllowed=${allowedUserCmd}` });
+          } else if (req.mode === 'read_start') {
+            if (ctrl.reader) ctrl.reader.readPage();
+            send({ ok: true, started: Boolean(ctrl.reader && ctrl.reader.isPlaying) });
+          } else {
+            send({ ok: false, error: 'unknown_mode' });
+          }
         } else if (req && req.action === 'SLEEPWALKER_SW_GET_STATE') {
           Promise.resolve().then(async () => {
             const ownership = (ctrl.stagehandAdapter && typeof ctrl.stagehandAdapter.getOwnershipState === 'function')

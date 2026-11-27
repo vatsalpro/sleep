@@ -6,6 +6,8 @@ config.local.js
 *.local.js
 
 # Temporary automated test browser profiles & build cache
+node_modules/
+tests/.pw-profile/
 tests/chrome-*/
 stagehand-bridge/node_modules/
 dist/

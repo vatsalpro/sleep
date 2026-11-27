@@ -1,0 +1,12 @@
+{
+  "name": "sleepwalker-extension",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Sleepwalker Chrome Extension (MV3, plain JS, no build step)",
+  "scripts": {
+    "test:e2e": "node tests/run-all.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.52.0"
+  }
+}

@@ -1546,139 +1546,200 @@
       return this.setLang(newLang);
     }
 
+    _editDistSmall(a, b) {
+      if (a === b) return 0;
+      const m = a.length;
+      const n = b.length;
+      if (Math.abs(m - n) > 2) return 9;
+      // Optimal String Alignment (Damerau-Levenshtein) so adjacent transpositions ("strat", "puase", "cancle", "resuem") = 1
+      const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+      for (let i = 0; i <= m; i++) dp[i][0] = i;
+      for (let j = 0; j <= n; j++) dp[0][j] = j;
+      for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          let v = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+          if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+            v = Math.min(v, dp[i - 2][j - 2] + 1);
+          }
+          dp[i][j] = v;
+        }
+      }
+      return dp[m][n];
+    }
+
+    _normalizeCommandTypos(clean) {
+      let s = String(clean || '')
+        .replace(/\breadthis\b/g, 'read this')
+        .replace(/\bout\s+line\b/g, 'outline')
+        .replace(/\bhold\s+o\b/g, 'hold on')
+        .replace(/\bshut\s+u\b/g, 'shut up')
+        .replace(/\bread\s+al\b/g, 'read all');
+
+      const EXACT_SLIPS = {
+        red: 'read', raed: 'read', reed: 'read', tis: 'this', ths: 'this', pge: 'page',
+        wat: 'what', shw: 'show', tak: 'take', kep: 'keep', ply: 'play', opn: 'open',
+        opin: 'open', clik: 'click', scrol: 'scroll', selct: 'select', expln: 'explain',
+        sumrize: 'summarize', paus: 'pause', stpo: 'stop', stpp: 'stop', qiet: 'quiet'
+      };
+      const FUZZY_KEYWORDS = [
+        'read', 'page', 'this', 'outline', 'headings', 'section', 'sections', 'contents', 'content',
+        'explain', 'summarize', 'summarise', 'pause', 'stop', 'cancel', 'resume', 'continue',
+        'repeat', 'again', 'start', 'reading', 'open', 'click', 'scroll', 'select', 'navigate',
+        'quiet', 'help', 'commands'
+      ];
+      // Never mutate valid Kannada/Hindi/English words that happen to be edit-distance 1 from a keyword
+      const PROTECTED_WORDS = new Set([
+        'heli', 'karo', 'padho', 'batao', 'sunao', 'some', 'part', 'more', 'here', 'open',
+        'read', 'page', 'this', 'section', 'sections', 'help', 'stop', 'pause', 'play', 'wait',
+        'down', 'over', 'back', 'next', 'home', 'menu', 'link', 'text', 'list', 'card', 'form'
+      ]);
+
+      const words = s.split(/\s+/).filter(Boolean);
+      const fixed = words.map((w) => {
+        if (/[^\x00-\x7F]/.test(w)) return w; // Keep Devanagari/Kannada/Unicode untouched
+        if (w === 'wat' && words.length === 1) return 'wait';
+        if (EXACT_SLIPS[w]) return EXACT_SLIPS[w];
+        if (w.length < 4 || PROTECTED_WORDS.has(w) || FUZZY_KEYWORDS.includes(w)) return w;
+        const maxD = w.length >= 7 ? 2 : 1;
+        let best = w;
+        let bestD = 9;
+        for (const kw of FUZZY_KEYWORDS) {
+          if (Math.abs(kw.length - w.length) > maxD) continue;
+          if (kw[0] !== w[0] && !(kw[0] === w[1] && kw[1] === w[0])) continue;
+          const d = this._editDistSmall(w, kw);
+          if (d <= maxD && d < bestD) {
+            bestD = d;
+            best = kw;
+          }
+        }
+        return best;
+      });
+      return fixed.join(' ');
+    }
+
     /**
      * Parse raw spoken or typed text into an actionable command object.
-     * Supports both English (en-IN) and Hindi (hi-IN).
+     * Supports English (with ASR typo tolerance), Devanagari Hindi, Romanized Hindi, Hinglish, and Kannada.
      * @param {string} raw - Input string.
      * @returns {Object} { type: string, raw: string, sectionQuery?: string }
      */
     parseCommand(raw) {
       if (!raw) return { type: 'UNKNOWN', raw: '' };
 
-      const clean = raw.toLowerCase().trim();
+      const rawLower = raw.toLowerCase().replace(/[?!.,।]+$/g, '').replace(/\s+/g, ' ').trim();
+      const clean = this._normalizeCommandTypos(rawLower);
 
-      // 1. HELP
-      // EN: help, commands, what can you do
-      // HI: मदद, सहायता, हेल्प, क्या कर सकते हो
+      // 1. HELP (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(help|commands|what can you do|how to use|मदद|सहायता|हेल्प)/i.test(clean) ||
+        /^(?:help(?:\s+(?:me|karo|chahiye))?|commands|what\s+can\s+(?:you|i)\s+do(?:\s+here)?(?:\s+batao)?|how\s+to\s+use|say\s+more(?:\s+please)?|aur\s+options\s+batao|मदद|सहायता|हेल्प|क्या\s+कर\s+सकते\s+हो)$/i.test(clean) ||
+        /^(?:madad(?:\s+karo)?|sahayata|kya\s+kar\s+sakte\s+ho|kya\s+commands\s+hain)$/i.test(clean) ||
+        /^(?:ಸಹಾಯ(?:\s+ಮಾಡಿ)?|ಏನು\s+ಮಾಡಬಹುದು|sahaya(?:\s+maadi)?|enu\s+madbahudu)$/i.test(clean) ||
         clean === 'help' || clean === 'मदद'
       ) {
         return { type: 'HELP', raw };
       }
 
-      // 2. STOP
-      // EN: stop, stop reading, cancel, shut up, quiet
-      // HI: बंद करो, रुको, स्टॉप, खत्म करो, शांत
+      // 2. STOP (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(stop|cancel|shut up|be quiet|बंद करो|स्टॉप|खत्म करो|शांत)/i.test(clean) ||
-        clean === 'stop' || clean === 'बंद'
+        /^(?:stop(?:\s+(?:reading|kar\s+do|maadi))?|cancel(?:\s+kar\s+do)?|shut\s+up|be\s+quiet|sleepwalker\s+rest(?:\s+karo)?|बंद\s+करो|स्टॉप|खत्म\s+करो|शांत|बंद)$/i.test(clean) ||
+        /^(?:band\s+karo|band\s+kar\s+do|chup\s+raho|shant|khatam\s+karo|ನಿಲ್ಲಿಸಿ|ಬೇಡ|ರದ್ದು\s+ಮಾಡಿ|nillisi)$/i.test(clean)
       ) {
         return { type: 'STOP', raw };
       }
 
-      // 3. PAUSE
-      // EN: pause, pause reading, hold on, wait
-      // HI: रोको, पॉज़, ठहरिए, रुकिए
+      // 3. PAUSE (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(pause|hold on|wait|रोको|पॉज़|ठहरो|रुकिए)/i.test(clean) ||
-        clean === 'pause' || clean === 'रुकिए'
+        /^(?:pause(?:\s+reading)?|reading\s+pause\s+karo|hold\s+on|wait|रोको|पॉज़|ठहरो|रुकिए)$/i.test(clean) ||
+        /^(?:ruko|roko|thoda\s+ruko|thehro|ತಡೆಯಿರಿ|tadeyiri)$/i.test(clean)
       ) {
         return { type: 'PAUSE', raw };
       }
 
-      // 4. RESUME
-      // EN: resume, continue, keep reading, play
-      // HI: जारी रखो, आगे पढ़ो, शुरू करो, फिर से शुरू
+      // 4. RESUME (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(resume|continue|keep reading|play|जारी रखो|आगे पढ़ो|फिर से शुरू)/i.test(clean) ||
-        clean === 'resume' || clean === 'continue'
+        /^(?:resume(?:\s+kar\s+do)?|continue(?:\s+karo)?|keep\s+reading|play|जारी\s+रखो|आगे\s+पढ़ो|फिर\s+से\s+शुरू)$/i.test(clean) ||
+        /^(?:aage\s+padho|jari\s+rakho|ಮುಂದುವರಿಸಿ|munduvarisi)$/i.test(clean)
       ) {
         return { type: 'RESUME', raw };
       }
 
-      // 5. READ IT AGAIN
-      // EN: read it again, read again, repeat, from the beginning, start over
-      // HI: फिर से पढ़ो, दोहराओ, शुरू से पढ़ो, दोबारा पढ़ो
+      // 5. READ IT AGAIN (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(read it again|read again|repeat|from the beginning|start over|फिर से पढ़ो|दोहराओ|शुरू से पढ़ो|दोबारा पढ़ो)/i.test(clean)
+        /^(?:read\s+it\s+again|read\s+again(?:\s+please)?|repeat(?:\s+(?:kar\s+do|maadi))?|from\s+the\s+beginning|start\s+over|फिर\s+से\s+पढ़ो|दोहराओ|शुरू\s+से\s+पढ़ो|दोबारा\s+पढ़ो)$/i.test(clean) ||
+        /^(?:phir\s+se\s+(?:padho|batao)|dobara\s+padho|shuru\s+se\s+(?:padho|sunao)|ಮತ್ತೆ\s+ಓದಿ|matte\s+odi)$/i.test(clean)
       ) {
         return { type: 'READ_AGAIN', raw };
       }
 
-      // 6. READ THIS PAGE
-      // EN: read this page, read page, start reading, read all, read
-      // HI: यह पेज पढ़ो, पेज पढ़ो, पूरा पढ़ो, पढ़ो, सुनाओ
+      // 6. READ THIS PAGE (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(read this page|read page|read all|start reading|read content|यह पेज पढ़ो|पेज पढ़ो|पूरा पढ़ो|सुनाओ)/i.test(clean) ||
+        /^(?:(?:please\s+)?(?:read\s+(?:this\s+page|the\s+page|page|all|content)|start\s+reading)|यह\s+पेज\s+पढ़ो|इस\s+पेज\s+को\s+पढ़ो|पेज\s+पढ़ो|पेज\s+सुनाओ|पूरा\s+पढ़ो|पढ़ना\s+शुरू\s+करो|सुनाओ)$/i.test(clean) ||
+        /^(?:(?:please\s+)?(?:yeh|ye|is|full|pura)?\s*(?:page|article)?\s*(?:ko\s+)?(?:read\s+kar(?:\s+do|o)|padho|padh\s+ke\s+sunao|sunao)|padhna\s+shuru\s+karo)$/i.test(clean) ||
+        /^(?:ಈ\s+ಪುಟ\s+ಓದಿ|ಪುಟ\s+ಓದಿ|ಪೂರ್ತಿ\s+ಓದಿ|ಓದಲು\s+ಶುರು\s+ಮಾಡಿ|ಓದಿ|ee\s+(?:page|puta)\s+odi|page\s+odi|poora\s+odi|odri)$/i.test(clean) ||
         clean === 'read' || clean === 'पढ़ो'
       ) {
         return { type: 'READ_PAGE', raw };
       }
 
-      // 7. OUTLINE
-      // EN: outline, show outline, headings, table of contents, sections
-      // HI: आउटलाइन, रूपरेखा, हेडिंग, शीर्षक, विषय सूची
+      // 7. OUTLINE (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       if (
-        /^(outline|show outline|headings|show headings|table of contents|sections|आउटलाइन|रूपरेखा|हेडिंग|शीर्षक|विषय सूची)/i.test(clean) ||
-        clean === 'outline' || clean === 'headings'
+        /^(?:outline(?:\s+(?:show\s+karo|dikhao|batao|torisi))?|show\s+outline|headings(?:\s+(?:dikhao|batao|torisi))?|show\s+headings|table\s+of\s+contents|sections(?:\s+(?:dikhao|heli))?|show\s+sections|sab\s+headings\s+batao|vishay\s+suchi|ruprekha|shirshak(?:\s+dikhao)?|आउटलाइन|रूपरेखा|हेडिंग|शीर्षक|विषय\s+सूची|ಶೀರ್ಷಿಕೆಗಳು|ವಿಷಯ\s+ಸೂಚಿ|ವಿಭಾಗಗಳು\s+ತೋರಿಸಿ)$/i.test(clean)
       ) {
         return { type: 'OUTLINE', raw };
       }
 
       // 8. EXPLAIN SOME PART OF PAGE (Generic request to explore a section)
-      // EN: "explain some part of page", "explain some part of the page", "explain a section", "explain part of page"
-      // HI: "पेज का कुछ भाग समझाओ", "कोई भाग समझाओ", "कोई सेक्शन समझाओ"
       if (
         /^(?:explain|summarise|summarize)\s+(?:some\s+part|a\s+part|part|some\s+section|a\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
         /^(?:tell\s+me\s+about|what\s+is\s+in)\s+(?:some\s+part|a\s+part|some\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
-        /^(?:पेज का कुछ भाग समझाओ|कोई भाग समझाओ|कोई सेक्शन समझाओ)$/i.test(clean)
+        /^(?:पेज\s+का\s+कुछ\s+भाग\s+समझाओ|कोई\s+भाग\s+समझाओ|कोई\s+सेक्शन\s+समझाओ)$/i.test(clean)
       ) {
         return { type: 'EXPLAIN_SOME_PART', raw };
       }
 
-      // 9. EXPLAIN THIS PAGE (Whole page summary)
-      // EN: explain this page, explain the page, summarise this page, summarize this page, what is this page about, or lone "explain"
-      // HI: इस पेज को समझाओ, पेज समझाओ, यह पेज किस बारे में है, पेज का सारांश, समझाओ
+      // 9. EXPLAIN THIS PAGE (Whole page summary — EN / HI / Hinglish / Kannada)
       if (
-        /^(?:explain\s+(?:this\s+|the\s+)?page|summarise\s+(?:this\s+|the\s+)?page|summarize\s+(?:this\s+|the\s+)?page|what\s+is\s+this\s+page\s+about|इस पेज को समझाओ|पेज समझाओ|यह पेज किस बारे में है|पेज का सारांश)$/i.test(clean) ||
+        /^(?:explain\s+(?:this\s+|the\s+)?page|summarise\s+(?:this\s+|the\s+)?page|summarize\s+(?:this\s+|the\s+)?page|what\s+is\s+this\s+page\s+about|इस\s+पेज\s+को\s+समझाओ|पेज\s+समझाओ|यह\s+पेज\s+किस\s+बारे\s+में\s+है|पेज\s+का\s+सारांश)$/i.test(clean) ||
+        /^(?:(?:yeh|ye|is)\s+(?:page|website)\s+(?:ko\s+)?(?:samjhao|summarize\s+karo|explain\s+karo)|page\s+(?:samjhao|ka\s+(?:saransh|summary\s+batao))|yeh\s+page\s+kis\s+baare\s+mein\s+hai|samjhao)$/i.test(clean) ||
+        /^(?:ಈ\s+ಪುಟ\s+ವಿವರಿಸಿ|ಸಾರಾಂಶ\s+ಹೇಳಿ|ವಿವರಿಸಿ|ಈ\s+ಪುಟ\s+ಯಾವುದರ\s+ಬಗ್ಗೆ|ee\s+page\s+(?:vivarisi|bagge\s+heli)|saramsha\s+heli|explain\s+maadi)$/i.test(clean) ||
         clean === 'explain' || clean === 'summarise' || clean === 'summarize' || clean === 'समझाओ'
       ) {
         return { type: 'EXPLAIN', raw };
       }
 
-      // 10. EXPLAIN A SPECIFIC SECTION
-      // EN: "explain the <name> section", "explain section <name>", "explain about <name>", "explain <name>", "tell me about <name>"
-      // HI: "<name> समझाओ", "<name> सेक्शन समझाओ", "<name> के बारे में बताओ", "<name> क्या है"
+      // 10. EXPLAIN A SPECIFIC SECTION (EN / Devanagari / Romanized HI / Hinglish)
       let explainSecMatch =
         clean.match(/^(?:explain|summarise|summarize)\s+(?:about\s+)?(?:the\s+)?(?:section\s+)?(.+?)(?:\s+section)?$/i) ||
-        clean.match(/^(?:tell\s+me\s+about|what\s+is)\s+(?:the\s+)?(.+?)(?:\s+section)?$/i);
+        clean.match(/^(?:tell\s+me\s+about|what\s+is)\s+(?:the\s+)?(.+?)(?:\s+section)?$/i) ||
+        clean.match(/^(.+?)\s+(?:section\s+)?(?:samjhao|explain\s+kar(?:\s+do|o)|ke\s+baare\s+mein\s+batao)$/i);
 
       if (explainSecMatch && explainSecMatch[1]) {
         const query = explainSecMatch[1].trim();
-        if (!['this page', 'the page', 'page', 'in simple words', 'in hindi', 'in english', 'all', 'everything', 'it'].includes(query)) {
+        if (!['this page', 'the page', 'page', 'yeh page', 'ye page', 'is page', 'in simple words', 'in hindi', 'in english', 'all', 'everything', 'it'].includes(query)) {
           return { type: 'EXPLAIN_SECTION', raw, sectionQuery: query };
         }
       }
 
-      // Hindi explain section
+      // Devanagari explain section
       const hiExplainMatch = clean.match(/^(.+?)\s+(?:सेक्शन\s+)?(?:समझाओ|के बारे में बताओ)$/i);
       if (hiExplainMatch && !['यह पेज', 'पेज', 'पूरा', 'सब'].includes(hiExplainMatch[1].trim())) {
         return { type: 'EXPLAIN_SECTION', raw, sectionQuery: hiExplainMatch[1].trim() };
       }
 
-      // 11. NAVIGATE SOME PART OF PAGE (Generic request to take user to a part of page)
-      // EN: "take me some part of page", "take me to some part of the page", "take me to a section", "jump to some part"
-      // HI: "किसी भाग पर ले चलो", "पेज के किसी भाग पर ले चलो", "कोई सेक्शन दिखाओ"
+      // 11. NAVIGATE SOME PART OF PAGE
       if (
         /^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+(?:to\s+)?|jump\s+(?:to\s+)?|go\s+(?:to\s+)?)(?:some\s+part|a\s+part|part|some\s+section|a\s+section)(?:\s+of\s+(?:the\s+|this\s+)?page)?$/i.test(clean) ||
-        /^(?:किसी भाग पर ले चलो|पेज के किसी भाग पर ले चलो|कोई सेक्शन दिखाओ)$/i.test(clean)
+        /^(?:किसी\s+भाग\s+पर\s+ले\s+चलो|पेज\s+के\s+किसी\s+भाग\s+पर\s+ले\s+चलो|कोई\s+सेक्शन\s+दिखाओ)$/i.test(clean)
       ) {
         return { type: 'NAVIGATE_SOME_PART', raw };
       }
 
-      // 12. NAVIGATE TO SPECIFIC SECTION ("take me to...", "scroll to...", "jump to...", "show me...", "go to...")
-      let navMatch = clean.match(/^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+(?:to\s+)?|jump\s+(?:to\s+)?|go\s+to\s+|open\s+|show\s+(?:me\s+)?)(?:the\s+)?(.+?)(?:\s+section)?$/i);
+      // 12. NAVIGATE TO SPECIFIC SECTION / ELEMENT (EN / Devanagari / Romanized HI / Hinglish / Kannada)
+      let navMatch =
+        clean.match(/^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+to\s+|jump\s+(?:to\s+)?|go\s+to\s+|show\s+(?:me\s+)?)(?:the\s+)?(.+?)(?:\s+section)?$/i) ||
+        clean.match(/^(.+?)\s+(?:section\s+)?(?:kholo|dikhao|par\s+le\s+chalo|pe\s+le\s+chalo|par\s+jao|pe\s+jao|pe\s+scroll\s+karo|open\s+kar(?:\s+do|o)|click\s+kar(?:\s+do|o)|select\s+kar(?:\s+do|o)|on\s+karo|chuno)$/i) ||
+        clean.match(/^(.+?)\s+(?:ತೆರೆಯಿರಿ|tereyiri)$/i);
       if (navMatch && navMatch[1]) {
         const navTarget = navMatch[1].trim();
         if (!['this page', 'the page', 'page', 'home', 'top'].includes(navTarget)) {
@@ -1689,8 +1750,11 @@
           };
         }
       }
+      if (/^(?:niche\s+le\s+chalo|upar\s+le\s+chalo|scroll\s+(?:down|up)\s+kar(?:\s+do|o)|back\s+jao|page\s+reload\s+karo|top\s+pe\s+le\s+chalo|footer\s+pe\s+jao|ಮುಂದಿನ\s+ಪುಟ|ಹಿಂದಿನ\s+ಪುಟ|ಕೆಳಗೆ\s+ಸ್ಕ್ರಾಲ್\s+ಮಾಡಿ|ಮೇಲೆ\s+ಹೋಗಿ|mundina\s+puta|hindina\s+puta|kelage\s+scroll\s+maadi|mele\s+hogi)$/i.test(clean)) {
+        return { type: 'NAVIGATE_SECTION', raw, sectionQuery: clean };
+      }
 
-      // Hindi navigate to section ("...पर ले चलो", "...पर जाओ", "...दिखाओ", "...खोलो")
+      // Devanagari navigate to section
       const hiNavMatch = clean.match(/^(.+?)\s+(?:सेक्शन\s+)?(?:पर\s+ले\s+चलो|पर\s+जाओ|दिखाओ|खोलो)$/i);
       if (hiNavMatch && !['यह पेज', 'पेज', 'पूरा'].includes(hiNavMatch[1].trim())) {
         return {
@@ -1700,19 +1764,12 @@
         };
       }
 
-      // 13. READ THE <SECTION> SECTION
-      // Patterns:
-      // "read the <x> section"
-      // "read section <x>"
-      // "read <x>"
-      // "<x> सेक्शन पढ़ो"
-      // "<x> पढ़ो"
-
-      let sectionMatch = clean.match(/^read\s+(?:the\s+)?(.+?)\s+section$/i);
-      if (!sectionMatch) {
-        sectionMatch = clean.match(/^read\s+section\s+(.+)$/i);
-      }
-      // If user says "read <topic>" (and it's not "read this page" or "read again")
+      // 13. READ THE <SECTION> SECTION (EN / Devanagari / Hinglish)
+      let sectionMatch =
+        clean.match(/^read\s+(?:the\s+)?(.+?)\s+section$/i) ||
+        clean.match(/^read\s+section\s+(.+)$/i) ||
+        clean.match(/^(.+?)\s+section\s+(?:read\s+kar(?:\s+do|o)|padho|sunao)$/i) ||
+        clean.match(/^(.+?)\s+read\s+kar(?:\s+do|o)$/i);
       if (!sectionMatch && clean.startsWith('read ')) {
         const afterRead = clean.replace(/^read\s+/, '').trim();
         if (afterRead && !['this page', 'the page', 'page', 'again', 'it again', 'all', 'everything'].includes(afterRead)) {
@@ -1720,7 +1777,7 @@
         }
       }
 
-      // Hindi section patterns:
+      // Devanagari section patterns
       if (!sectionMatch) {
         const hiSectionMatch = clean.match(/^(.+?)\s+(?:सेक्शन\s+)?पढ़ो$/i);
         if (hiSectionMatch && !['यह पेज', 'पेज', 'पूरा', 'फिर से'].includes(hiSectionMatch[1].trim())) {
@@ -1736,7 +1793,7 @@
         };
       }
 
-      // Fallback: If typed or spoken something unknown, treat as potential section search query
+      // Fallback: potential section/page search query
       if (clean.length > 2) {
         return {
           type: 'QUERY_OR_SEARCH',

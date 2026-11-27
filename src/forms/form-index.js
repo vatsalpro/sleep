@@ -1130,6 +1130,7 @@
 
   return {
     buildFormIndex,
+    indexFields: buildFormIndex,
     collectRoots,
     detectFormActionButtons,
     computeFieldState,

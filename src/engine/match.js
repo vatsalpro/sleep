@@ -446,6 +446,21 @@
    * Score a query string against a single text field (label, ariaLabel, title, or hrefWords) on 0..1 scale.
    */
   function scoreFieldText(query, fieldText, options = {}) {
+    // Fast-path exact raw label match after stripping leading/trailing EN+HI action wrappers
+    // (handles labels containing numbers/commas/noise words like "0 items in cart", "Sign in खोलो", "Click here to Login in application")
+    const qRawClean = String(query || '').normalize('NFC').toLowerCase()
+      .replace(/^(?:open|click|tap|press|select|choose|go\s+to)\s+/i, '')
+      .replace(/\s+(?:kholo|dabao|chuno|click\s+karo|open\s+karo|खोलो|दबाओ|चुनो|क्लिक\s+करो)$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const fRawClean = String(fieldText || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (qRawClean && fRawClean) {
+      if (qRawClean === fRawClean) return 1.0;
+      if (qRawClean.length >= 4 && fRawClean.includes(qRawClean)) {
+        return Math.min(0.95, 0.80 + (qRawClean.length / Math.max(fRawClean.length, 1)) * 0.15);
+      }
+    }
+
     const useFullQueryStrip = options.stripQueryNoise !== false;
     const qNorm = stripCommandNoise(query, useFullQueryStrip ? NOISE_WORDS : LABEL_STRIP_WORDS).join(' ');
     const qRawSpelled = normalizeSpelledLetters(query);
@@ -568,9 +583,13 @@
   }
 
   function splitScopedLinkTarget(rawTarget, explicitSpec = {}) {
-    let target = String(rawTarget || '').trim();
+    let target = String(rawTarget || '')
+      .replace(/^(?:please\s+)?(?:open|click|press|tap|select|go\s+to)\s+/i, '')
+      .replace(/\s+(?:kholo|kholna|dabao|karo|open\s+karo|click\s+karo|खोलो|खोलना|दबाओ|करो|क्लिक\s+करो)$/i, '')
+      .trim();
     let sectionFilter = String(explicitSpec.section || explicitSpec.sectionFilter || '').trim();
     let linkPreference = String(explicitSpec.linkPreference || '').trim().toLowerCase();
+    let inferredSection = false;
 
     if (!sectionFilter && target) {
       const m = target.match(/^(.+?)\s+(?:under|inside|within|in\s+the|in|below|from)\s+(?:the\s+)?(.+?)(?:\s+(?:section|heading|list|card|table|category))?$/i);
@@ -580,6 +599,7 @@
         if (!/^(?:all|english|hindi|chrome|google|menu|header|footer|main|page)$/i.test(rhs)) {
           target = m[1].trim();
           sectionFilter = rhs;
+          inferredSection = true;
         }
       }
     }
@@ -601,7 +621,7 @@
       }
     }
 
-    return { cleanTarget: target, sectionFilter, linkPreference };
+    return { cleanTarget: target, sectionFilter, inferredSection, linkPreference };
   }
 
   /**
@@ -612,11 +632,17 @@
     const spec = typeof querySpec === 'string' ? { target: querySpec } : (querySpec || {});
     const targetObj = typeof targetItem === 'string' ? { label: targetItem } : (targetItem || {});
     const scoped = splitScopedLinkTarget(spec.target, spec);
-    const rawTargetText = scoped.cleanTarget;
-    const sectionFilter = scoped.sectionFilter;
+    const label = String(targetObj.label || '');
+    // If the unsplit query directly matches the element's own label (e.g. "0 items in cart",
+    // "Click here to Login in application", "Hello, sign in Account & Lists"), don't let an
+    // inferred "in/from/under" section split penalize an exact label match.
+    const directLabelScore = (scoped.inferredSection && spec.target && label)
+      ? scoreFieldText(spec.target, label)
+      : 0;
+    const rawTargetText = directLabelScore >= 0.85 ? String(spec.target || '').trim() : scoped.cleanTarget;
+    const sectionFilter = directLabelScore >= 0.85 ? '' : scoped.sectionFilter;
     const linkPreference = scoped.linkPreference;
     const action = String(spec.action || 'CLICK').toUpperCase();
-    const label = String(targetObj.label || '');
 
     if (!label && !targetObj.ariaLabel && !targetObj.title && !targetObj.hrefWords) {
       return { score: 0, baseScore: 0, genericMoreInfo: false };
