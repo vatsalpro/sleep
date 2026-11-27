@@ -20,47 +20,47 @@
     nova: {
       id: 'nova',
       name: 'Nova',
-      subtitle: 'Warm & Natural',
-      pitch: 1.04,
-      rateMul: 1.00,
+      subtitle: 'Friendly & Conversational',
+      pitch: 1.03,
+      rateMul: 0.99,
       genderPref: 'female',
-      keywords: ['aria', 'jenny', 'neerja', 'swara', 'natural', 'google us english', 'google uk english female', 'samantha', 'ava']
+      keywords: ['ava', 'emma', 'jenny', 'aria', 'neerja', 'swara', 'natural', 'google uk english female', 'google us english', 'samantha', 'online']
     },
     aria: {
       id: 'aria',
       name: 'Aria',
       subtitle: 'Bright & Expressive',
-      pitch: 1.11,
-      rateMul: 1.04,
+      pitch: 1.08,
+      rateMul: 1.02,
       genderPref: 'female',
-      keywords: ['sonia', 'natasha', 'clara', 'emma', 'aria', 'google us english', 'natural', 'zira']
+      keywords: ['sonia', 'emma', 'ava', 'natasha', 'clara', 'aria', 'google us english', 'natural', 'zira']
     },
     orion: {
       id: 'orion',
       name: 'Orion',
-      subtitle: 'Deep & Calm',
+      subtitle: 'Warm & Deep',
       pitch: 0.90,
-      rateMul: 0.98,
+      rateMul: 0.97,
       genderPref: 'male',
-      keywords: ['guy', 'ryan', 'christopher', 'prabhat', 'madhur', 'google uk english male', 'daniel', 'eric', 'roger']
+      keywords: ['andrew', 'brian', 'guy', 'ryan', 'christopher', 'prabhat', 'madhur', 'google uk english male', 'daniel', 'natural']
     },
     sage: {
       id: 'sage',
       name: 'Sage',
-      subtitle: 'Crisp Storyteller',
-      pitch: 0.98,
+      subtitle: 'Friendly Storyteller',
+      pitch: 0.99,
       rateMul: 0.96,
       genderPref: 'any',
-      keywords: ['libby', 'google uk english female', 'google uk english male', 'rishi', 'emily', 'thomas', 'natural']
+      keywords: ['libby', 'ava', 'google uk english female', 'google uk english male', 'rishi', 'emily', 'thomas', 'natural']
     },
     breeze: {
       id: 'breeze',
       name: 'Breeze',
-      subtitle: 'Lively Copilot',
-      pitch: 1.07,
-      rateMul: 1.08,
+      subtitle: 'Upbeat Buddy',
+      pitch: 1.06,
+      rateMul: 1.05,
       genderPref: 'any',
-      keywords: ['google', 'online', 'neural', 'natural', 'michelle', 'steffan', 'ana']
+      keywords: ['ava', 'jenny', 'google', 'online', 'neural', 'natural', 'michelle', 'steffan', 'ana']
     }
   });
 
@@ -156,6 +156,32 @@
 
     setPreferredVoiceURI(uri = '') {
       this.preferredVoiceURI = String(uri || '').trim();
+    }
+
+    /**
+     * Make short assistant replies sound warm, friendly, and conversational — like a helpful person talking
+     * rather than a stiff status log — while leaving long article/page narration faithful to the page text.
+     */
+    humanizeForSpeech(text) {
+      let s = String(text || '').trim();
+      if (!s) return s;
+      // Leave long page-reading passages untouched except natural phrasing rhythm
+      if (this.lastMode === 'page' && s.length > 140) return s;
+
+      // Soften robotic prefixes into warm, natural conversational phrasing
+      s = s
+        .replace(/^Opening\s+video\s+/i, 'Sure thing! Opening ')
+        .replace(/^Opening\s+"/i, 'Got it — opening "')
+        .replace(/^Navigated\s+to\s+/i, 'Here we go, taking you to ')
+        .replace(/^Completed\s+(\d+)\s+steps?:/i, 'All set! I ran $1 steps:')
+        .replace(/^Completed\s+learned\s+workflow\s+/i, 'All done with ')
+        .replace(/^No\s+YouTube\s+video\s+items\s+were\s+found/i, "Hmm, I don't see any videos on this page right now")
+        .replace(/^Action\s+completed\.?$/i, 'All done!')
+        .replace(/^Cancelled\.?$/i, 'No problem, cancelled that.');
+
+      // Add gentle natural breathing cadence on dashes/colons
+      s = s.replace(/\s+—\s+/g, ', ').replace(/\s+→\s+/g, ', then ');
+      return s;
     }
 
     /**
@@ -680,9 +706,10 @@
         this.loadVoices();
       }
 
-      const speakText = (window.SleepwalkerVoicePipeline && typeof window.SleepwalkerVoicePipeline.toSpeakable === 'function')
+      const rawSpeak = (window.SleepwalkerVoicePipeline && typeof window.SleepwalkerVoicePipeline.toSpeakable === 'function')
         ? (window.SleepwalkerVoicePipeline.toSpeakable(sentenceText) || sentenceText)
         : sentenceText;
+      const speakText = this.humanizeForSpeech(rawSpeak);
       if (window.SleepwalkerVoicePipeline && typeof window.SleepwalkerVoicePipeline.EchoTracker === 'function') {
         if (!window.__SW_ECHO_TRACKER__) {
           window.__SW_ECHO_TRACKER__ = new window.SleepwalkerVoicePipeline.EchoTracker();

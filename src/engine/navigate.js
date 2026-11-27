@@ -2044,13 +2044,128 @@
     }
 
     /**
-     * Phase 4.2: Select & open/highlight a YouTube video matching natural criteria (channel, duration, ordinal, beginner, exclusions).
+     * Collect visible video cards across YouTube & general video platforms, skipping ads/sponsored
+     * slots and sorting strictly in visual top-to-bottom, left-to-right reading order.
+     */
+    _collectVisualVideoCandidates(doc = this._getDoc()) {
+      if (!doc || typeof doc.querySelectorAll !== 'function') return [];
+      const cardSelectors = [
+        'ytd-rich-item-renderer',
+        'ytd-video-renderer',
+        'ytd-compact-video-renderer',
+        'ytd-grid-video-renderer',
+        'ytd-playlist-video-renderer',
+        'yt-lockup-view-model',
+        'ytm-video-with-context-renderer',
+        '[data-video-id]'
+      ].join(', ');
+
+      const cards = Array.from(doc.querySelectorAll(cardSelectors));
+      const out = [];
+      const seenHref = new Set();
+
+      const extractCard = (card, domIdx) => {
+        if (!card || !this._isElementVisible(card)) return null;
+        if (card.closest && card.closest('ytd-ad-slot-renderer, ytd-promoted-video-renderer, ytd-in-feed-ad-layout-renderer, ytd-reel-shelf-renderer')) {
+          return null;
+        }
+        if (card.querySelector && card.querySelector('ytd-ad-slot-renderer, .badge-style-type-ad, [aria-label="Sponsored"]')) {
+          return null;
+        }
+        const linkEl = (card.querySelector && (
+          card.querySelector('a#video-title-link, a#video-title, a.yt-lockup-metadata-view-model__title, a[href*="/watch?v="], a[href*="/shorts/"], a[href*="/video"]')
+        )) || (String(card.tagName || '').toLowerCase() === 'a' ? card : null);
+        if (!linkEl) return null;
+
+        const href = String((linkEl.getAttribute && linkEl.getAttribute('href')) || linkEl.href || '').trim();
+        if (!href || seenHref.has(href)) return null;
+
+        const titleEl = (card.querySelector && card.querySelector('#video-title, .yt-lockup-metadata-view-model__title, h3, [title]')) || linkEl;
+        const title = cleanSpace(
+          (titleEl && (titleEl.getAttribute && titleEl.getAttribute('title'))) ||
+          (titleEl && (titleEl.innerText || titleEl.textContent)) ||
+          (linkEl.getAttribute && linkEl.getAttribute('aria-label')) ||
+          ''
+        );
+        if (!title || title.length < 2) return null;
+
+        const chanEl = card.querySelector && card.querySelector(
+          'ytd-channel-name a, ytd-channel-name #text, #channel-name a, #channel-name #text, .yt-content-metadata-view-model__metadata-row a, [data-channel-name], .channel-name'
+        );
+        const channel = cleanSpace(
+          (chanEl && (chanEl.innerText || chanEl.textContent || (chanEl.getAttribute && chanEl.getAttribute('data-channel-name')))) || ''
+        );
+
+        const durEl = card.querySelector && card.querySelector(
+          'ytd-thumbnail-overlay-time-status-renderer #text, .badge-shape-wiz__text, .yt-badge-shape__text, .duration'
+        );
+        const duration = cleanSpace(durEl ? (durEl.innerText || durEl.textContent || '') : '');
+
+        let top = domIdx * 100;
+        let left = 0;
+        try {
+          const r = card.getBoundingClientRect();
+          if (r && (r.width > 0 || r.height > 0)) {
+            const win = this._getWin();
+            top = Math.round(r.top + ((win && win.scrollY) || 0));
+            left = Math.round(r.left + ((win && win.scrollX) || 0));
+          }
+        } catch (_e) {}
+
+        seenHref.add(href);
+        const vidMatch = href.match(/[?&]v=([a-zA-Z0-9_-]{6,})|\/shorts\/([a-zA-Z0-9_-]{6,})/);
+        const videoId = vidMatch ? (vidMatch[1] || vidMatch[2]) : `vid_${domIdx + 1}`;
+        return {
+          id: videoId,
+          videoId,
+          title,
+          channel,
+          duration,
+          href,
+          url: href,
+          element: linkEl,
+          cardElement: card,
+          top,
+          left,
+          domIdx
+        };
+      };
+
+      for (let i = 0; i < cards.length; i++) {
+        const item = extractCard(cards[i], i);
+        if (item) out.push(item);
+      }
+
+      // Generic fallback for non-YouTube video pages (Vimeo, course portals, embedded video grids)
+      if (out.length === 0) {
+        const genericLinks = Array.from(doc.querySelectorAll('a[href*="/watch"], a[href*="/video"], a[href*="vimeo.com/"]'));
+        for (let i = 0; i < genericLinks.length; i++) {
+          const a = genericLinks[i];
+          const item = extractCard(a.closest('article, li, .card, div') || a, i);
+          if (item) out.push(item);
+        }
+      }
+
+      // Sort strictly top-to-bottom (row-grouped within 45px), then left-to-right!
+      out.sort((a, b) => {
+        if (Math.abs(a.top - b.top) > 45) return a.top - b.top;
+        if (a.left !== b.left) return a.left - b.left;
+        return a.domIdx - b.domIdx;
+      });
+      return out;
+    }
+
+    /**
+     * Phase 4.2: Select & open/highlight a video by visual top-down ordinal (1st/2nd/3rd/next/prev),
+     * exact or fuzzy video title, or exact/similar channel name.
      */
     async selectYouTubeVideo(criteria = {}, doc = this._getDoc()) {
+      const visualVideos = this._collectVisualVideoCandidates(doc);
       const yt = this.getYouTubeContext(doc);
-      const videos = Array.isArray(yt.videos) ? yt.videos : [];
+      const digestVideos = Array.isArray(yt.videos) ? yt.videos : [];
+      const videos = visualVideos.length > 0 ? visualVideos : digestVideos;
       if (videos.length === 0) {
-        return { status: 'not_found', reason: 'No YouTube video items were found on this page.' };
+        return { status: 'not_found', reason: "Hmm, I don't see any videos on this page right now." };
       }
 
       const excludeIds = new Set(Array.isArray(criteria.excludeIds) ? criteria.excludeIds : []);
@@ -2059,20 +2174,62 @@
       if (pool.length === 0) pool = videos.slice();
 
       let chosen = null;
+      let chosenIdx = -1;
+
       if (criteria.candidateId) {
-        chosen = videos.find((v) => v.id === criteria.candidateId || v.videoId === criteria.candidateId) || null;
+        chosenIdx = videos.findIndex((v) => v.id === criteria.candidateId || v.videoId === criteria.candidateId);
+        if (chosenIdx >= 0) chosen = videos[chosenIdx];
       }
 
+      // Support sequential stepping ("next video" / "subsequent video" / "previous video")
+      if (!chosen && criteria.relativeStep) {
+        const baseIdx = Number.isInteger(this._lastVideoIndex) ? this._lastVideoIndex : 0;
+        const nextIdx = Math.max(0, Math.min(pool.length - 1, baseIdx + Number(criteria.relativeStep)));
+        chosen = pool[nextIdx] || null;
+        chosenIdx = nextIdx;
+      }
+
+      // Visual top-to-bottom ordinal ("first video" -> index 0, "second video" -> index 1, etc.)
       if (!chosen && Number.isInteger(criteria.ordinal) && criteria.ordinal >= 1) {
-        chosen = pool[criteria.ordinal - 1] || null;
+        chosenIdx = criteria.ordinal - 1;
+        chosen = pool[chosenIdx] || null;
       }
 
+      // Fuzzy / phonetic / similar-name matching against BOTH video title and channel name
       if (!chosen) {
+        const matchApi = getMatchApi();
         const channelQ = normalizeText(criteria.channel || '');
         const queryQ = normalizeText(criteria.query || criteria.target || '');
         const durHint = String(criteria.durationHint || '').toLowerCase();
         const maxMinMatch = durHint.match(/(?:under|less|<|max|first_minutes)[^\d]*(\d+)/i);
         const maxSec = maxMinMatch ? Number(maxMinMatch[1]) * 60 : null;
+
+        const simScore = (needle, hay) => {
+          if (!needle || !hay) return 0;
+          if (hay === needle) return 1.0;
+          if (hay.includes(needle)) return 0.92;
+          let best = 0;
+          if (matchApi && typeof matchApi.scoreFieldText === 'function') {
+            best = Math.max(best, matchApi.scoreFieldText(needle, hay));
+          }
+          if (matchApi && typeof matchApi.jaroWinklerSimilarity === 'function') {
+            best = Math.max(best, matchApi.jaroWinklerSimilarity(needle, hay) * 0.92);
+          }
+          const nToks = needle.split(/\s+/).filter((t) => t.length >= 2);
+          const hToks = hay.split(/\s+/).filter((t) => t.length >= 2);
+          if (nToks.length > 0 && hToks.length > 0) {
+            let tokSum = 0;
+            for (const nt of nToks) {
+              let tb = 0;
+              for (const ht of hToks) {
+                tb = Math.max(tb, fuzzyWordMatch(nt, ht));
+              }
+              tokSum += tb;
+            }
+            best = Math.max(best, (tokSum / nToks.length) * 0.9);
+          }
+          return best;
+        };
 
         const scored = pool.map((v, idx) => {
           let score = 0;
@@ -2080,19 +2237,20 @@
           const vChan = normalizeText(v.channel);
           const vDesc = normalizeText(`${v.description || ''} ${v.title || ''}`);
           if (channelQ) {
-            if (vChan === channelQ) score += 25;
-            else if (vChan.includes(channelQ) || channelQ.includes(vChan)) score += 18;
-            else {
-              const cToks = channelQ.split(/\s+/).filter(Boolean);
-              if (cToks.some((t) => vChan.includes(t) || vDesc.includes(t))) score += 10;
-            }
+            const cSim = simScore(channelQ, vChan);
+            if (cSim >= 0.55) score += Math.round(cSim * 30);
+            else if (vDesc.includes(channelQ)) score += 12;
           }
           if (queryQ) {
-            const toks = queryQ.split(/\s+/).filter((t) => t.length >= 2 && !/^(?:video|videos|open|play|watch|the|from|by|one|that|channel)$/.test(t));
-            for (const tok of toks) {
-              if (vTitle.includes(tok)) score += 6;
-              else if (vDesc.includes(tok)) score += 4;
-              else if (vChan.includes(tok)) score += 5;
+            const cleanQ = queryQ
+              .replace(/\b(?:open|play|watch|select|choose|pick|find|the|video|videos|from|by|channel|called|named|named|similar\s+to|like|kholo|chalao|dikhao)\b/gi, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (cleanQ) {
+              const tSim = simScore(cleanQ, vTitle);
+              const cSim = simScore(cleanQ, vChan);
+              const bestSim = Math.max(tSim, cSim * 0.96);
+              if (bestSim >= 0.42) score += Math.round(bestSim * 28);
             }
           }
           if (durHint === 'shorter' && Number.isFinite(v.durationSeconds) && v.durationSeconds > 0) {
@@ -2105,8 +2263,9 @@
           return { video: v, score, idx };
         });
         scored.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.idx - b.idx));
-        if (scored[0] && (scored[0].score > 0 || pool.length === 1 || durHint === 'shorter' || durHint === 'longer')) {
+        if (scored[0] && (scored[0].score >= 10 || pool.length === 1 || durHint === 'shorter' || durHint === 'longer')) {
           chosen = scored[0].video;
+          chosenIdx = scored[0].idx;
         }
       }
 
@@ -2114,10 +2273,11 @@
         return {
           status: 'ambiguous',
           videos: pool.slice(0, 5),
-          reason: `Found ${pool.length} videos on this page.`
+          reason: `I spotted ${pool.length} videos here — tell me a number like "first video", "second video", or a title or channel name!`
         };
       }
 
+      if (chosenIdx >= 0) this._lastVideoIndex = chosenIdx;
       this._lastResult = { label: chosen.title, href: chosen.url || chosen.href, element: chosen.element, entityType: 'video', ...chosen };
       if (chosen.element && typeof this.previewElement === 'function') {
         this.previewElement(chosen.element);
@@ -2137,11 +2297,13 @@
         }
       }
 
+      const posNote = chosenIdx >= 0 ? ` (#${chosenIdx + 1} from top)` : '';
       return {
         status: 'selected_video',
         verified: true,
         video: chosen,
-        message: `Opening video "${chosen.title}"${chosen.channel ? ` by ${chosen.channel}` : ''}${chosen.duration ? ` (${chosen.duration})` : ''}.`
+        videoIndex: chosenIdx + 1,
+        message: `Sure thing! Opening "${chosen.title}"${chosen.channel ? ` by ${chosen.channel}` : ''}${posNote}.`
       };
     }
 

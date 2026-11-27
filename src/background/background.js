@@ -1223,6 +1223,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // User-triggered clean tab screenshot ("take screenshot" / "take a picture")
+  if (message.type === 'SLEEPWALKER_CAPTURE_SCREENSHOT') {
+    handleUserScreenshotCapture(sender)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: (err && err.message) || 'Screenshot capture failed.' }));
+    return true;
+  }
+
   // Phase 12A: Genuine Browser-Level Input Bridge (Chrome Debugger Protocol)
   if (message.type === 'SLEEPWALKER_ATTACH_DEBUGGER') {
     const tabId = (sender && sender.tab && sender.tab.id) || message.tabId;
@@ -1559,6 +1567,65 @@ async function handleVisualGroundMessage(payload = {}, sender = null) {
     imageBase64: dataUrl,
     mimeType: 'image/png'
   });
+}
+
+/**
+ * Capture a clean PNG screenshot of the active tab (temporarily hiding Sleepwalker's floating UI).
+ */
+async function handleUserScreenshotCapture(sender = null) {
+  let tabId = (sender && sender.tab && sender.tab.id) || null;
+  let windowId = (sender && sender.tab && sender.tab.windowId) || undefined;
+  let tabTitle = (sender && sender.tab && sender.tab.title) || 'page';
+  if (!tabId && chrome.tabs && typeof chrome.tabs.query === 'function') {
+    try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active) {
+        tabId = active.id;
+        windowId = active.windowId;
+        tabTitle = active.title || tabTitle;
+      }
+    } catch (_e) {}
+  }
+
+  if (tabId && chrome.tabs && typeof chrome.tabs.sendMessage === 'function') {
+    await new Promise((resolve) => {
+      try {
+        chrome.tabs.sendMessage(tabId, { action: 'SLEEPWALKER_PREPARE_SCREENSHOT' }, () => {
+          void chrome.runtime?.lastError;
+          resolve();
+        });
+      } catch (_e) { resolve(); }
+    });
+    await new Promise((r) => setTimeout(r, 70));
+  }
+
+  let dataUrl = '';
+  try {
+    if (!chrome.tabs || typeof chrome.tabs.captureVisibleTab !== 'function') {
+      return { ok: false, error: 'Tab screenshot capture is unavailable in this browser.' };
+    }
+    dataUrl = windowId !== undefined
+      ? await chrome.tabs.captureVisibleTab(windowId, { format: 'png' })
+      : await chrome.tabs.captureVisibleTab({ format: 'png' });
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || 'Could not capture this tab.' };
+  } finally {
+    if (tabId && chrome.tabs && typeof chrome.tabs.sendMessage === 'function') {
+      try {
+        chrome.tabs.sendMessage(tabId, { action: 'SLEEPWALKER_RESTORE_SCREENSHOT' }, () => {
+          void chrome.runtime?.lastError;
+        });
+      } catch (_e) {}
+    }
+  }
+
+  const slug = String(tabTitle || 'page').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'page';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  return {
+    ok: true,
+    dataUrl,
+    filename: `sleepwalker-${slug}-${stamp}.png`
+  };
 }
 
 /**

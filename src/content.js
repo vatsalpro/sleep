@@ -2694,6 +2694,149 @@
         }
       }
 
+      // 1c2b. Direct Screenshot / Take Picture Fast-Path ("take screenshot", "take a picture", "screenshot lo")
+      if (/^(?:please\s+)?(?:take\s+(?:a\s+)?(?:screen\s*shot|pic(?:ture)?|photo|snap(?:shot)?)|capture\s+(?:this\s+)?(?:screen|page|tab)|screen\s*shot(?:\s+(?:lo|le\s+lo|karo))?|फोटो\s+लो|तस्वीर\s+लो|स्क्रीनशॉट\s+लो)\.?$/i.test(raw)) {
+        const shotRes = await new Promise((resolve) => {
+          try {
+            chrome.runtime.sendMessage({ type: 'SLEEPWALKER_CAPTURE_SCREENSHOT' }, (resp) => {
+              if (chrome.runtime.lastError) return resolve({ ok: false, error: chrome.runtime.lastError.message });
+              resolve(resp || { ok: false, error: 'No response from capture service.' });
+            });
+          } catch (err) {
+            resolve({ ok: false, error: (err && err.message) || 'Screenshot unavailable.' });
+          }
+        });
+        if (shotRes && shotRes.ok && shotRes.dataUrl) {
+          const okMsg = 'Snapped a screenshot for you! Click Save PNG or Copy Image right below.';
+          this.setAssistantReply(okMsg);
+          if (window.SW_UI) {
+            window.SW_UI.setState('completed');
+            window.SW_UI.showCard({
+              type: 'answer',
+              title: 'Screenshot Captured',
+              previewUrl: shotRes.dataUrl,
+              text: okMsg,
+              actions: [
+                { id: 'save_png', label: 'Save PNG', primary: true },
+                { id: 'copy_png', label: 'Copy Image' }
+              ],
+              onAction: async (actId) => {
+                if (actId === 'save_png') {
+                  const a = document.createElement('a');
+                  a.href = shotRes.dataUrl;
+                  a.download = shotRes.filename || 'sleepwalker-screenshot.png';
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  this.setAssistantReply('Saved your screenshot to Downloads!');
+                  if (this.reader) this.reader.readText('Saved your screenshot to Downloads!');
+                } else if (actId === 'copy_png') {
+                  try {
+                    const blob = await (await fetch(shotRes.dataUrl)).blob();
+                    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+                    this.setAssistantReply('Copied the screenshot to your clipboard!');
+                    if (this.reader) this.reader.readText('Copied the screenshot to your clipboard!');
+                  } catch (_e) {
+                    this.setAssistantReply('Clipboard copy is blocked on this page — use Save PNG instead!');
+                  }
+                }
+              }
+            });
+          }
+          if (this.reader) this.reader.readText(okMsg);
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'screenshot_captured' });
+          this._finishActiveTask(taskId, 'COMPLETED', okMsg);
+          return { status: 'screenshot_captured', ok: true, verified: true, filename: shotRes.filename, answer: okMsg };
+        }
+        const failMsg = `I couldn't snap that screenshot right now (${(shotRes && shotRes.error) || 'permission needed'}). Try clicking the Sleepwalker toolbar icon once first!`;
+        this.setAssistantReply(failMsg);
+        if (this.reader) this.reader.readText(failMsg);
+        if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'error' });
+        this._finishActiveTask(taskId, 'ERROR', failMsg);
+        return { status: 'error', ok: false, verified: false, answer: failMsg };
+      }
+
+      // 1c2c. Direct Smart Video Selection Fast-Path (Top-down ordinal 1st/2nd/3rd/next, title, or channel name)
+      const videoCmdRe = /\b(?:video|videos|वीडियो|विडियो)\b/i;
+      if (this.navigator && typeof this.navigator.selectYouTubeVideo === 'function' && videoCmdRe.test(raw) && !/\b(?:pause|resume|mute|unmute|fullscreen|captions?|subtitles?|speed|rewind|forward|skip|summarize|explain)\b/i.test(raw)) {
+        const lowerV = raw.toLowerCase().trim();
+        const ORD_WORDS = {
+          first: 1, '1st': 1, one: 1, '1': 1, pehla: 1, pahla: 1, top: 1, 'पहला': 1,
+          second: 2, '2nd': 2, two: 2, '2': 2, dusra: 2, doosra: 2, 'दूसरा': 2,
+          third: 3, '3rd': 3, three: 3, '3': 3, teesra: 3, tisra: 3, 'तीसरा': 3,
+          fourth: 4, '4th': 4, four: 4, '4': 4, chautha: 4, 'चौथा': 4,
+          fifth: 5, '5th': 5, five: 5, '5': 5, paanchva: 5, 'पांचवा': 5,
+          sixth: 6, '6th': 6, six: 6, '6': 6, seventh: 7, '7th': 7, seven: 7, '7': 7,
+          eighth: 8, '8th': 8, eight: 8, '8': 8, ninth: 9, '9th': 9, nine: 9, '9': 9,
+          tenth: 10, '10th': 10, ten: 10, '10': 10
+        };
+        let ordinal = null;
+        let relativeStep = 0;
+        let channel = '';
+        let query = '';
+
+        if (/\b(?:next|subsequent|following|agla|अगला)\s+(?:video|वीडियो)\b/i.test(lowerV)) {
+          relativeStep = 1;
+        } else if (/\b(?:previous|prev|last|pichla|पिछला)\s+(?:video|वीडियो)\b/i.test(lowerV)) {
+          relativeStep = -1;
+        } else {
+          const ordM = lowerV.match(/\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th|\d{1,2}(?:st|nd|rd|th)?|pehla|pahla|dusra|doosra|teesra|tisra|chautha|paanchva|top|पहला|दूसरा|तीसरा|चौथा|पांचवा)\b/i)
+            || lowerV.match(/\bvideo\s*(?:number|no\.?|#)?\s*(\d{1,2})\b/i);
+          if (ordM && ordM[1]) {
+            const key = ordM[1].toLowerCase().replace(/(?:st|nd|rd|th)$/i, '');
+            ordinal = ORD_WORDS[ordM[1].toLowerCase()] || (Number.isInteger(Number(key)) && Number(key) >= 1 ? Number(key) : null);
+          }
+        }
+
+        const chanM = raw.match(/\b(?:by|from|of|channel)\s+(.+?)(?:\s+video|\s+videos|$)/i)
+          || raw.match(/^(?:open|play|select|watch|pick|show)?\s*(.+?)(?:'s|\s+ka|\s+ki)\s+(?:video|वीडियो)/i);
+        if (chanM && chanM[1] && !ordinal && !relativeStep) {
+          channel = chanM[1].trim();
+        }
+        if (!ordinal && !relativeStep) {
+          query = raw
+            .replace(/^(?:please\s+)?(?:open|play|watch|select|choose|pick|find|click|show)\s+(?:the\s+|a\s+)?/i, '')
+            .replace(/\b(?:video|videos|वीडियो|विडियो|kholo|chalao|dikhao|खोलो|चलाओ)\b/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+
+        const vidRes = await this.navigator.selectYouTubeVideo({ ordinal, relativeStep, channel, query });
+        if (vidRes && vidRes.status === 'selected_video') {
+          this.setAssistantReply(vidRes.message);
+          if (this.reader) this.reader.readText(vidRes.message);
+          if (window.SW_UI) {
+            window.SW_UI.setState('completed');
+            window.SW_UI.showCard({ type: 'answer', title: 'Opening Video', text: vidRes.message });
+          }
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'selected_video' });
+          this._finishActiveTask(taskId, 'COMPLETED', vidRes.message);
+          return { ...vidRes, ok: true, verified: true };
+        }
+        if (vidRes && vidRes.status === 'ambiguous' && Array.isArray(vidRes.videos) && vidRes.videos.length > 0) {
+          const choices = vidRes.videos.map((v) => `${v.title}${v.channel ? ` — ${v.channel}` : ''}`);
+          this.setAssistantReply(vidRes.reason);
+          if (this.reader) this.reader.readText(vidRes.reason);
+          if (window.SW_UI) {
+            window.SW_UI.setState('speaking');
+            window.SW_UI.showCard({
+              type: 'choices',
+              title: 'Pick a Video',
+              text: vidRes.reason,
+              choices,
+              onAction: async (actId, d) => {
+                if (actId === 'choose' && d && typeof d.index === 'number') {
+                  await this.navigator.selectYouTubeVideo({ ordinal: d.index + 1 });
+                }
+              }
+            });
+          }
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'ambiguous_video' });
+          this._finishActiveTask(taskId, 'COMPLETED', vidRes.reason);
+          return { ...vidRes, ok: true };
+        }
+      }
+
       // 1c3. Stage 4 / P0 Unified Orchestrator Routing for Browser, Desktop & Cross-Backend Workflows
       const isTeachOrSkillCmd = Boolean(
         this.teach && (
@@ -7587,16 +7730,16 @@
         } else if (req && req.action === 'SLEEPWALKER_PING_TAB_INFO') {
           send({ title: document.title || '', url: window.location.href || '' });
         } else if (req && req.action === 'SLEEPWALKER_PREPARE_SCREENSHOT') {
-          const uiRoot = document.getElementById('sleepwalker-floating-ui');
-          const ovRoot = document.getElementById('sleepwalker-candidate-overlay-root');
-          if (uiRoot) { uiRoot.dataset.swPrevVis = uiRoot.style.visibility || ''; uiRoot.style.visibility = 'hidden'; }
-          if (ovRoot) { ovRoot.dataset.swPrevVis = ovRoot.style.visibility || ''; ovRoot.style.visibility = 'hidden'; }
+          for (const hid of ['sleepwalker-ui-host', 'sleepwalker-floating-ui', 'sleepwalker-candidate-overlay-root']) {
+            const node = document.getElementById(hid);
+            if (node) { node.dataset.swPrevVis = node.style.visibility || ''; node.style.visibility = 'hidden'; }
+          }
           send({ ok: true });
         } else if (req && req.action === 'SLEEPWALKER_RESTORE_SCREENSHOT') {
-          const uiRoot = document.getElementById('sleepwalker-floating-ui');
-          const ovRoot = document.getElementById('sleepwalker-candidate-overlay-root');
-          if (uiRoot) { uiRoot.style.visibility = uiRoot.dataset.swPrevVis || ''; delete uiRoot.dataset.swPrevVis; }
-          if (ovRoot) { ovRoot.style.visibility = ovRoot.dataset.swPrevVis || ''; delete ovRoot.dataset.swPrevVis; }
+          for (const hid of ['sleepwalker-ui-host', 'sleepwalker-floating-ui', 'sleepwalker-candidate-overlay-root']) {
+            const node = document.getElementById(hid);
+            if (node) { node.style.visibility = node.dataset.swPrevVis || ''; delete node.dataset.swPrevVis; }
+          }
           send({ ok: true });
         } else if (req && req.action === 'SLEEPWALKER_SW_EXECUTE_COMMAND') {
           // Trusted extension-service-worker-only command channel (never exposed to webpage DOM)
