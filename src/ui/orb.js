@@ -126,7 +126,10 @@
                 <svg id="sw-ui-error-icon" class="sw-state-icon sw-error-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" hidden aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
               </button>
             </div>
-            <button type="button" id="sw-ui-type-btn" class="sw-type-btn" aria-expanded="false" aria-label="Type command instead of speaking">Type</button>
+            <button type="button" id="sw-ui-type-btn" class="sw-type-btn" aria-expanded="false" aria-label="Type command instead of speaking">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></svg>
+              <span>Type</span>
+            </button>
           </div>
         </div>
       `;

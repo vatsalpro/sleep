@@ -27,8 +27,39 @@
       this.hovered = false; this.focusedWithin = false; this.readingPaused = false;
       this.speechDone = true; this.autoDismissMs = DEFAULT_AUTO_DISMISS_MS;
       this._dismissTimer = null; this._prevFocusEl = null;
-      this._prefs = { lang: 'auto', rate: 1.0, fontSize: 18, voicePersona: 'nova' };
+      this._prefs = { lang: 'auto', rate: 1.0, fontSize: 16, voicePersona: 'nova', theme: 'light' };
       this._mount();
+      this._restoreThemePref();
+    }
+
+    _restoreThemePref() {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.get(['sleepwalker_theme'], (res) => {
+            if (res && (res.sleepwalker_theme === 'dark' || res.sleepwalker_theme === 'light')) {
+              this._applyTheme(res.sleepwalker_theme, false);
+            }
+          });
+        }
+      } catch (_e) {}
+    }
+
+    _applyTheme(theme, persist = true) {
+      const t = theme === 'dark' ? 'dark' : 'light';
+      this._prefs.theme = t;
+      const host = this.shadow && this.shadow.host;
+      if (host) {
+        if (t === 'dark') host.setAttribute('data-theme', 'dark');
+        else host.removeAttribute('data-theme');
+      }
+      this._syncMenuActive();
+      if (persist) {
+        try {
+          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ sleepwalker_theme: t });
+          }
+        } catch (_e) {}
+      }
     }
 
     _mount() {
@@ -159,10 +190,14 @@
           <button type="button" data-pref="rate" data-val="1">1.0x</button>
           <button type="button" data-pref="rate" data-val="1.2">1.2x</button>
         </div>
+        <div class="sw-menu-row"><span>Theme</span>
+          <button type="button" data-pref="theme" data-val="light">Light</button>
+          <button type="button" data-pref="theme" data-val="dark">Dark</button>
+        </div>
         <div class="sw-menu-row"><span>Size</span>
+          <button type="button" data-pref="fontSize" data-val="16">16px</button>
           <button type="button" data-pref="fontSize" data-val="18">18px</button>
           <button type="button" data-pref="fontSize" data-val="20">20px</button>
-          <button type="button" data-pref="fontSize" data-val="22">22px</button>
           <button type="button" data-pref="options" data-val="open">Options</button>
         </div>`;
       m.querySelectorAll('button').forEach((btn) => {
@@ -170,6 +205,10 @@
           e.stopPropagation();
           const pref = btn.dataset.pref;
           const val = btn.dataset.val;
+          if (pref === 'theme') {
+            this._applyTheme(val, true);
+            return;
+          }
           if (pref === 'fontSize') this.el.style.setProperty('--sw-card-font', `${val}px`);
           if (pref !== 'options') {
             this._prefs[pref] = (pref === 'lang' || pref === 'voicePersona') ? val : Number(val);
@@ -362,11 +401,13 @@
       }
       if (type === 'choices' && Array.isArray(spec.choices)) {
         const list = mk('div', 'sw-choice-list');
-        spec.choices.slice(0, 5).forEach((ch, idx) => {
+        spec.choices.slice(0, 7).forEach((ch, idx) => {
           const label = typeof ch === 'string' ? ch : (ch.label || ch.title || `Option ${idx + 1}`);
-          const btn = mk('button', 'sw-choice-btn', `${idx + 1}. ${label}`);
+          const btn = mk('button', 'sw-choice-btn');
           btn.type = 'button';
           btn.style.setProperty('--sw-item-idx', String(idx));
+          btn.appendChild(mk('span', 'sw-choice-num', String(idx + 1)));
+          btn.appendChild(mk('span', 'sw-choice-label', label));
           btn.addEventListener('click', (e) => {
             e.stopPropagation();
             if (typeof spec.onAction === 'function') spec.onAction('choose', { index: idx, choice: ch });
@@ -477,7 +518,7 @@
     _syncExpandVisibility() {
       const oldExp = this.shadow.getElementById('sw-card-expand');
       if (oldExp) oldExp.remove();
-      if (!(this.bodyEl.scrollHeight > this.bodyEl.clientHeight + 2) && !this.expanded) return;
+      if (!(this.bodyEl.scrollHeight > this.bodyEl.clientHeight + 12) && !this.expanded) return;
       const btn = mk('button', 'sw-ctrl-btn', this.expanded ? 'Compact' : 'Expand');
       btn.type = 'button'; btn.id = 'sw-card-expand';
       btn.addEventListener('click', (e) => {
