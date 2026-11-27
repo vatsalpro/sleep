@@ -2694,8 +2694,8 @@
         }
       }
 
-      // 1c2b. Direct Screenshot / Take Picture Fast-Path ("take screenshot", "take a picture", "screenshot lo")
-      if (/^(?:please\s+)?(?:take\s+(?:a\s+)?(?:screen\s*shot|pic(?:ture)?|photo|snap(?:shot)?)|capture\s+(?:this\s+)?(?:screen|page|tab)|screen\s*shot(?:\s+(?:lo|le\s+lo|karo))?|फोटो\s+लो|तस्वीर\s+लो|स्क्रीनशॉट\s+लो)\.?$/i.test(raw)) {
+      // 1c2b. Direct Screenshot Fast-Path (strictly screenshot phrases only — never intercept camera "take a picture" used by forms/camera.js)
+      if (/^(?:please\s+)?(?:take\s+(?:a\s+)?screen\s*shot|capture\s+(?:a\s+)?(?:screen\s*shot|this\s+screen|the\s+screen|screen)|screen\s*shot(?:\s+(?:lo|le\s+lo|karo))?|स्क्रीनशॉट(?:\s+लो)?)\.?$/i.test(raw)) {
         const shotRes = await new Promise((resolve) => {
           try {
             chrome.runtime.sendMessage({ type: 'SLEEPWALKER_CAPTURE_SCREENSHOT' }, (resp) => {
