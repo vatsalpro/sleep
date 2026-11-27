@@ -43,7 +43,19 @@
         <header class="sw-card-head">
           <div class="sw-card-title-row">
             <span class="sw-sparkle" aria-hidden="true">
-              <svg class="sw-svg" width="16" height="16" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" fill="currentColor" focusable="false" aria-hidden="true"><path d="M12 2L14.6 9.4L22 12L14.6 14.6L12 22L9.4 14.6L2 12L9.4 9.4L12 2Z"/></svg>
+              <svg class="sw-svg" width="18" height="18" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" fill="none" focusable="false" aria-hidden="true">
+                <defs>
+                  <linearGradient id="sw-emblem-g" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                    <stop offset="0%" stop-color="#38bdf8"/>
+                    <stop offset="55%" stop-color="#06b6d4"/>
+                    <stop offset="100%" stop-color="#a78bfa"/>
+                  </linearGradient>
+                </defs>
+                <path d="M5.5 11.2C5.2 15.6 8.3 19.2 12 19.2C15.7 19.2 18.8 15.6 18.5 11.2C17.4 14.3 14.9 16.2 12 16.2C9.1 16.2 6.6 14.3 5.5 11.2Z" fill="#e0f2fe"/>
+                <circle cx="12" cy="11.6" r="3.6" fill="url(#sw-emblem-g)"/>
+                <path d="M9.1 6.7C10.8 5.6 13.2 5.6 14.9 6.7" stroke="#7dd3fc" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M7.6 4.6C10.2 3.1 13.8 3.1 16.4 4.6" stroke="#c4b5fd" stroke-width="1.35" stroke-linecap="round" opacity="0.9"/>
+              </svg>
             </span>
             <h2 id="sw-card-title" class="sw-card-title"></h2>
             <span id="sw-card-badge" class="sw-card-badge" hidden></span>

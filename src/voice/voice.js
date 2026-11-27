@@ -1737,7 +1737,7 @@
 
       // 12. NAVIGATE TO SPECIFIC SECTION / ELEMENT (EN / Devanagari / Romanized HI / Hinglish / Kannada)
       let navMatch =
-        clean.match(/^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+to\s+|jump\s+(?:to\s+)?|go\s+to\s+|show\s+(?:me\s+)?)(?:the\s+)?(.+?)(?:\s+section)?$/i) ||
+        clean.match(/^(?:take\s+me\s+(?:to\s+)?|navigate\s+(?:to\s+)?|scroll\s+to\s+|jump\s+(?:to\s+)?|go\s+to\s+|open\s+|show\s+(?:me\s+)?)(?:the\s+)?(.+?)(?:\s+section)?$/i) ||
         clean.match(/^(.+?)\s+(?:section\s+)?(?:kholo|dikhao|par\s+le\s+chalo|pe\s+le\s+chalo|par\s+jao|pe\s+jao|pe\s+scroll\s+karo|open\s+kar(?:\s+do|o)|click\s+kar(?:\s+do|o)|select\s+kar(?:\s+do|o)|on\s+karo|chuno)$/i) ||
         clean.match(/^(.+?)\s+(?:ತೆರೆಯಿರಿ|tereyiri)$/i);
       if (navMatch && navMatch[1]) {
@@ -1803,6 +1803,29 @@
       }
 
       return { type: 'UNKNOWN', raw };
+    }
+
+    /**
+     * Split natural compound multi-step commands ("open Services then click Passport Offices",
+     * "settings kholo aur dark theme on karo") while preserving single-entity names ("Terms and Conditions").
+     */
+    parseCompoundSteps(raw) {
+      const text = String(raw || '').replace(/^\s*(?:first|pehle|पहले)\s+/i, '').trim();
+      if (!text || text.length < 8) return [];
+      // Do not split declarative teaching commands
+      if (/^(?:teach|remember|learn|sikho|सीखो)/i.test(text)) return [];
+      const parts = text
+        .split(/\s*(?:,\s*then\s+|\s+and\s+then\s+|\s+then\s+|\s*;\s*|\s+फिर\s+|\s+phir\s+|\s+aur\s+phir\s+|\s+के\s+बाद\s+)\s*/i)
+        .map((p) => p.replace(/^(?:next|after\s+that|uske\s+baad)\s+/i, '').trim())
+        .filter((p) => p.length >= 2);
+      if (parts.length >= 2) return parts.slice(0, 6);
+
+      // Also support "<action A> and <action B>" ONLY when RHS starts with a clear action verb
+      const andMatch = text.match(/^(.+?)\s+(?:and|aur|और)\s+((?:open|click|select|go\s+to|scroll|read|explain|show|type|fill|search|press|tap|kholo|dabao|padho|batao)\b.+)$/i);
+      if (andMatch && andMatch[1].trim().length >= 3 && andMatch[2].trim().length >= 3) {
+        return [andMatch[1].trim(), andMatch[2].trim()];
+      }
+      return [];
     }
   }
 

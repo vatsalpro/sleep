@@ -29,11 +29,14 @@
   --sw-orb-size-active: 78px;
   --sw-orb-size: var(--sw-orb-size-active);
 
-  /* Card tokens: Modern light theme default */
-  --sw-card-bg: rgba(255, 255, 255, 0.94);
-  --sw-card-border: rgba(226, 232, 240, 0.92);
-  --sw-radius-card: 22px;
-  --sw-shadow-card: 0 12px 32px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.04);
+  /* Card tokens: Ultra-crisp luminous frosted glass */
+  --sw-card-bg: rgba(255, 255, 255, 0.90);
+  --sw-card-border: rgba(203, 213, 225, 0.72);
+  --sw-radius-card: 24px;
+  --sw-shadow-card:
+    0 20px 50px rgba(15, 23, 42, 0.14),
+    0 4px 14px rgba(37, 99, 235, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
 
   --sw-dur-fast: 180ms;
   --sw-dur-breathe: 3600ms;
@@ -551,7 +554,7 @@ svg {
   display: none;
 }
 
-/* Response Card: Professional Modern Styling */
+/* Response Card: Premium Glassmorphic Copilot Surface */
 .sw-card {
   position: fixed;
   left: 50%;
@@ -568,12 +571,22 @@ svg {
   border-radius: var(--sw-radius-card);
   overflow: hidden;
   background: var(--sw-card-bg);
-  backdrop-filter: blur(20px) saturate(1.25);
-  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  backdrop-filter: blur(26px) saturate(1.45);
+  -webkit-backdrop-filter: blur(26px) saturate(1.45);
   border: 1.5px solid var(--sw-card-border);
   color: var(--sw-ink);
   box-shadow: var(--sw-shadow-card);
-  transition: transform 200ms ease, opacity 200ms ease, bottom 160ms ease;
+  transition: transform 220ms var(--sw-ease), opacity 200ms ease, bottom 180ms var(--sw-ease);
+}
+
+.sw-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 5%, var(--sw-cyan) 35%, var(--sw-violet) 65%, transparent 95%);
+  opacity: 0.75;
+  pointer-events: none;
 }
 
 .sw-card[hidden] {
@@ -633,16 +646,17 @@ svg {
 }
 
 .sw-sparkle {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--sw-blue), var(--sw-violet));
+  background: linear-gradient(145deg, #0b112b 0%, #172252 60%, #1e1b4b 100%);
   color: #fff;
-  box-shadow: 0 2px 8px var(--sw-cyan-soft);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  box-shadow: 0 4px 12px rgba(6, 182, 212, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.16);
   overflow: hidden;
 }
 

@@ -2695,6 +2695,17 @@
       }
 
       // 1c3. Stage 4 / P0 Unified Orchestrator Routing for Browser, Desktop & Cross-Backend Workflows
+      const isTeachOrSkillCmd = Boolean(
+        this.teach && (
+          this.teach.active ||
+          /^(?:teach|remember|learn|sikho|सीखो|नया\s+काम\s+सीखो|what\s+have\s+you\s+learned|show\s+(?:my\s+)?learned\s+(?:skills|workflows)|my\s+(?:learned\s+)?(?:skills|workflows)|list\s+(?:learned\s+)?(?:skills|workflows)|सीखे\s+हुए\s+काम)/i.test(raw)
+        )
+      );
+      const isCompoundMultiStepCmd = Boolean(
+        !meta?.isCompoundSubstep &&
+        this.voice && typeof this.voice.parseCompoundSteps === 'function' &&
+        this.voice.parseCompoundSteps(raw).length >= 2
+      );
       const unifiedContextHint = {
         browser: {
           url: typeof window !== 'undefined' ? window.location.href : '',
@@ -2702,6 +2713,8 @@
         }
       };
       const shouldUseUnified = Boolean(
+        !isTeachOrSkillCmd &&
+        !isCompoundMultiStepCmd &&
         this.unifiedOrchestrator && (
           (typeof this.unifiedOrchestrator.shouldHandleCommand === 'function' &&
             this.unifiedOrchestrator.shouldHandleCommand(raw, unifiedContextHint)) ||
@@ -2932,7 +2945,22 @@
             return tRes;
           }
         } else {
-          const explicitTeachM = raw.match(/^(?:teach\s+(?:sleepwalker|you)(?:\s+how\s+to)?|let\s+me\s+teach\s+(?:sleepwalker|you)(?:\s+how\s+to)?|record\s+(?:a\s+)?(?:workflow|skill)(?:\s+for)?)\s+(.+)$/i);
+          // Declarative multi-step voice recipe: "teach: when I say <name>, <step 1> then <step 2>"
+          const recipeM = raw.match(/^(?:teach|remember|learn)\s*[:,-]?\s*(?:when\s+i\s+say\s+|that\s+)?["'“]?(.+?)["'”]?\s*(?:,|means|does|should|=|:)\s*(.+)$/i);
+          if (recipeM && recipeM[1] && recipeM[2] && typeof this.teach.teachVoiceRecipe === 'function') {
+            const tRes = await this.teach.teachVoiceRecipe(recipeM[1].trim(), recipeM[2].trim());
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: tRes.status });
+            this._finishActiveTask(taskId, tRes.verified ? 'COMPLETED' : 'ERROR', tRes.answer || 'Recipe processed');
+            return tRes;
+          }
+          // List learned skills: "what have you learned" / "show learned skills" / "my skills"
+          if (/^(?:what\s+have\s+you\s+learned|show\s+(?:my\s+)?learned\s+(?:skills|workflows)|my\s+(?:learned\s+)?(?:skills|workflows)|list\s+(?:learned\s+)?(?:skills|workflows)|सीखे\s+हुए\s+काम(?:\s+दिखाओ)?)$/i.test(lowerTeach)) {
+            const lRes = typeof this.teach.listLearnedSkills === 'function' ? this.teach.listLearnedSkills() : { status: 'no_skills' };
+            if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: lRes.status });
+            this._finishActiveTask(taskId, 'COMPLETED', lRes.answer || 'Skills listed');
+            return lRes;
+          }
+          const explicitTeachM = raw.match(/^(?:teach\s+(?:sleepwalker|you|me)(?:\s+how\s+to)?|let\s+me\s+teach\s+(?:sleepwalker|you)(?:\s+how\s+to)?|record\s+(?:a\s+)?(?:workflow|skill)(?:\s+for)?|sikho|सीखो|नया\s+काम\s+सीखो)\s+(.+)$/i);
           if (explicitTeachM && explicitTeachM[1]) {
             const goalText = explicitTeachM[1].trim();
             const tRes = await this.teach.startTeaching(goalText, { mode: 'teach' });
@@ -2941,6 +2969,34 @@
             this._finishActiveTask(taskId, 'COMPLETED', 'Teaching started');
             return tRes;
           }
+        }
+      }
+
+      // 1c. Compound multi-step command execution ("open Services then click Passport Offices")
+      if (!meta?.isCompoundSubstep && this.voice && typeof this.voice.parseCompoundSteps === 'function') {
+        const compoundSteps = this.voice.parseCompoundSteps(raw);
+        if (compoundSteps.length >= 2) {
+          const stepOutcomes = [];
+          for (let si = 0; si < compoundSteps.length; si++) {
+            const subCmd = compoundSteps[si];
+            if (window.SW_UI && typeof window.SW_UI.setTaskStatus === 'function') {
+              window.SW_UI.setTaskStatus({
+                state: 'executing',
+                stage: `Step ${si + 1}/${compoundSteps.length}`,
+                taskLabel: subCmd
+              });
+            }
+            const subRes = await this._processUserInputInner(subCmd, inputSource, { ...meta, isCompoundSubstep: true });
+            stepOutcomes.push({ step: subCmd, status: (subRes && subRes.status) || 'done' });
+            if (si < compoundSteps.length - 1) {
+              await new Promise((r) => setTimeout(r, 380));
+            }
+          }
+          const summaryMsg = `Completed ${compoundSteps.length} steps: ${compoundSteps.join(' → ')}.`;
+          this.setAssistantReply(summaryMsg);
+          if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: 'completed' });
+          this._finishActiveTask(taskId, 'COMPLETED', summaryMsg);
+          return { status: 'completed', ok: true, verified: true, steps: stepOutcomes, answer: summaryMsg };
         }
       }
 

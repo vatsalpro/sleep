@@ -543,14 +543,122 @@
     }
 
     /**
+     * Declarative Multi-Step Voice Teaching:
+     * "teach: when I say check status, first open Services then click Track Application"
+     */
+    async teachVoiceRecipe(skillName, stepsText) {
+      const mem = this._getMemory();
+      const doc = this._getDoc();
+      const cleanName = cleanText(skillName || '').replace(/^["'“”]+|["'“”]+$/g, '').trim();
+      const rawSteps = String(stepsText || '')
+        .replace(/^\s*(?:first|pehle|पहले)\s+/i, '')
+        .split(/\s*(?:,\s*then\s+|\s+and\s+then\s+|\s+then\s+|\s*;\s*|\s*->\s*|\s+फिर\s+|\s+phir\s+)\s*/i)
+        .map((s) => cleanText(s.replace(/^(?:next|after\s+that|uske\s+baad)\s+/i, '')))
+        .filter((s) => s.length >= 2);
+
+      if (!cleanName || rawSteps.length === 0) {
+        return { status: 'invalid_recipe', message: 'Please say a trigger name and at least one step, e.g., "teach: when I say check tax, open Services then click Income Tax".' };
+      }
+      if (!mem || typeof mem.saveLearnedSkill !== 'function') {
+        return { status: 'error', message: 'Memory module unavailable.' };
+      }
+
+      const steps = rawSteps.slice(0, 8).map((cmd, idx) => ({
+        sequence: idx + 1,
+        action: 'command',
+        commandText: cmd,
+        label: cmd.slice(0, 90),
+        role: 'command',
+        pageUrlClean: this._getCleanUrl(doc)
+      }));
+
+      const saved = await mem.saveLearnedSkill({
+        name: cleanName,
+        instruction: cleanName,
+        website: this._getSiteHost(doc),
+        pageContext: doc ? doc.title : '',
+        steps,
+        verification: { expectedTitleIncludes: '' },
+        confirmedByUser: true
+      });
+
+      const summaryLines = steps.map((s, idx) => `${idx + 1}. ${s.commandText}`);
+      const okMsg = saved
+        ? `Learned "${saved.name}" with ${steps.length} step${steps.length === 1 ? '' : 's'}. Next time just say "${saved.name}".`
+        : 'Could not save learned workflow.';
+      if (this.controller && typeof this.controller.setAssistantReply === 'function') this.controller.setAssistantReply(okMsg);
+      if (typeof window !== 'undefined' && window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.setTaskStatus({ state: 'completed', stage: 'Workflow learned', taskLabel: saved ? saved.name : cleanName });
+        window.SW_UI.showCard({ type: 'answer', title: `Learned: ${cleanName}`, text: okMsg, summaryLines });
+      }
+      if (this.controller && this.controller.reader) this.controller.reader.readText(okMsg);
+      return { status: 'skill_saved', verified: Boolean(saved), skill: saved, answer: okMsg };
+    }
+
+    /**
+     * Show all learned skills with 1-click Run actions.
+     */
+    listLearnedSkills() {
+      const mem = this._getMemory();
+      const skills = (mem && mem.state && Array.isArray(mem.state.learnedSkills)) ? mem.state.learnedSkills : [];
+      if (skills.length === 0) {
+        const msg = 'No custom workflows learned yet. Say "teach: when I say <name>, <step 1> then <step 2>" or "teach sleepwalker <task>" to teach me.';
+        if (this.controller && typeof this.controller.setAssistantReply === 'function') this.controller.setAssistantReply(msg);
+        if (typeof window !== 'undefined' && window.SW_UI) {
+          window.SW_UI.setState('speaking');
+          window.SW_UI.showCard({ type: 'answer', title: 'Learned Skills', text: msg });
+        }
+        if (this.controller && this.controller.reader) this.controller.reader.readText(msg);
+        return { status: 'no_skills', skills: [], answer: msg };
+      }
+
+      const shown = skills.slice(0, 6);
+      const choices = shown.map((s) => `${s.name} (${(s.steps || []).length} step${(s.steps || []).length === 1 ? '' : 's'}${s.website ? ` · ${s.website}` : ''})`);
+      const msg = `I know ${skills.length} learned workflow${skills.length === 1 ? '' : 's'}. Click one or say its name to run it.`;
+      if (this.controller && typeof this.controller.setAssistantReply === 'function') this.controller.setAssistantReply(msg);
+      if (typeof window !== 'undefined' && window.SW_UI) {
+        window.SW_UI.setState('speaking');
+        window.SW_UI.showCard({
+          type: 'choices',
+          title: `Learned Workflows (${skills.length})`,
+          text: msg,
+          choices,
+          onAction: async (actId, data) => {
+            if (actId === 'choose' && data && typeof data.index === 'number' && shown[data.index]) {
+              return await this.executeLearnedSkill(shown[data.index], { utterance: shown[data.index].name });
+            }
+          }
+        });
+      }
+      if (this.controller && this.controller.reader) this.controller.reader.readText(msg);
+      return { status: 'skills_listed', skills: shown, answer: msg };
+    }
+
+    /**
      * Phase 6.5/6.8: Revalidate each step by semantic element identity on the live DOM
-     * (role, accessibleName, label, parentSection, id/name/hrefPath) — NEVER blind coordinate clicks!
+     * (including open Shadow DOM & same-origin iframes) — NEVER blind coordinate clicks!
      */
     reidentifyStepElement(step, doc = this._getDoc()) {
       if (!step || !doc || typeof doc.querySelectorAll !== 'function') return null;
-      const nodes = Array.from(doc.querySelectorAll(
-        'a, button, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], [role="radio"], [role="combobox"]'
-      ));
+      const sel = 'a, button, input, select, textarea, summary, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="checkbox"], [role="radio"], [role="combobox"], [aria-expanded], [aria-haspopup]';
+      const nodes = [];
+      const seen = new Set();
+      const collect = (root) => {
+        if (!root || typeof root.querySelectorAll !== 'function') return;
+        for (const el of root.querySelectorAll(sel)) {
+          if (!seen.has(el)) { seen.add(el); nodes.push(el); }
+        }
+        for (const host of root.querySelectorAll('*')) {
+          if (host.shadowRoot && host.shadowRoot.mode === 'open' && !isInsideSleepwalker(host)) {
+            collect(host.shadowRoot);
+          }
+        }
+        for (const fr of root.querySelectorAll('iframe')) {
+          try { if (fr.contentDocument) collect(fr.contentDocument); } catch (_e) {}
+        }
+      };
+      collect(doc);
 
       const stepLbl = norm(step.label || step.accessibleName || '');
       const stepAcc = norm(step.accessibleName || step.ariaLabel || '');
@@ -613,7 +721,42 @@
 
       for (let i = startIdx; i < skill.steps.length; i++) {
         const step = skill.steps[i];
-        const hit = this.reidentifyStepElement(step, doc);
+
+        // Support declarative voice-recipe command steps ("open Services", "click Passport Offices")
+        if (step && step.action === 'command' && step.commandText) {
+          if (this.controller && typeof this.controller.handleUserInput === 'function') {
+            if (typeof window !== 'undefined' && window.SW_UI) {
+              window.SW_UI.setTaskStatus({
+                state: 'executing',
+                stage: `Step ${i + 1}/${skill.steps.length}`,
+                taskLabel: step.commandText
+              });
+            }
+            const cmdRes = await this.controller.handleUserInput(step.commandText, 'typed', { skipLearnedSkills: true }).catch((err) => ({ status: 'error', error: err && err.message }));
+            await new Promise((r) => setTimeout(r, 320));
+            if (cmdRes && (cmdRes.status === 'error' || cmdRes.status === 'not_found')) {
+              if (mem && typeof mem.recordLearnedSkillOutcome === 'function') {
+                await mem.recordLearnedSkillOutcome(skill.id, { ok: false });
+              }
+              return {
+                status: 'skill_step_failed',
+                verified: false,
+                failedStepIndex: i,
+                failedStep: step,
+                skill,
+                message: `Step ${i + 1} ("${step.commandText}") could not complete on this page.`
+              };
+            }
+            continue;
+          }
+        }
+
+        // Smart DOM polling (up to 2.0s) for dynamically rendered dropdowns, modals, and SPA route transitions
+        let hit = this.reidentifyStepElement(step, doc);
+        for (let attempt = 0; !hit && attempt < 9; attempt++) {
+          await new Promise((r) => setTimeout(r, 220));
+          hit = this.reidentifyStepElement(step, doc);
+        }
         if (!hit || !hit.element) {
           if (mem && typeof mem.recordLearnedSkillOutcome === 'function') {
             await mem.recordLearnedSkillOutcome(skill.id, { ok: false });

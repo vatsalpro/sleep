@@ -1036,15 +1036,57 @@
       const typeAttr = (typeof el.getAttribute === 'function' ? el.getAttribute('type') : '') || '';
       if (tag === 'input' && String(typeAttr).toLowerCase() === 'password') return false;
 
+      const win = this._getWin();
+      const MouseCtor = (win && win.MouseEvent) || (typeof MouseEvent !== 'undefined' ? MouseEvent : null);
+      const PointerCtor = (win && win.PointerEvent) || (typeof PointerEvent !== 'undefined' ? PointerEvent : MouseCtor);
+      const cls = typeof el.className === 'string' ? el.className : '';
+      const isMenuOrDropdown = Boolean(
+        /\b(?:dropdown-toggle|menuparent|menu-item|nav-link|accordion|sf-with-ul)\b/i.test(cls) ||
+        (typeof el.hasAttribute === 'function' && (
+          el.hasAttribute('aria-expanded') || el.hasAttribute('aria-haspopup') ||
+          el.hasAttribute('data-toggle') || el.hasAttribute('data-bs-toggle')
+        )) ||
+        tag === 'summary'
+      );
+
+      // For hover/focus-activated enterprise & framework menus (Superfish, Bootstrap, React-Bootstrap, MUI),
+      // dispatch pointer/mouse hover + focus before clicking so submenus open reliably.
+      if (isMenuOrDropdown && typeof el.dispatchEvent === 'function' && MouseCtor) {
+        const hoverTargets = [el];
+        const parentLi = typeof el.closest === 'function' ? el.closest('li') : null;
+        if (parentLi && parentLi !== el) hoverTargets.unshift(parentLi);
+        for (const t of hoverTargets) {
+          try {
+            if (PointerCtor) t.dispatchEvent(new PointerCtor('pointerenter', { bubbles: false, view: win || undefined }));
+            t.dispatchEvent(new MouseCtor('mouseenter', { bubbles: false, view: win || undefined }));
+            t.dispatchEvent(new MouseCtor('mouseover', { bubbles: true, cancelable: true, view: win || undefined }));
+          } catch (_e) {}
+        }
+      }
+
+      try {
+        if (typeof el.focus === 'function') el.focus({ preventScroll: true });
+      } catch (_e) {}
+
+      if (isMenuOrDropdown && typeof el.dispatchEvent === 'function') {
+        for (const [evtName, Ctor] of [
+          ['pointerdown', PointerCtor],
+          ['mousedown', MouseCtor],
+          ['pointerup', PointerCtor],
+          ['mouseup', MouseCtor]
+        ]) {
+          if (Ctor) {
+            try { el.dispatchEvent(new Ctor(evtName, { bubbles: true, cancelable: true, view: win || undefined })); } catch (_e) {}
+          }
+        }
+      }
+
       if (typeof el.click === 'function') {
         el.click();
         return true;
       }
 
       if (typeof el.dispatchEvent === 'function') {
-        const win = this._getWin();
-        const MouseCtor = (win && win.MouseEvent) || (typeof MouseEvent !== 'undefined' ? MouseEvent : null);
-        const PointerCtor = (win && win.PointerEvent) || (typeof PointerEvent !== 'undefined' ? PointerEvent : MouseCtor);
         for (const [evtName, Ctor] of [
           ['pointerdown', PointerCtor],
           ['mousedown', MouseCtor],

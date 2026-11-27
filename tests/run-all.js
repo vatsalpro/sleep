@@ -143,7 +143,7 @@ async function auditSite(page, sw, getTabId, site) {
       blockedText: matched ? matched[0] : '',
       hasCaptchaGate: hasCaptchaIframe && text.length < 700
     };
-  }, CAPTCHA_OR_BLOCK_RE.source);
+  }, CAPTCHA_OR_BLOCK_RE.source).catch(() => ({ title: '', blockedText: '', hasCaptchaGate: false }));
 
   if (httpStatus === 403 || httpStatus === 429 || httpStatus === 503 || blockCheck.blockedText || blockCheck.hasCaptchaGate) {
     summary.status = 'BLOCKED_OR_CAPTCHA';
@@ -317,6 +317,12 @@ async function auditSite(page, sw, getTabId, site) {
     await sleep(PACE_MS);
     summary.safeClicksAttempted += 1;
     const beforeUrl = page.url();
+    const beforeExpanded = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return '';
+      const li = el.closest('li');
+      return `${el.getAttribute('aria-expanded') || ''}|${el.className || ''}|${li ? li.className : ''}`;
+    }, cand.selector).catch(() => '');
     let frameNavigated = false;
     const onNav = (fr) => { if (fr === page.mainFrame()) frameNavigated = true; };
     page.on('framenavigated', onNav);
@@ -330,11 +336,22 @@ async function auditSite(page, sw, getTabId, site) {
     await sleep(PACE_MS);
     page.off('framenavigated', onNav);
     const afterUrl = page.url();
+    const afterExpanded = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return '';
+      const li = el.closest('li');
+      return `${el.getAttribute('aria-expanded') || ''}|${el.className || ''}|${li ? li.className : ''}`;
+    }, cand.selector).catch(() => '');
     const navigated = frameNavigated || afterUrl !== beforeUrl;
+    const stateToggled = Boolean(beforeExpanded && afterExpanded && afterExpanded !== beforeExpanded);
     const channelClosedByNav = Boolean(clickRes && /message channel closed before a response/i.test(String(clickRes.error || '')));
-    const execOk = Boolean(clickRes && clickRes.res && (clickRes.res.ok || clickRes.res.verified || clickRes.res.status === 'navigated' || clickRes.res.status === 'clicked'));
+    const r = clickRes && clickRes.res;
+    const execOk = Boolean(r && (
+      r.ok || r.verified || r.verificationResult === 'verified' ||
+      /^(?:navigated|clicked|completed|disambiguate|confirm|needs_confirmation)$/i.test(String(r.status || ''))
+    ));
 
-    if (navigated || channelClosedByNav || execOk) {
+    if (navigated || stateToggled || channelClosedByNav || execOk) {
       summary.safeClicksVerified += 1;
       if (afterUrl !== beforeUrl) {
         await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});

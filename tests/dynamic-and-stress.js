@@ -140,6 +140,33 @@ async function runDynamicAndStressSuite(page, sw, getTabId, sendToTab) {
     const afterSpam = await sendToTab(sw, tabId, { action: 'SLEEPWALKER_SW_GET_STATE' });
     record('Command spam resilience (8 rapid cmds)', Boolean(spamErrors === 0 && afterSpam && afterSpam.ok), `errors=${spamErrors}, alive=${Boolean(afterSpam && afterSpam.ok)}, state=${afterSpam && afterSpam.taskLifecycleState}`, { input: '8 rapid burst commands', expected: 'Zero unhandled crashes, clean preemption' });
 
+    // 6b. Compound multi-step navigation ("open Open Modal then click Contact Support Team")
+    const compRes = await sendToTab(sw, tabId, {
+      action: 'SLEEPWALKER_SW_EXECUTE_COMMAND',
+      text: 'open Open Modal then click Close Modal',
+      inputSource: 'voice'
+    }, 12000).catch((e) => ({ ok: false, error: e.message }));
+    const compOk = Boolean(compRes && compRes.ok && compRes.res && compRes.res.verified && Array.isArray(compRes.res.steps) && compRes.res.steps.length === 2);
+    record('Compound multi-step command', compOk, compOk ? 'Executed 2-step compound workflow cleanly' : `Failed: ${JSON.stringify(compRes && (compRes.res || compRes.error)).slice(0, 100)}`, { input: 'open Open Modal then click Close Modal', expected: 'Both steps executed sequentially' });
+
+    // 6c. Teach & recall complex multi-step workflow via voice recipe
+    const teachRes = await sendToTab(sw, tabId, {
+      action: 'SLEEPWALKER_SW_EXECUTE_COMMAND',
+      text: 'teach: when I say support shortcut, open Open Modal then click Contact Support Team',
+      inputSource: 'voice'
+    }, 12000).catch((e) => ({ ok: false, error: e.message }));
+    const listRes = await sendToTab(sw, tabId, {
+      action: 'SLEEPWALKER_SW_EXECUTE_COMMAND',
+      text: 'what have you learned',
+      inputSource: 'voice'
+    }, 8000).catch((e) => ({ ok: false, error: e.message }));
+    const teachOk = Boolean(
+      teachRes && teachRes.ok && teachRes.res && teachRes.res.status === 'skill_saved' &&
+      listRes && listRes.ok && listRes.res && listRes.res.status === 'skills_listed' &&
+      Array.isArray(listRes.res.skills) && listRes.res.skills.some((s) => /support shortcut/i.test(s.name))
+    );
+    record('Teach & recall multi-step skill', teachOk, teachOk ? 'Learned "support shortcut" (2 steps) and verified in skill catalog' : `Failed: teach=${teachRes && teachRes.res && teachRes.res.status}, list=${listRes && listRes.res && listRes.res.status}`, { input: 'teach: when I say support shortcut, ... -> what have you learned', expected: 'Skill persisted and listed cleanly' });
+
     // 7. Page changing mid-read
     const readStart = await sendToTab(sw, tabId, { action: 'SLEEPWALKER_SW_AUDIT_SNAPSHOT', mode: 'read_start' });
     await page.goto(`${url}next-page`, { waitUntil: 'domcontentloaded', timeout: 10000 });
