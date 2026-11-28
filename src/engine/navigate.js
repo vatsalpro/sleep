@@ -3214,7 +3214,7 @@
         let userAskedSpec = false;
         if (SPECIFIC_NOUN_PH_RE.test(ph) || SPECIFIC_NOUN_PH_RE.test(lbl)) {
           const specWords = normalizeText(`${ph} ${lbl}`).split(/\s+/).filter((w) => w.length >= 4 && w !== 'search');
-          userAskedSpec = specWords.some((w) => cmdLower.includes(w));
+          userAskedSpec = specWords.some((w) => cmdLower.includes(w) || (w.endsWith('s') && cmdLower.includes(w.slice(0, -1))));
           if (!userAskedSpec) delta -= 32;
           else delta += 260;
         }
@@ -3225,10 +3225,10 @@
         // Big boost when user's qualifiers/words match field label or scope
         if (wantsTopMain && inHeaderOrSearch && !inOverlay) delta += 60;
         const qToks = new Set(normalizeText(query).split(/\s+/).filter(Boolean));
-        const cmdWords = cmdLower.split(/\s+/).filter((w) => w.length >= 3 && !qToks.has(w) && !/^(?:search|find|for|the|box|bar|field|input|use|with|this|that|top|main|first|second|third|one)$/.test(w));
+        const cmdWords = cmdLower.split(/\s+/).filter((w) => w.length >= 3 && !/^\d+$/.test(w) && !qToks.has(w) && !/^(?:search|find|for|the|box|bar|field|input|use|with|this|that|top|main|first|second|third|one|inside|under|from|using)$/.test(w));
         let labelHits = 0;
         for (const w of cmdWords) {
-          if (metaAll.includes(w)) labelHits += 1;
+          if (metaAll.includes(w) || (w.endsWith('s') && metaAll.includes(w.slice(0, -1)))) labelHits += 1;
         }
         if (labelHits > 0) delta += Math.min(280, labelHits * 160);
 

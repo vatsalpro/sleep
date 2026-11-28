@@ -2855,11 +2855,35 @@
           title: typeof document !== 'undefined' ? (document.title || '') : ''
         }
       };
+      // 1c2d. Scoped Multi-Search Fast-Path ("in 70 languages search Hindi", "in languages search Hindi", "search languages for Hindi")
+      const scopedSearchM = raw.match(/^(?:please\s+)?(?:in|inside|under|on|using|from)\s+(?:the\s+)?(.+?)\s+(?:search|find|filter|type)\s+(?:for\s+)?(.+)$/i);
+      if (
+        scopedSearchM && scopedSearchM[1] && scopedSearchM[2] &&
+        this.navigator &&
+        this.navigator.smartMultiSearchEnabled &&
+        typeof this.navigator.executeSearch === 'function' &&
+        this.navigator.findSearchCandidates(document).length >= 2
+      ) {
+        const scHint = scopedSearchM[1].trim();
+        const scQuery = scopedSearchM[2].trim();
+        const sRes = await this.navigator.executeSearch(scQuery, {
+          rawCommand: raw,
+          scopeHint: scHint,
+          smartMultiSearchEnabled: true
+        });
+        if (this.agentFsm) this.agentFsm.finishTurn(requestId, 'IDLE', { status: (sRes && sRes.status) || 'searched' });
+        this._finishActiveTask(taskId, (sRes && sRes.verified) ? 'COMPLETED' : 'ERROR', (sRes && sRes.label) ? `Searched "${scQuery}" in ${sRes.label}` : `Searched "${scQuery}"`);
+        return sRes;
+      }
+
       const isSmartMultiSearchCmd = Boolean(
         this.navigator &&
         this.navigator.smartMultiSearchEnabled &&
         typeof this.navigator.findSearchCandidates === 'function' &&
-        /^(?:please\s+)?(?:search|find|filter|use\s+(?:top|main|first|second|third)\s+search)\b/i.test(raw) &&
+        (
+          /^(?:please\s+)?(?:search|find|filter|use\s+(?:top|main|first|second|third)\s+search)\b/i.test(raw) ||
+          Boolean(scopedSearchM)
+        ) &&
         !/^(?:please\s+)?search\s+(?:wikipedia|youtube|github|google)\b/i.test(raw) &&
         this.navigator.findSearchCandidates(document).length >= 2
       );

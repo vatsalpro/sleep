@@ -72,9 +72,9 @@ async function runMultiSearchFixtureTests(browser) {
     const r1 = await nav.executeSearch('quantum physics', { rawCommand: 'search quantum physics', smartMultiSearchEnabled: true });
     out.t1 = { status: r1.status, elementId: r1.elementId, source: r1.selectionSource, llmCalls, resultText: document.getElementById('search-results').textContent };
 
-    // Test 2: Explicit scope match ("search languages for hindi") must pick #lang-search
+    // Test 2: Explicit scope match ("in 70 languages search hindi") must pick #lang-search
     document.getElementById('search-results').textContent = '';
-    const r2 = await nav.executeSearch('hindi', { rawCommand: 'search languages for hindi', smartMultiSearchEnabled: true });
+    const r2 = await nav.executeSearch('hindi', { rawCommand: 'in 70 languages search hindi', scopeHint: '70 languages', smartMultiSearchEnabled: true });
     out.t2 = { status: r2.status, elementId: r2.elementId, source: r2.selectionSource, resultText: document.getElementById('search-results').textContent };
 
     // Test 3: Explicit table filter qualifier ("filter table rows for alpha") must pick #table-filter
