@@ -189,6 +189,8 @@
         [0.55, 'rgba(255,255,255,0.16)'],
         [1, 'rgba(255,255,255,0)']
       ]);
+      // Reusable color-keyed lobe stamps (zero per-frame gradient allocation in steady state!)
+      this._colorStamps = { 1: { key: '', canvas: null }, 2: { key: '', canvas: null }, 3: { key: '', canvas: null } };
       this.size = Number(options.size || 92);
       this.state = 'idle';
       this.running = false;
@@ -273,6 +275,27 @@
       } catch (_e) {
         return null;
       }
+    }
+
+    _getColorLobeStamp(slotIdx, rgb, alpha0, alpha1) {
+      const slot = this._colorStamps && this._colorStamps[slotIdx];
+      if (!slot) return null;
+      // Quantize to step of 4 so color transitions smoothly while avoiding unnecessary rebuilds
+      const r = (rgb[0] >> 2) << 2;
+      const g = (rgb[1] >> 2) << 2;
+      const b = (rgb[2] >> 2) << 2;
+      const key = `${r},${g},${b}`;
+      if (slot.key === key && slot.canvas) return slot.canvas;
+      const stamp = this._buildRadialStamp(64, [
+        [0, `rgba(${r},${g},${b},${alpha0})`],
+        [0.55, `rgba(${r},${g},${b},${alpha1})`],
+        [1, `rgba(${r},${g},${b},0)`]
+      ]);
+      if (stamp) {
+        slot.key = key;
+        slot.canvas = stamp;
+      }
+      return stamp;
     }
 
     resize(cssSize) {
@@ -548,8 +571,11 @@
         const lx = cx + Math.cos(t) * orbitR + this.cur.waveDir * Math.sin(this.phase * 3 + i) * baseR * 0.14;
         const ly = cy + Math.sin(t * 1.15) * orbitR * 0.85;
         const lr = baseR * lb.rMul * (0.92 + 0.16 * Math.sin(t * 1.4) + this.smoothAudio * 0.22);
-        if (lb.cIdx === 0 && this._whiteLobeStamp) {
-          ctx.drawImage(this._whiteLobeStamp, lx - lr, ly - lr, lr * 2, lr * 2);
+        const stamp = lb.cIdx === 0
+          ? this._whiteLobeStamp
+          : this._getColorLobeStamp(lb.cIdx, col, lb.alpha0, lb.alpha1);
+        if (stamp) {
+          ctx.drawImage(stamp, lx - lr, ly - lr, lr * 2, lr * 2);
         } else {
           const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
           g.addColorStop(0, rgba(col, lb.alpha0));

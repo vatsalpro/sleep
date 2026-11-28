@@ -29,8 +29,8 @@
   --sw-orb-size-active: 78px;
   --sw-orb-size: var(--sw-orb-size-active);
 
-  /* Card tokens: Ultra-crisp luminous frosted glass */
-  --sw-card-bg: rgba(255, 255, 255, 0.92);
+  /* Card tokens: Ultra-crisp luminous frosted surface (zero GPU blur readback) */
+  --sw-card-bg: rgba(255, 255, 255, 0.96);
   --sw-card-border: rgba(203, 213, 225, 0.72);
   --sw-surface-subtle: rgba(241, 245, 249, 0.78);
   --sw-hover-bg: rgba(239, 246, 255, 0.92);
@@ -607,8 +607,6 @@ svg {
   border-radius: var(--sw-radius-card);
   overflow: visible;
   background: var(--sw-card-bg);
-  backdrop-filter: blur(10px) saturate(1.25);
-  -webkit-backdrop-filter: blur(10px) saturate(1.25);
   border: 1px solid var(--sw-card-border);
   color: var(--sw-ink);
   box-shadow: var(--sw-shadow-card);
@@ -838,6 +836,7 @@ svg {
   min-height: 0;
   max-height: 45vh;
   overflow-y: auto;
+  contain: content;
   padding-right: 2px;
   font-size: var(--sw-card-font, 15.5px);
   line-height: 1.55;
@@ -1899,7 +1898,6 @@ svg {
 .sw-quick-chip {
   animation: sw-pill-pop-in 260ms var(--sw-spring-out) both;
   animation-delay: calc(var(--sw-item-idx, 0) * 42ms);
-  will-change: transform, opacity;
   transition: transform 180ms var(--sw-spring-pop), background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 

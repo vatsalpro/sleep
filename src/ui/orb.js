@@ -197,23 +197,8 @@
     }
 
     syncLayout() {
-      if (!this.rootEl) return;
-      const vh = Number(rootScope.innerHeight) || 800;
-      const typeOpen = Boolean(this.typeForm && !this.typeForm.hidden);
-      const hasTranscript = Boolean(this.transcriptEl && this.transcriptEl.dataset.visible === 'true');
-      let clearance = (typeOpen ? 186 : 132) + (hasTranscript ? 42 : 0);
-      if (this.dockEl && typeof this.dockEl.getBoundingClientRect === 'function' && this.state !== 'idle') {
-        const rect = this.dockEl.getBoundingClientRect();
-        if (rect && rect.height > 0 && rect.top > 0 && rect.top <= vh) {
-          clearance = Math.max(clearance, (vh - rect.top) + 14);
-        }
-      }
-      const maxClearance = Math.max(124, Math.floor(vh * 0.48));
-      const finalPx = Math.min(maxClearance, Math.ceil(clearance));
-      if (finalPx !== this._lastClearancePx) {
-        this._lastClearancePx = finalPx;
-        this.rootEl.style.setProperty('--sw-dock-clearance', `${finalPx}px`);
-      }
+      // Right-middle dock layout is pure CSS-anchored (no forced synchronous getBoundingClientRect reflow needed)
+      return;
     }
 
     _isUntrustedWebEvent(e) {
@@ -501,6 +486,9 @@
       let normalized = VALID_STATES.has(nextState) ? nextState : 'silent';
       if (normalized === 'silent' && this._dissolving) {
         return this.state;
+      }
+      if (normalized === this.state && !this._dissolving && this.rootEl && this.rootEl.dataset.state) {
+        return normalized;
       }
       this._dissolving = false;
       if (this._hideTimer) {
