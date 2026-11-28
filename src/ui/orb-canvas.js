@@ -107,8 +107,8 @@
     }
   };
 
-  // Precompute 48-point unit circle harmonic tables once at module load (zero per-frame base angle trig)
-  const PTS = 48;
+  // Precompute 32-point unit circle harmonic tables once at module load (visually identical at 92px, 33% lighter clip/stroke)
+  const PTS = 32;
   const TWO_PI = Math.PI * 2;
   const UNIT_COS = new Float32Array(PTS);
   const UNIT_SIN = new Float32Array(PTS);
@@ -177,7 +177,18 @@
   class SleepwalkerFluidOrb {
     constructor(canvas, options = {}) {
       this.canvas = canvas;
-      this.ctx = canvas ? canvas.getContext('2d', { alpha: true, desynchronized: true }) || canvas.getContext('2d', { alpha: true }) : null;
+      // Standard alpha:true context locks cleanly to Windows Chrome VSync over hardware-decoded video
+      this.ctx = canvas ? canvas.getContext('2d', { alpha: true }) : null;
+      this._specStamp = this._buildRadialStamp(64, [
+        [0, 'rgba(255,255,255,0.82)'],
+        [0.42, 'rgba(255,255,255,0.24)'],
+        [1, 'rgba(255,255,255,0)']
+      ]);
+      this._whiteLobeStamp = this._buildRadialStamp(64, [
+        [0, 'rgba(255,255,255,0.50)'],
+        [0.55, 'rgba(255,255,255,0.16)'],
+        [1, 'rgba(255,255,255,0)']
+      ]);
       this.size = Number(options.size || 92);
       this.state = 'idle';
       this.running = false;
@@ -245,10 +256,29 @@
       this.renderFrame(0.016);
     }
 
+    _buildRadialStamp(dim, stops) {
+      try {
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+        const c = document.createElement('canvas');
+        c.width = dim;
+        c.height = dim;
+        const gctx = c.getContext('2d', { alpha: true });
+        if (!gctx) return null;
+        const half = dim * 0.5;
+        const g = gctx.createRadialGradient(half, half, 0, half, half, half);
+        for (let i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+        gctx.fillStyle = g;
+        gctx.fillRect(0, 0, dim, dim);
+        return c;
+      } catch (_e) {
+        return null;
+      }
+    }
+
     resize(cssSize) {
       this.size = Math.max(44, Math.round(Number(cssSize) || 92));
       if (!this.canvas) return;
-      const dpr = Math.min(2, Number(rootScope.devicePixelRatio) || 1);
+      const dpr = Math.min(1.5, Number(rootScope.devicePixelRatio) || 1);
       this.canvas.width = Math.round(this.size * dpr);
       this.canvas.height = Math.round(this.size * dpr);
       this.canvas.style.width = `${this.size}px`;
@@ -518,14 +548,18 @@
         const lx = cx + Math.cos(t) * orbitR + this.cur.waveDir * Math.sin(this.phase * 3 + i) * baseR * 0.14;
         const ly = cy + Math.sin(t * 1.15) * orbitR * 0.85;
         const lr = baseR * lb.rMul * (0.92 + 0.16 * Math.sin(t * 1.4) + this.smoothAudio * 0.22);
-        const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
-        g.addColorStop(0, rgba(col, lb.alpha0));
-        g.addColorStop(0.55, rgba(col, lb.alpha1));
-        g.addColorStop(1, rgba(col, 0));
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(lx, ly, lr, 0, TWO_PI);
-        ctx.fill();
+        if (lb.cIdx === 0 && this._whiteLobeStamp) {
+          ctx.drawImage(this._whiteLobeStamp, lx - lr, ly - lr, lr * 2, lr * 2);
+        } else {
+          const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
+          g.addColorStop(0, rgba(col, lb.alpha0));
+          g.addColorStop(0.55, rgba(col, lb.alpha1));
+          g.addColorStop(1, rgba(col, 0));
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(lx, ly, lr, 0, TWO_PI);
+          ctx.fill();
+        }
       }
 
       // 3B. Orbital starlight motes inside/across sphere during Thinking / Executing
@@ -547,21 +581,26 @@
         }
       }
 
-      // 4. Liquid-glass Fresnel rim refraction & parallax specular highlight
+      // 4. Liquid-glass Fresnel rim refraction & parallax specular highlight (pre-baked stamp blit!)
       ctx.globalCompositeOperation = 'source-over';
       const specX = cx - baseR * 0.28 + this._tiltX * 4.2;
       const specY = cy - baseR * 0.32 + this._tiltY * 4.2;
-      const specGrad = ctx.createRadialGradient(
-        specX - baseR * 0.06, specY - baseR * 0.06, baseR * 0.02,
-        specX, specY, baseR * 0.54
-      );
-      specGrad.addColorStop(0, 'rgba(255,255,255,0.82)');
-      specGrad.addColorStop(0.42, 'rgba(255,255,255,0.24)');
-      specGrad.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = specGrad;
-      ctx.beginPath();
-      ctx.arc(specX, specY, baseR * 0.54, 0, TWO_PI);
-      ctx.fill();
+      const specR = baseR * 0.54;
+      if (this._specStamp) {
+        ctx.drawImage(this._specStamp, specX - specR, specY - specR, specR * 2, specR * 2);
+      } else {
+        const specGrad = ctx.createRadialGradient(
+          specX - baseR * 0.06, specY - baseR * 0.06, baseR * 0.02,
+          specX, specY, specR
+        );
+        specGrad.addColorStop(0, 'rgba(255,255,255,0.82)');
+        specGrad.addColorStop(0.42, 'rgba(255,255,255,0.24)');
+        specGrad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = specGrad;
+        ctx.beginPath();
+        ctx.arc(specX, specY, specR, 0, TWO_PI);
+        ctx.fill();
+      }
 
       ctx.restore();
 

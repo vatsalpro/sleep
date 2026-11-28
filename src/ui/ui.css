@@ -151,8 +151,6 @@ svg {
   padding: 7px 16px;
   border-radius: 999px;
   background: var(--sw-card-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--sw-card-border);
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
   color: var(--sw-ink);
@@ -181,8 +179,6 @@ svg {
   width: min(380px, 88vw);
   border-radius: 999px;
   background: var(--sw-card-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1.5px solid var(--sw-blue);
   box-shadow: 0 6px 20px rgba(37, 99, 235, 0.14);
 }
@@ -280,8 +276,6 @@ svg {
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.45);
   background: radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.38), rgba(6, 182, 212, 0.22) 36%, rgba(139, 92, 246, 0.26) 66%, rgba(15, 23, 42, 0.94) 100%);
-  backdrop-filter: blur(18px) saturate(1.3);
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
   box-shadow: inset 0 2px 6px rgba(255, 255, 255, 0.28), inset 0 -6px 14px rgba(139, 92, 246, 0.26), 0 8px 24px rgba(15, 23, 42, 0.2), 0 0 16px var(--sw-cyan-soft);
   display: flex;
   align-items: center;
@@ -289,6 +283,7 @@ svg {
   cursor: pointer;
   padding: 0;
   outline: none;
+  contain: layout style;
   transition: transform var(--sw-dur-fast) ease, box-shadow var(--sw-dur-fast) ease, border-color var(--sw-dur-fast) ease;
 }
 
@@ -354,8 +349,6 @@ svg {
   border-radius: 999px;
   border: 1px solid var(--sw-card-border);
   background: var(--sw-card-bg);
-  backdrop-filter: blur(18px) saturate(1.3);
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
   color: var(--sw-ink);
   font-size: 13px;
   font-weight: 600;
@@ -458,8 +451,6 @@ svg {
   border-radius: 999px;
   border: 1px solid var(--sw-card-border);
   background: var(--sw-card-bg);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
   color: var(--sw-ink);
   transition: opacity 180ms ease, border-color 180ms ease;
@@ -611,8 +602,8 @@ svg {
   border-radius: var(--sw-radius-card);
   overflow: visible;
   background: var(--sw-card-bg);
-  backdrop-filter: blur(26px) saturate(1.45);
-  -webkit-backdrop-filter: blur(26px) saturate(1.45);
+  backdrop-filter: blur(10px) saturate(1.25);
+  -webkit-backdrop-filter: blur(10px) saturate(1.25);
   border: 1px solid var(--sw-card-border);
   color: var(--sw-ink);
   box-shadow: var(--sw-shadow-card);
@@ -1623,8 +1614,6 @@ svg {
   border-radius: 999px;
   border: 1px solid var(--sw-card-border);
   background: var(--sw-card-bg);
-  backdrop-filter: blur(14px) saturate(1.3);
-  -webkit-backdrop-filter: blur(14px) saturate(1.3);
   color: var(--sw-ink);
   font-size: 13px;
   font-weight: 600;
@@ -1725,10 +1714,13 @@ svg {
   animation: sw-icon-draw 320ms var(--sw-spring-out) both;
 }
 
-/* Feather-Soft Ambient Viewport Edge Aura (GPU opacity-only, zero layout cost) */
+/* Feather-Soft Ambient Viewport Edge Aura (bottom strip only — 80% less GPU overdraw) */
 .sw-edge-aurora {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 220px;
   pointer-events: none !important;
   z-index: 1;
   opacity: 0;
