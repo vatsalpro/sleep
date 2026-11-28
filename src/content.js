@@ -2855,9 +2855,18 @@
           title: typeof document !== 'undefined' ? (document.title || '') : ''
         }
       };
+      const isSmartMultiSearchCmd = Boolean(
+        this.navigator &&
+        this.navigator.smartMultiSearchEnabled &&
+        typeof this.navigator.findSearchCandidates === 'function' &&
+        /^(?:please\s+)?(?:search|find|filter|use\s+(?:top|main|first|second|third)\s+search)\b/i.test(raw) &&
+        !/^(?:please\s+)?search\s+(?:wikipedia|youtube|github|google)\b/i.test(raw) &&
+        this.navigator.findSearchCandidates(document).length >= 2
+      );
       const shouldUseUnified = Boolean(
         !isTeachOrSkillCmd &&
         !isCompoundMultiStepCmd &&
+        !isSmartMultiSearchCmd &&
         this.unifiedOrchestrator && (
           (typeof this.unifiedOrchestrator.shouldHandleCommand === 'function' &&
             this.unifiedOrchestrator.shouldHandleCommand(raw, unifiedContextHint)) ||
@@ -6723,7 +6732,13 @@
           message: errMsg
         };
       }
-      if (this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.executeSearch === 'function') {
+      const useSmartMultiNow = Boolean(
+        this.navigator &&
+        this.navigator.smartMultiSearchEnabled &&
+        typeof this.navigator.findSearchCandidates === 'function' &&
+        this.navigator.findSearchCandidates(document).length >= 2
+      );
+      if (!useSmartMultiNow && this.browserEngine && this.useRebuiltBrowserEngine && typeof this.browserEngine.executeSearch === 'function') {
         const t0 = performance.now();
         try {
           const beRes = await this.browserEngine.executeSearch(query, opts);
