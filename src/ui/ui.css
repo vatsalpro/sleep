@@ -106,9 +106,9 @@ svg {
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 20px 16px 26px;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 20px 22px 20px 16px;
   opacity: 0;
   visibility: hidden;
   transition: none;
@@ -139,7 +139,7 @@ svg {
   z-index: 6;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
   pointer-events: none;
 }
@@ -219,8 +219,10 @@ svg {
 .sw-orb-row {
   position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   pointer-events: none;
 }
 
@@ -334,10 +336,11 @@ svg {
 }
 
 .sw-type-btn {
-  position: absolute;
-  left: calc(100% + 14px);
-  top: 50%;
-  transform: translateY(-50%);
+  position: relative;
+  left: auto;
+  right: auto;
+  top: auto;
+  transform: none;
   pointer-events: auto;
   display: inline-flex;
   align-items: center;
@@ -585,15 +588,17 @@ svg {
   display: none;
 }
 
-/* Response Card: Premium Glassmorphic Copilot Surface */
+/* Response Card: Premium Glassmorphic Copilot Surface (Right-Middle Docked) */
 .sw-card {
   position: fixed;
-  left: 50%;
-  bottom: var(--sw-dock-clearance, calc(var(--sw-orb-size) + 54px));
-  transform: translateX(-50%);
+  left: auto;
+  right: 132px;
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
   z-index: 4;
-  width: min(548px, calc(100vw - 32px));
-  max-height: calc(100vh - var(--sw-dock-clearance, 136px) - 24px);
+  width: min(460px, calc(100vw - 156px));
+  max-height: calc(100vh - 48px);
   padding: 16px 18px 15px;
   display: flex;
   flex-direction: column;
@@ -607,7 +612,7 @@ svg {
   border: 1px solid var(--sw-card-border);
   color: var(--sw-ink);
   box-shadow: var(--sw-shadow-card);
-  transition: transform 220ms var(--sw-ease), opacity 200ms ease, bottom 180ms var(--sw-ease);
+  transition: transform 220ms var(--sw-ease), opacity 200ms ease, top 180ms var(--sw-ease);
 }
 
 .sw-card::before {
@@ -623,7 +628,13 @@ svg {
 
 .sw-card.sw-pos-top .sw-card-tail,
 .sw-card.sw-pos-left .sw-card-tail,
-.sw-card.sw-pos-right .sw-card-tail {
+.sw-card.sw-pos-right .sw-ui-root:has(.sw-card:not([hidden])) .sw-quick-chips,
+.sw-ui-root:has(.sw-card:not([hidden])) .sw-transcript-chip {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sw-card-tail {
   display: none;
 }
 
@@ -652,16 +663,24 @@ svg {
   transform: none;
 }
 
+.sw-ui-root:has(.sw-card:not([hidden])) .sw-quick-chips,
+.sw-ui-root:has(.sw-card:not([hidden])) .sw-transcript-chip {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .sw-card-tail {
   position: absolute;
-  left: 50%;
-  bottom: -9px;
-  width: 16px;
-  height: 16px;
-  transform: translateX(-50%) rotate(45deg);
+  right: -8px;
+  left: auto;
+  top: 50%;
+  bottom: auto;
+  width: 14px;
+  height: 14px;
+  transform: translateY(-50%) rotate(-45deg);
   background: var(--sw-card-bg);
-  border-right: 1.5px solid var(--sw-card-border);
-  border-bottom: 1.5px solid var(--sw-card-border);
+  border-right: 1px solid var(--sw-card-border);
+  border-bottom: 1px solid var(--sw-card-border);
   pointer-events: none;
 }
 
@@ -1714,18 +1733,18 @@ svg {
   animation: sw-icon-draw 320ms var(--sw-spring-out) both;
 }
 
-/* Feather-Soft Ambient Viewport Edge Aura (bottom strip only — 80% less GPU overdraw) */
+/* Feather-Soft Ambient Viewport Edge Aura (right-edge strip — 80% less GPU overdraw) */
 .sw-edge-aurora {
   position: fixed;
-  left: 0;
-  right: 0;
+  top: 0;
   bottom: 0;
-  height: 220px;
+  right: 0;
+  width: 200px;
   pointer-events: none !important;
   z-index: 1;
   opacity: 0;
   background:
-    radial-gradient(60% 180px at 50% 100%, rgba(56, 189, 248, 0.16) 0%, rgba(139, 92, 246, 0.08) 48%, transparent 100%);
+    radial-gradient(180px 55% at 100% 50%, rgba(56, 189, 248, 0.16) 0%, rgba(139, 92, 246, 0.08) 48%, transparent 100%);
   transition: opacity 420ms ease;
   will-change: opacity;
 }
@@ -1736,35 +1755,35 @@ svg {
 
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="listening"] {
   opacity: 0.9;
-  background: radial-gradient(58% 190px at 50% 100%, rgba(6, 182, 212, 0.18) 0%, rgba(59, 130, 246, 0.09) 50%, transparent 100%);
+  background: radial-gradient(190px 58% at 100% 50%, rgba(6, 182, 212, 0.18) 0%, rgba(59, 130, 246, 0.09) 50%, transparent 100%);
 }
 
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="processing"],
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-task-state="processing"] {
   opacity: 1;
-  background: radial-gradient(62% 210px at 50% 100%, rgba(139, 92, 246, 0.20) 0%, rgba(236, 72, 153, 0.09) 48%, transparent 100%);
+  background: radial-gradient(200px 62% at 100% 50%, rgba(139, 92, 246, 0.20) 0%, rgba(236, 72, 153, 0.09) 48%, transparent 100%);
 }
 
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="executing"],
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="observing"] {
   opacity: 0.95;
-  background: radial-gradient(60% 200px at 50% 100%, rgba(2, 132, 199, 0.19) 0%, rgba(34, 211, 238, 0.10) 50%, transparent 100%);
+  background: radial-gradient(200px 60% at 100% 50%, rgba(2, 132, 199, 0.19) 0%, rgba(34, 211, 238, 0.10) 50%, transparent 100%);
 }
 
 .sw-ui-root[data-active="true"] .sw-edge-aurora[data-orb-state="completed"] {
   opacity: 0.85;
-  background: radial-gradient(55% 170px at 50% 100%, rgba(16, 185, 129, 0.18) 0%, rgba(56, 189, 248, 0.07) 50%, transparent 100%);
+  background: radial-gradient(170px 55% at 100% 50%, rgba(16, 185, 129, 0.18) 0%, rgba(56, 189, 248, 0.07) 50%, transparent 100%);
 }
 
 /* Spring Entrance Choreography for Cards, Chips, Status Pill, and Type Bar */
 @keyframes sw-card-spring-in {
   0% {
     opacity: 0;
-    transform: translate3d(-50%, 14px, 0) scale(0.965);
+    transform: translate3d(14px, -50%, 0) scale(0.965);
   }
   100% {
     opacity: 1;
-    transform: translate3d(-50%, 0, 0) scale(1);
+    transform: translate3d(0, -50%, 0) scale(1);
   }
 }
 
