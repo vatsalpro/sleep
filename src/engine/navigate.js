@@ -155,7 +155,7 @@
       this.aiSearchEnabled = options.aiSearchEnabled !== undefined ? Boolean(options.aiSearchEnabled) : true;
       this.smartMultiSearchEnabled = options.smartMultiSearchEnabled !== undefined
         ? Boolean(options.smartMultiSearchEnabled)
-        : Boolean(root && root.__SW_SMART_MULTI_SEARCH__ === true);
+        : !(root && root.__SW_SMART_MULTI_SEARCH__ === false);
       this._siteSearchMemory = new Map();
       this.ollamaUrl = options.ollamaUrl || 'http://localhost:11434';
       this.ollamaModel = options.ollamaModel || 'llama3.2:3b';
@@ -3665,7 +3665,7 @@
       let smartFallbackCandidates = [];
       const useSmartMulti = options.smartMultiSearchEnabled !== undefined
         ? Boolean(options.smartMultiSearchEnabled)
-        : (this.smartMultiSearchEnabled || Boolean(root && root.__SW_SMART_MULTI_SEARCH__ === true));
+        : (this.smartMultiSearchEnabled && !(root && root.__SW_SMART_MULTI_SEARCH__ === false));
 
       if (chosen && chosen.element && useSmartMulti && options.rememberChoice !== false) {
         this._rememberSearchField(chosen);
