@@ -332,7 +332,9 @@
         this.rafId = null;
         return;
       }
-      const dt = Math.min(0.05, Math.max(0.004, (ts - this.lastTs) / 1000));
+      const rawDt = Math.min(0.033, Math.max(0.004, (ts - this.lastTs) / 1000));
+      this._smoothDt = this._smoothDt ? (this._smoothDt * 0.72 + rawDt * 0.28) : rawDt;
+      const dt = this._smoothDt;
       this.lastTs = ts;
       this.renderFrame(dt);
       if (!this.reducedMotion) {

@@ -153,11 +153,13 @@
       const targetRoot = doc.documentElement || doc.body;
       if (!targetRoot) return;
 
+      const MEDIA_NOISE_SEL = 'ytd-player, .html5-video-player, .ytp-chrome-bottom, .ytp-progress-bar-container, .ytp-time-display, yt-live-chat-app, ytd-live-chat-frame, video, audio, canvas';
       this._observer = new MutationObserver((mutations) => {
         let relevant = false;
         for (let i = 0; i < mutations.length; i++) {
           const t = mutations[i].target;
           if (isInsideSleepwalkerUi(t)) continue;
+          if (t && t.nodeType === 1 && typeof t.closest === 'function' && t.closest(MEDIA_NOISE_SEL)) continue;
           relevant = true;
           break;
         }

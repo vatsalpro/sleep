@@ -320,6 +320,8 @@
       if (!targetRoot) return;
 
       this._observedDoc = doc;
+      this._lastIncrementalScanAt = this._lastIncrementalScanAt || 0;
+      const MEDIA_NOISE_SEL = 'ytd-player, .html5-video-player, .ytp-chrome-bottom, .ytp-progress-bar-container, .ytp-time-display, yt-live-chat-app, ytd-live-chat-frame, video, audio, canvas, svg';
       this._mutationObserver = new MutationObserver((mutations) => {
         let relevant = false;
         for (let i = 0; i < mutations.length; i++) {
@@ -329,7 +331,10 @@
             t.id === 'sleepwalker-ui-host' ||
             t.id === 'sleepwalker-candidate-overlay-root' ||
             t.getAttribute?.('data-sleepwalker-ui') === '1' ||
-            (t.closest && t.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"]'))
+            (t.closest && (
+              t.closest('#sleepwalker-host, #sleepwalker-ui-host, #sleepwalker-candidate-overlay-root, [data-sleepwalker-ui="1"]') ||
+              t.closest(MEDIA_NOISE_SEL)
+            ))
           ))) {
             continue;
           }
@@ -340,14 +345,25 @@
         const curInv = this.tabInventories.get(tabId);
         if (curInv) curInv._staleSince = curInv._staleSince || Date.now();
         if (this._mutationTimer) clearTimeout(this._mutationTimer);
+        const now = Date.now();
+        const cooldownLeft = Math.max(0, 2500 - (now - (this._lastIncrementalScanAt || 0)));
+        const delayMs = Math.max(450, cooldownLeft);
         this._mutationTimer = setTimeout(() => {
           this._mutationTimer = null;
           if (this._isPrivacyBlocked()) return;
-          this._emitScanState(true, 'Updating page map...');
-          this.buildPageWorldModel(doc, { tabId, incremental: true, prevVersion: curInv ? curInv.inventoryVersion : 0 })
-            .catch(() => null)
-            .finally(() => this._emitScanState(false, ''));
-        }, 320);
+          const runScan = () => {
+            this._lastIncrementalScanAt = Date.now();
+            this._emitScanState(true, 'Updating page map...');
+            this.buildPageWorldModel(doc, { tabId, incremental: true, prevVersion: curInv ? curInv.inventoryVersion : 0 })
+              .catch(() => null)
+              .finally(() => this._emitScanState(false, ''));
+          };
+          if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(runScan, { timeout: 1500 });
+          } else {
+            runScan();
+          }
+        }, delayMs);
       });
       this._mutationObserver.observe(targetRoot, {
         childList: true,

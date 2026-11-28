@@ -237,8 +237,16 @@ svg {
   align-items: center;
   justify-content: center;
   pointer-events: auto;
-  transform: scale(0.88);
+  contain: layout style;
+  transform: translate3d(0, 0, 0) scale(0.88);
   opacity: 0;
+}
+
+.sw-orb-canvas {
+  display: block;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  pointer-events: none;
 }
 
 .sw-ui-root[data-active="true"] .sw-orb-wrap,
