@@ -4976,16 +4976,24 @@
     }
 
     _shouldUseNeuralEmbeddings(queryText, wmInv, resolvedContext, structuredCtx) {
-      const q = String(queryText || '').toLowerCase();
+      const q = String(queryText || '').toLowerCase().trim();
       if (!q || !wmInv) return false;
+      // Short direct navigation/media/UI commands never need Ollama nomic-embed-text (prevents VRAM model swapping!)
+      const wordCount = q.split(/\s+/).filter(Boolean).length;
+      if (wordCount <= 4 && !/\b(?:similar|like\s+this|another|explain|tutorial|beginner)\b/i.test(q)) {
+        return false;
+      }
+      if (/^(?:please\s+)?(?:open|play|pause|resume|mute|unmute|stop|scroll|go\s+back|back|next|previous|click|select|take\s+screenshot|what\s+can\s+i\s+do)\b/i.test(q) &&
+          !/\b(?:similar|like\s+this|about|explaining|tutorial|beginner)\b/i.test(q)) {
+        return false;
+      }
       if (resolvedContext && resolvedContext.resolvedSimilarTo) return true;
       const isFeed = Boolean((structuredCtx && /^youtube_(?:search|feed)$/i.test(structuredCtx.pageType || '')) || (wmInv.discoveryMode === 'progressive_feed'));
       if (isFeed) {
-        // Pure positional feed commands ("open 2nd video") don't need neural embedding calls
         if (/^(?:open|play|select|pick|click)\s+(?:the\s+)?(?:\d+(?:st|nd|rd|th)?|first|second|third|fourth|fifth|\w+teenth)\s+(?:video|item|result|one)\b/i.test(q)) {
           return false;
         }
-        return true;
+        return /\b(?:similar|like\s+this|another|about|explaining|tutorial|beginner|review|how\s+to)\b/i.test(q);
       }
       if (/\b(?:where\s+(?:they|do\s+they)|explain(?:ing|s)?|discuss(?:ing|es)?|advantages|benefits|tutorial|beginner|how\s+.+?\s+learn|like\s+this|similar|find\s+another)\b/i.test(q)) {
         return true;

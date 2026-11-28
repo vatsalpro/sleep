@@ -1683,7 +1683,12 @@ async function fetchOllamaGenerateDetailed(ollamaUrl, modelName, prompt, options
   };
   const useStream = extraOpts.stream !== false;
 
-  const linked = createLinkedTimeoutController(timeoutMs, extSignal);
+  // Cancel superseded in-flight Ollama generation so the queue never backs up
+  if (!extraOpts.allowConcurrent) {
+    cancelSupersededOllamaRequests(extraOpts.taskId || '');
+  }
+  const firstTokenBudgetMs = useStream ? Math.max(30000, Number(timeoutMs) || 20000) : (Number(timeoutMs) || 20000);
+  const linked = createLinkedTimeoutController(firstTokenBudgetMs, extSignal);
   const activeReqKey = registerActiveLlmController(linked, { provider: 'ollama', model, taskId: extraOpts.taskId || '' });
   try {
     const body = {
@@ -1765,6 +1770,7 @@ async function fetchOllamaGenerateDetailed(ollamaUrl, modelName, prompt, options
         }
         const { value, done } = await reader.read();
         if (done) break;
+        linked.touch(12000);
         lineBuf += decoder.decode(value, { stream: true });
         const lines = lineBuf.split('\n');
         lineBuf = lines.pop() || '';
@@ -2902,10 +2908,17 @@ function createLinkedTimeoutController(timeoutMs, externalSignal = null) {
   const controller = new AbortController();
   let timedOut = false;
   let onExternalAbort = null;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort(new Error('Request timeout'));
-  }, Math.max(500, Number(timeoutMs) || 15000));
+  const initialMs = Math.max(500, Number(timeoutMs) || 15000);
+  let timeoutId = null;
+
+  const armTimer = (ms) => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error('Request timeout'));
+    }, Math.max(500, Number(ms) || initialMs));
+  };
+  armTimer(initialMs);
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -2920,14 +2933,84 @@ function createLinkedTimeoutController(timeoutMs, externalSignal = null) {
     controller,
     signal: controller.signal,
     abort: (reason) => controller.abort(reason || new Error('Cancelled')),
+    touch: (idleMs = 12000) => {
+      if (!timedOut && !controller.signal.aborted) {
+        armTimer(idleMs);
+      }
+    },
     wasTimedOut: () => timedOut,
     cleanup: () => {
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
       if (externalSignal && onExternalAbort && typeof externalSignal.removeEventListener === 'function') {
         externalSignal.removeEventListener('abort', onExternalAbort);
       }
     }
   };
+}
+
+let _lastOllamaPrewarmAt = 0;
+let _ollamaPrewarmInFlight = false;
+
+/**
+ * Abort any superseded in-flight Ollama generation from an older taskId so Ollama's
+ * single-slot queue never backs up and causes cascading timeouts.
+ */
+function cancelSupersededOllamaRequests(currentTaskId = '') {
+  if (typeof ACTIVE_LLM_CONTROLLERS === 'undefined' || !ACTIVE_LLM_CONTROLLERS || typeof ACTIVE_LLM_CONTROLLERS.entries !== 'function') return 0;
+  let cancelled = 0;
+  const curId = String(currentTaskId || '');
+  for (const [key, entry] of Array.from(ACTIVE_LLM_CONTROLLERS.entries())) {
+    if (!entry || entry.provider !== 'ollama') continue;
+    if (curId && entry.taskId && String(entry.taskId) === curId) continue;
+    try {
+      if (entry.controller && typeof entry.controller.abort === 'function') {
+        entry.controller.abort(new Error('Superseded by newer command'));
+        cancelled += 1;
+      }
+    } catch (_e) {}
+    ACTIVE_LLM_CONTROLLERS.delete(key);
+  }
+  return cancelled;
+}
+
+/**
+ * Silent fire-and-forget warm-up of the configured Ollama model (keeping num_ctx: 16384 intact)
+ * when Sleepwalker wakes up, throttled to at most once every 4 minutes.
+ */
+async function prewarmOllamaModel(ollamaUrl = 'http://localhost:11434', modelName = DEFAULT_COMPACT_OLLAMA_MODEL) {
+  const now = Date.now();
+  if (_ollamaPrewarmInFlight || (now - _lastOllamaPrewarmAt) < 240000) return false;
+  if (typeof ACTIVE_LLM_CONTROLLERS !== 'undefined' && ACTIVE_LLM_CONTROLLERS && ACTIVE_LLM_CONTROLLERS.size > 0) return false;
+  const cleanUrl = String(ollamaUrl || 'http://localhost:11434').replace(/\/+$/, '');
+  if (!isLoopbackOllamaUrl(cleanUrl)) return false;
+  const modelCheck = resolveApprovedOllamaModel(modelName || DEFAULT_COMPACT_OLLAMA_MODEL);
+  if (!modelCheck.approved) return false;
+
+  _ollamaPrewarmInFlight = true;
+  _lastOllamaPrewarmAt = now;
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const tid = ctrl ? setTimeout(() => ctrl.abort(), 15000) : null;
+  try {
+    await fetch(`${cleanUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelCheck.model,
+        prompt: '',
+        stream: false,
+        keep_alive: OLLAMA_DEFAULT_KEEP_ALIVE,
+        options: { num_ctx: OLLAMA_UNIFIED_NUM_CTX }
+      }),
+      signal: ctrl ? ctrl.signal : undefined
+    }).catch(() => null);
+    return true;
+  } finally {
+    if (tid) clearTimeout(tid);
+    _ollamaPrewarmInFlight = false;
+  }
 }
 
 /**
@@ -2973,8 +3056,11 @@ async function fetchOllamaGenerateStream(ollamaUrl, modelName, prompt, options =
   if (format) reqBody.format = format;
   if (caps && caps.supportsThinking && streamOpts.allowThinking !== true) reqBody.think = false;
 
-  const linked = createLinkedTimeoutController(timeoutMs, externalSignal);
-  const activeReqKey = registerActiveLlmController(linked, { provider: 'ollama', model: effectiveModel, stream: true });
+  if (!streamOpts.allowConcurrent) {
+    cancelSupersededOllamaRequests(streamOpts.taskId || '');
+  }
+  const linked = createLinkedTimeoutController(Math.max(30000, timeoutMs), externalSignal);
+  const activeReqKey = registerActiveLlmController(linked, { provider: 'ollama', model: effectiveModel, stream: true, taskId: streamOpts.taskId || '' });
   try {
     const response = await fetch(`${baseUrl}/api/generate`, {
       method: 'POST',
@@ -3029,6 +3115,7 @@ async function fetchOllamaGenerateStream(ollamaUrl, modelName, prompt, options =
       }
       const { value, done } = await reader.read();
       if (done) break;
+      linked.touch(12000);
       lineBuf += decoder.decode(value, { stream: true });
       const lines = lineBuf.split('\n');
       lineBuf = lines.pop() || '';

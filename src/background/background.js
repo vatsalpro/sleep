@@ -1931,6 +1931,13 @@ async function activateSleepwalkerTabAndSleepOthers(activeTabId, storeOverride =
   const store = storeOverride || ((chrome.storage && (chrome.storage.session || chrome.storage.local)) || null);
   if (!store || !Number.isInteger(activeTabId)) return;
 
+  // Silently pre-warm the local Ollama model (keeping num_ctx: 16384) while user starts speaking
+  if (typeof prewarmOllamaModel === 'function' && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(['ollamaUrl', 'ollamaModel'], (cfg) => {
+      prewarmOllamaModel((cfg && cfg.ollamaUrl) || 'http://localhost:11434', (cfg && cfg.ollamaModel) || 'qwen2.5:1.5b').catch(() => {});
+    });
+  }
+
   const prev = await new Promise((resolve) => {
     store.get(['sleepwalker_active_tab_id', 'sleepwalker_prev_tab_stack'], (d) => {
       void chrome.runtime?.lastError;
