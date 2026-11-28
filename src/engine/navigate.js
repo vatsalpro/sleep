@@ -153,6 +153,10 @@
       this._searchCacheObserver = null;
       this._searchCacheDebounceTimer = null;
       this.aiSearchEnabled = options.aiSearchEnabled !== undefined ? Boolean(options.aiSearchEnabled) : true;
+      this.smartMultiSearchEnabled = options.smartMultiSearchEnabled !== undefined
+        ? Boolean(options.smartMultiSearchEnabled)
+        : Boolean(root && root.__SW_SMART_MULTI_SEARCH__ === true);
+      this._siteSearchMemory = new Map();
       this.ollamaUrl = options.ollamaUrl || 'http://localhost:11434';
       this.ollamaModel = options.ollamaModel || 'llama3.2:3b';
       this.ollamaSearchCaller = typeof options.ollamaSearchCaller === 'function' ? options.ollamaSearchCaller : null;
@@ -3079,6 +3083,178 @@
     }
 
     /**
+     * Stable signature for per-site remembered search field preference.
+     */
+    _getSearchFieldSignature(cand) {
+      if (!cand) return '';
+      const ei = cand.elementInfo || {};
+      const ci = cand.contextInfo || {};
+      return normalizeText([ei.dom_id, ei.name, ei.placeholder, ei.aria_label, ci.form_action].filter(Boolean).join('|'));
+    }
+
+    _getSiteHostKey() {
+      try {
+        const win = this._getWin();
+        return (win && win.location && win.location.hostname) || 'local';
+      } catch (_e) {
+        return 'local';
+      }
+    }
+
+    _getRememberedSearchSig(hostKey = this._getSiteHostKey()) {
+      if (this._siteSearchMemory && this._siteSearchMemory.has(hostKey)) {
+        return this._siteSearchMemory.get(hostKey);
+      }
+      try {
+        const win = this._getWin();
+        if (win && win.localStorage) {
+          const raw = win.localStorage.getItem('sw_multi_search_pref_v1');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed[hostKey] === 'string') {
+              if (this._siteSearchMemory) this._siteSearchMemory.set(hostKey, parsed[hostKey]);
+              return parsed[hostKey];
+            }
+          }
+        }
+      } catch (_e) {}
+      return '';
+    }
+
+    _rememberSearchField(cand, hostKey = this._getSiteHostKey()) {
+      const sig = this._getSearchFieldSignature(cand);
+      if (!sig) return;
+      if (this._siteSearchMemory) this._siteSearchMemory.set(hostKey, sig);
+      try {
+        const win = this._getWin();
+        if (win && win.localStorage) {
+          const raw = win.localStorage.getItem('sw_multi_search_pref_v1');
+          const map = raw ? (JSON.parse(raw) || {}) : {};
+          map[hostKey] = sig;
+          win.localStorage.setItem('sw_multi_search_pref_v1', JSON.stringify(map));
+        }
+      } catch (_e) {}
+    }
+
+    _isInOverlayContainer(el, doc) {
+      if (!el || typeof el.closest !== 'function') return false;
+      if (el.closest('dialog, [role="dialog"], [role="listbox"], [role="menu"], [role="menubar"], [popover], .popover, .dropdown-menu, .modal, [data-overlay="true"]')) {
+        return true;
+      }
+      if (doc && typeof doc.querySelectorAll === 'function') {
+        const expanders = doc.querySelectorAll('[aria-expanded="true"]');
+        for (const exp of expanders) {
+          const ctrlId = typeof exp.getAttribute === 'function' ? exp.getAttribute('aria-controls') : '';
+          if (ctrlId && typeof doc.getElementById === 'function') {
+            const panel = doc.getElementById(ctrlId);
+            if (panel && typeof panel.contains === 'function' && panel.contains(el)) return true;
+          }
+          if (exp.parentElement && exp.parentElement !== doc.body && typeof exp.parentElement.contains === 'function' && exp.parentElement.contains(el) && !el.closest('header, [role="banner"], [role="search"], search')) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    /**
+     * Step 1 deterministic multi-search scoring (ONLY invoked when smartMultiSearchEnabled && candidates.length >= 2).
+     */
+    _scoreMultiSearchCandidates(candidates, doc, { userCommand = '', query = '', scopeHint = '' } = {}) {
+      const cmdLower = normalizeText(`${userCommand} ${scopeHint}`);
+      const hostName = this._getSiteHostKey().replace(/^www\./i, '').split('.')[0].toLowerCase();
+      const pageTitleFirst = normalizeText((doc && doc.title) || '').split(/\s+/)[0] || '';
+
+      // Direct ordinal qualifier ("second one", "2nd search", "third one")
+      const ordQualM = cmdLower.match(/\b(first|1st|second|2nd|third|3rd)\s+(?:one|search|box|field|input)\b/i);
+      const ordMap = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2 };
+      const explicitOrd = ordQualM ? ordMap[ordQualM[1].toLowerCase()] : -1;
+      const wantsTopMain = /\b(?:top|main|header|primary|global|sitewide)\s+(?:search|bar|box)\b/i.test(cmdLower);
+
+      // Compute visible areas for relative normalization
+      const rects = candidates.map((c) => {
+        try {
+          return (c.element && typeof c.element.getBoundingClientRect === 'function') ? c.element.getBoundingClientRect() : { top: 500, left: 0, width: 160, height: 32 };
+        } catch (_e) {
+          return { top: 500, left: 0, width: 160, height: 32 };
+        }
+      });
+      const maxArea = Math.max(1, ...rects.map((r) => Math.max(0, (r.width || 0) * (r.height || 0))));
+
+      const NON_SEARCH_RE = /\b(?:comment|comments|reply|chat|message|newsletter|subscribe|feedback|post\s+a\s+comment|write\s+a\s+comment)\b/i;
+      const SPECIFIC_NOUN_PH_RE = /^(?:search|filter)\s+(?:languages?|in\s+this\b|within\b|category|categories|table|rows?|items?|comments?|messages?|chat|members?|users?|tags?|filters?)\b|\b(?:filter\s+(?:table|rows?|list|results?|by)|search\s+languages?)\b/i;
+
+      const scored = candidates.map((c, idx) => {
+        const base = this.scoreCandidateForCommand(c, userCommand, query, scopeHint);
+        const el = c.element;
+        const ei = c.elementInfo || {};
+        const ph = String(ei.placeholder || '').trim();
+        const lbl = String(ei.label || ei.aria_label || c.label || '').trim();
+        const metaAll = normalizeText(`${ph} ${lbl} ${ei.name || ''} ${ei.dom_id || ''} ${(c.contextInfo && c.contextInfo.nearby_heading) || ''} ${(c.contextInfo && c.contextInfo.parent_section) || ''}`);
+        const rect = rects[idx];
+        const area = Math.max(0, (rect.width || 0) * (rect.height || 0));
+
+        let delta = 0;
+        const inOverlay = this._isInOverlayContainer(el, doc);
+        const inHeaderOrSearch = Boolean(el && typeof el.closest === 'function' && el.closest('[role="search"], search, header, [role="banner"]'));
+
+        // Boosts: role=search / header / banner, generic placeholder, larger area, nearer top
+        if (inHeaderOrSearch && !inOverlay) delta += 32;
+        const phLow = ph.toLowerCase();
+        const isGenericPlaceholder = phLow === 'search' || phLow === 'search...' ||
+          (phLow.startsWith('search ') && phLow.split(/\s+/).length <= 2 &&
+            ((hostName && phLow.includes(hostName)) || (pageTitleFirst && phLow.includes(pageTitleFirst)) || /^search\s+(?:site|website|here|all)\b/i.test(phLow)));
+        if (isGenericPlaceholder && !inOverlay) delta += 24;
+        delta += Math.round((area / maxArea) * 18);
+        if (rect.top >= 0 && rect.top <= 180) delta += 18;
+        else if (rect.top > 180 && rect.top <= 360) delta += 8;
+        else if (rect.top > 600) delta -= 10;
+
+        // Penalties: overlay/menu/dialog/aria-expanded, specific-noun placeholder, non-search inputs
+        let userAskedSpec = false;
+        if (SPECIFIC_NOUN_PH_RE.test(ph) || SPECIFIC_NOUN_PH_RE.test(lbl)) {
+          const specWords = normalizeText(`${ph} ${lbl}`).split(/\s+/).filter((w) => w.length >= 4 && w !== 'search');
+          userAskedSpec = specWords.some((w) => cmdLower.includes(w));
+          if (!userAskedSpec) delta -= 32;
+          else delta += 260;
+        }
+        if (inOverlay && !userAskedSpec) delta -= 45;
+        if (NON_SEARCH_RE.test(metaAll)) delta -= 70;
+
+        // Ignore focus/autofocus as a positive signal for overlay fields (explicitly zero bonus)
+        // Big boost when user's qualifiers/words match field label or scope
+        if (wantsTopMain && inHeaderOrSearch && !inOverlay) delta += 60;
+        const qToks = new Set(normalizeText(query).split(/\s+/).filter(Boolean));
+        const cmdWords = cmdLower.split(/\s+/).filter((w) => w.length >= 3 && !qToks.has(w) && !/^(?:search|find|for|the|box|bar|field|input|use|with|this|that|top|main|first|second|third|one)$/.test(w));
+        let labelHits = 0;
+        for (const w of cmdWords) {
+          if (metaAll.includes(w)) labelHits += 1;
+        }
+        if (labelHits > 0) delta += Math.min(280, labelHits * 160);
+
+        return {
+          ...base,
+          inOverlay,
+          inHeaderOrSearch,
+          nonSearchPenalized: NON_SEARCH_RE.test(metaAll),
+          smartScore: base.totalScore + delta,
+          domIdx: idx
+        };
+      });
+
+      scored.sort((a, b) => (b.smartScore !== a.smartScore ? b.smartScore - a.smartScore : a.domIdx - b.domIdx));
+
+      // Handle explicit ordinal qualifier ("second one", "third search")
+      if (explicitOrd >= 0 && explicitOrd < candidates.length) {
+        const picked = scored.find((s) => s.domIdx === explicitOrd);
+        if (picked) {
+          return { scored, directPick: picked, reason: `Matched ordinal qualifier (#${explicitOrd + 1})` };
+        }
+      }
+      return { scored, directPick: null, reason: '' };
+    }
+
+    /**
      * Request search candidate selection from local Ollama (via background worker or direct localhost fallback).
      */
     async _requestOllamaSearchSelection(requestPayload) {
@@ -3142,7 +3318,7 @@
             prompt,
             stream: false,
             format: 'json',
-            options: { num_ctx: 2048, temperature: 0, num_predict: 160 }
+            options: { num_ctx: 16384, temperature: 0, num_predict: 160 }
           }),
           signal: controller ? controller.signal : undefined
         });
@@ -3486,6 +3662,14 @@
       let chosen = options.chosenCandidate || null;
       let selectionSource = chosen ? 'user_choice' : 'single_candidate';
       let ollamaDiagnostic = null;
+      let smartFallbackCandidates = [];
+      const useSmartMulti = options.smartMultiSearchEnabled !== undefined
+        ? Boolean(options.smartMultiSearchEnabled)
+        : (this.smartMultiSearchEnabled || Boolean(root && root.__SW_SMART_MULTI_SEARCH__ === true));
+
+      if (chosen && chosen.element && useSmartMulti && options.rememberChoice !== false) {
+        this._rememberSearchField(chosen);
+      }
 
       if (!chosen || !chosen.element) {
         let candidates = this.findSearchCandidates(doc, options.siteHint || '', { preserveDomOrder: true });
@@ -3513,6 +3697,130 @@
             effectiveQuery = options.rawQuery;
           } else if (singleScore.refinedQuery) {
             effectiveQuery = singleScore.refinedQuery;
+          }
+        } else if (useSmartMulti) {
+          // Flag-gated ordered multi-search pipeline (steps 1 -> 6, stopping at first clear winner)
+          const smart = this._scoreMultiSearchCandidates(candidates, doc, { userCommand, query: cleanQuery, scopeHint });
+          const ranked = smart.scored;
+          const top = ranked[0];
+          const second = ranked[1] || null;
+          const margin = top ? (top.smartScore - (second ? second.smartScore : -999)) : 0;
+          smartFallbackCandidates = ranked.slice(1, 3).map((r) => r.candidate);
+
+          // Step 1a: Explicit ordinal qualifier ("second one")
+          if (smart.directPick) {
+            chosen = smart.directPick.candidate;
+            effectiveQuery = smart.directPick.refinedQuery || cleanQuery;
+            selectionSource = 'smart_deterministic_ordinal';
+          }
+          // Step 1b: Clear deterministic winner (margin >= 22)
+          else if (top && margin >= 22 && !top.nonSearchPenalized) {
+            chosen = top.candidate;
+            effectiveQuery = top.refinedQuery || cleanQuery;
+            selectionSource = 'smart_deterministic';
+          }
+          // Step 2: Remembered per-site preference (unless user explicitly requested a different scope)
+          else {
+            const remSig = this._getRememberedSearchSig();
+            const remembered = (!scopeHint && remSig)
+              ? ranked.find((r) => !r.nonSearchPenalized && this._getSearchFieldSignature(r.candidate) === remSig)
+              : null;
+            if (remembered) {
+              chosen = remembered.candidate;
+              effectiveQuery = remembered.refinedQuery || cleanQuery;
+              selectionSource = 'remembered_site_choice';
+            }
+          }
+
+          // Step 4: Top two within margin -> ask by voice naming them; NEVER call LLM for 2 candidates
+          if (!chosen && ranked.length === 2) {
+            const topTwo = ranked.slice(0, 2);
+            const clarifyQ = `${topTwo[0].candidate.label} or ${topTwo[1].candidate.label}?`;
+            const opts = topTwo.map((r) => ({
+              label: r.candidate.label,
+              element: r.candidate.element,
+              candidate: r.candidate,
+              isSearchChoice: true,
+              searchQuery: cleanQuery,
+              searchOptions: { ...options, rememberChoice: true }
+            }));
+            this.pendingChoices = opts;
+            this.previewElement(opts[0].element);
+            this._notify(clarifyQ, { openBubble: true });
+            if (this.widget && this.widget.confirm) {
+              const confirmReq = this.widget.confirm.request({
+                id: `search_pick_${Date.now()}`,
+                risk: 'medium',
+                confidence: 0.72,
+                ambiguous: true,
+                title: 'Choose Search Field',
+                message: clarifyQ,
+                options: opts,
+                onConfirm: async ({ selectedOption } = {}) => {
+                  this.pendingChoices = null;
+                  const picked = (selectedOption && selectedOption.candidate) || opts[0].candidate;
+                  this._rememberSearchField(picked);
+                  await this.executeSearch(cleanQuery, { ...options, chosenCandidate: picked, rememberChoice: true });
+                },
+                onCancel: () => { this.pendingChoices = null; this.cancelPendingHighlight(); }
+              });
+              return { ...confirmReq, status: 'ambiguous', query: cleanQuery, clarificationQuestion: clarifyQ, candidates: opts.map((o) => o.label), selectionSource: 'smart_clarify_pair', trace };
+            }
+            return { status: 'ambiguous', query: cleanQuery, clarificationQuestion: clarifyQ, candidates: opts.map((o) => o.label), selectionSource: 'smart_clarify_pair', trace };
+          }
+
+          // Step 5 & 6 (3+ ambiguous candidates): top 3 only -> try LLM with top 3 (num_ctx 16384), else numbered labels on top 3
+          if (!chosen) {
+            const top3 = ranked.slice(0, 3);
+            const top3Cands = top3.map((r) => r.candidate);
+            const aiEnabled = options.aiSearchEnabled !== undefined
+              ? Boolean(options.aiSearchEnabled)
+              : (this.widget && this.widget.aiSearchEnabled !== undefined ? Boolean(this.widget.aiSearchEnabled) : this.aiSearchEnabled);
+            if (aiEnabled) {
+              const pageCtx = this.extractSearchPageContext(doc);
+              const ollamaRes = await this._requestOllamaSearchSelection({
+                user_command: userCommand,
+                search_query: cleanQuery,
+                page_title: pageCtx.page_title,
+                hostname: pageCtx.hostname,
+                main_heading: pageCtx.main_heading,
+                page_category: pageCtx.page_category,
+                candidates: this.buildOllamaSearchCandidatesPayload(top3Cands),
+                ollamaUrl: options.ollamaUrl || this.ollamaUrl || 'http://localhost:11434',
+                ollamaModel: options.ollamaModel || this.ollamaModel || 'llama3.2:3b',
+                aiSearchEnabled: true,
+                skipCache: Boolean(options.skipCache)
+              });
+              ollamaDiagnostic = ollamaRes;
+              if (ollamaRes && ollamaRes.status === 'ok' && ollamaRes.selection && ollamaRes.selection.selected_candidate_id && !ollamaRes.selection.needs_clarification && ollamaRes.selection.confidence >= 0.75) {
+                const picked = top3Cands.find((c) => c.candidateId === ollamaRes.selection.selected_candidate_id);
+                if (picked) {
+                  chosen = picked;
+                  effectiveQuery = ollamaRes.selection.query || cleanQuery;
+                  selectionSource = 'smart_ollama_top3';
+                }
+              }
+            }
+            if (!chosen) {
+              const overlay = this._getCandidateOverlay(doc);
+              if (overlay && typeof overlay.render === 'function') {
+                try { overlay.render(top3Cands.map((c, i) => ({ number: i + 1, label: c.label, element: c.element }))); } catch (_e) {}
+              }
+              const opts = top3Cands.map((c) => ({
+                label: c.label,
+                element: c.element,
+                candidate: c,
+                isSearchChoice: true,
+                searchQuery: cleanQuery,
+                searchOptions: { ...options, rememberChoice: true }
+              }));
+              const numbered = opts.map((o, i) => `${i + 1}. ${o.label}`).join('  ');
+              const clarifyQ = `Which search box? Say 1, 2, or 3: ${numbered}`;
+              this.pendingChoices = opts;
+              this.previewElement(opts[0].element);
+              this._notify(clarifyQ, { openBubble: true });
+              return { status: 'ambiguous', query: cleanQuery, clarificationQuestion: clarifyQ, candidates: opts.map((o) => o.label), selectionSource: 'smart_numbered_top3', trace };
+            }
           }
         } else {
           // Multiple search fields exist on the page: invoke Ollama AI intelligent selection (with deterministic fallback)
@@ -3894,6 +4202,17 @@
         this._lastSearchExec = { query: effectiveQuery, time: Date.now() };
 
         if (!verified) {
+          // Step 3: Auto-retry next ranked candidate once when smartMultiSearchEnabled is active
+          if (useSmartMulti && !options._retriedFallback && smartFallbackCandidates.length > 0) {
+            const retryCand = smartFallbackCandidates[0];
+            this._searchInProgress = false;
+            this._activeSearchQuery = '';
+            return this.executeSearch(effectiveQuery, {
+              ...options,
+              chosenCandidate: retryCand,
+              _retriedFallback: true
+            });
+          }
           logStage('FAILED: Result navigation or search update could not be verified');
           const unverifiedMsg = `Entered "${effectiveQuery}" into the search box, but search execution could not be verified. Please press Enter or click the search button.`;
           this._notify(unverifiedMsg, { openBubble: true, state: 'idle' });

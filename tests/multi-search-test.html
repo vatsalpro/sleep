@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Wikipedia — Multi-Search Fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+    header { display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #f1f5f9; border-bottom: 1px solid #cbd5e1; }
+    #header-search { width: 420px; height: 40px; font-size: 15px; padding: 0 12px; }
+    #mobile-search { width: 120px; height: 24px; font-size: 12px; }
+    #lang-menu { position: fixed; top: 72px; right: 24px; width: 240px; padding: 12px; background: #fff; border: 1px solid #94a3b8; box-shadow: 0 8px 20px rgba(0,0,0,0.12); }
+    #lang-search { width: 200px; height: 30px; }
+    main { margin-top: 24px; display: flex; flex-direction: column; gap: 28px; }
+    #table-filter { width: 220px; height: 30px; }
+    #comment-box { width: 320px; height: 34px; }
+    #search-results { padding: 10px; background: #ecfeff; border: 1px solid #06b6d4; min-height: 24px; }
+  </style>
+</head>
+<body>
+  <header role="banner">
+    <form role="search" id="main-search-form">
+      <label for="header-search">Search Wikipedia</label>
+      <input id="header-search" name="search" type="search" placeholder="Search Wikipedia" aria-label="Search Wikipedia">
+      <button type="submit" id="header-search-btn">Search</button>
+    </form>
+
+    <!-- Duplicate compact mobile search box (also visible in fixture to test area/size preference) -->
+    <div class="mobile-nav-dup" style="margin-top: 32px;">
+      <input id="mobile-search" name="q" type="search" placeholder="Search" aria-label="Mobile Search">
+    </div>
+
+    <button id="lang-toggle" type="button" aria-expanded="true" aria-controls="lang-menu">Languages</button>
+  </header>
+
+  <!-- Open overlay menu with autofocused "Search languages" input -->
+  <div id="lang-menu" role="menu" aria-label="Languages menu">
+    <input id="lang-search" type="search" placeholder="Search languages" aria-label="Search languages" autofocus>
+  </div>
+
+  <main>
+    <div id="search-results" aria-live="polite"></div>
+
+    <section aria-label="Data Table">
+      <h2>Quarterly Table</h2>
+      <input id="table-filter" type="search" placeholder="Filter table rows" aria-label="Filter table rows">
+      <table id="data-table"><tr><td>Alpha</td></tr><tr><td>Beta</td></tr></table>
+    </section>
+
+    <section class="comments-section" aria-label="Comments">
+      <h2>Comments</h2>
+      <input id="comment-box" type="search" placeholder="Search or write a comment..." aria-label="Write a comment">
+    </section>
+  </main>
+
+  <script>
+    document.getElementById('main-search-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const val = document.getElementById('header-search').value;
+      document.getElementById('search-results').textContent = 'HEADER_SEARCH:' + val;
+    });
+    document.getElementById('lang-search').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('search-results').textContent = 'LANG_SEARCH:' + e.target.value;
+      }
+    });
+    document.getElementById('table-filter').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('search-results').textContent = 'TABLE_FILTER:' + e.target.value;
+      }
+    });
+    // Simulate autofocus on overlay menu input
+    document.getElementById('lang-search').focus();
+  </script>
+</body>
+</html>
